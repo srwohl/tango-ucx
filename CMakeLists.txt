@@ -19,6 +19,7 @@ set(TANGO_BULK_SANITIZERS "" CACHE STRING "Comma-separated -fsanitize list")
 find_package(Threads REQUIRED)
 find_package(ucx 1.21 CONFIG REQUIRED)
 find_package(nlohmann_json 3.12 CONFIG REQUIRED)
+find_package(Tango CONFIG REQUIRED)
 if(BUILD_TESTING)
     find_package(Catch2 3 CONFIG REQUIRED)
 endif()
@@ -29,11 +30,12 @@ if(TANGO_BULK_SANITIZERS)
 endif()
 
 add_subdirectory(src/transport)
+add_subdirectory(src/tango)
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
 
-install(TARGETS tango-bulk-transport EXPORT tango-bulk-targets)
+install(TARGETS tango-bulk-transport tango-bulk EXPORT tango-bulk-targets)
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
     FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
 install(EXPORT tango-bulk-targets NAMESPACE tango-bulk::

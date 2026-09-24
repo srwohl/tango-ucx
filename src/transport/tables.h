@@ -7,6 +7,8 @@
 #include "ucx.h"
 #include "wire.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <condition_variable>
@@ -16,6 +18,7 @@
 #include <mutex>
 #include <random>
 #include <span>
+#include <string_view>
 #include <sys/eventfd.h>
 #include <thread>
 #include <unistd.h>
@@ -122,20 +125,35 @@ struct IndexRing
     }
 };
 
-struct HealthCopyBase
+// The loop writes a fixed copy and never waits on a thread reading it.
+template <class T> struct HealthCopy
 {
     mutable std::mutex m;
-    Health value;
-    void write(const Health &h)
+    T value{};
+    void write(const T &t)
     {
         std::unique_lock l(m, std::try_to_lock);
         if(l)
-            value = h;
+            value = t;
     }
-    Health read() const
+    T read() const
     {
         std::lock_guard l(m);
         return value;
+    }
+};
+template <std::size_t N> struct Text
+{
+    std::array<char, N> c{};
+    std::uint8_t n = 0;
+    void set(std::string_view s)
+    {
+        n = std::uint8_t(std::min(s.size(), N));
+        std::memcpy(c.data(), s.data(), n);
+    }
+    std::string_view view() const
+    {
+        return {c.data(), n};
     }
 };
 struct Owner

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include <catch2/catch_test_macros.hpp>
+#include <transport.h>
 #include <wire.h>
 
 #include <algorithm>
@@ -164,6 +165,54 @@ TEST_CASE("malformed control documents are refused")
     CHECK_FALSE(
         wire::parse(R"({"interface":"tango-bulk-reply/3.0","status":"ok","address":"7"})", reply));
     CHECK_FALSE(wire::parse(R"({"interface":"tango-bulk-open/3.0","status":"ok"})", reply));
+}
+
+TEST_CASE("the BulkStream document matches its golden JSON and refuses what it cannot describe")
+{
+    wire::StreamMessage m{12648430, {Element::U16, {2048, 1024}, 16, "[('t','<f8')]"}, true, 8};
+    auto doc = wire::format(m);
+    CHECK(doc == R"({"interface":"tango-bulk-stream/3.0","incarnation":12648430,"element":"u16",)"
+                 R"("shape":[2048,1024],"field_bytes":16,"field_dtype":"[('t','<f8')]",)"
+                 R"("allow_every":true,"max_sessions":8})");
+    auto offer = transport::parse_bulk_stream(replace(doc, "3.0", "3.2"));
+    CHECK(offer.incarnation == 12648430);
+    CHECK(offer.description.element == Element::U16);
+    CHECK(offer.description.shape == std::vector<std::uint64_t>{2048, 1024});
+    CHECK(offer.description.field_bytes == 16);
+    CHECK(offer.description.field_dtype == "[('t','<f8')]");
+    CHECK((offer.limits.allow_every && offer.limits.max_sessions == 8));
+    auto status = [](const std::string &d)
+    {
+        wire::StreamMessage back;
+        return wire::parse(d, back);
+    };
+    CHECK(status(replace(doc, "3.0", "4.0")) == wire::Version);
+    CHECK_THROWS(transport::parse_bulk_stream(replace(doc, "3.0", "4.0")));
+    for(auto key :
+        {"incarnation", "element", "field_bytes", "field_dtype", "allow_every", "max_sessions"})
+        CHECK(status(without(doc, key)) == wire::Malformed);
+    for(auto [from, to] : std::initializer_list<std::pair<const char *, const char *>>{
+            {"u16", "u12"},
+            {R"("shape":[2048,1024],)", ""},
+            {"[2048,1024]", "[]"},
+            {"[2048,1024]", "[2048,0]"},
+            {"[2048,1024]", "[1,1,1,1,1,1,1,1,1]"},
+            {"[2048,1024]", "2048"},
+            {R"("field_bytes":16)", R"("field_bytes":1025)"},
+            {R"("max_sessions":8)", R"("max_sessions":0)"},
+            {R"("max_sessions":8)", R"("max_sessions":65)"},
+            {"tango-bulk-stream", "tango-bulk-open"}})
+        CHECK(status(replace(doc, from, to)) == wire::Malformed);
+}
+
+TEST_CASE("a bulk command marker names its major version")
+{
+    CHECK(transport::marker_major(wire::k_open_marker) == wire::k_major);
+    CHECK(transport::marker_major(wire::k_close_marker) == wire::k_major);
+    CHECK(transport::marker_major("tango-bulk/12 open") == 12);
+    for(auto other : {"tango-bulk/3 renew", "tango-bulk/x open", "tango-bulk/3", "tango-bulk/ open",
+                      "tango-bulk/300 open", "DevString", ""})
+        CHECK(transport::marker_major(other) == -1);
 }
 
 TEST_CASE("data-plane structs match their golden bytes")

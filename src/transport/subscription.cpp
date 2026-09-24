@@ -437,11 +437,16 @@ void Sub::decide(std::int64_t now)
 {
     if(outcome.load())
         return;
-    bool drained = receiving == 0 && rings->bit_count(rings->landed) == 0;
+    // Only the next sequence matters: a frame landed beyond a missing one must not hold off
+    // the End grace.
+    bool drained = receiving == 0 && !rings->bit_test(rings->landed, assembled % plan.D);
     if(has_end)
     {
         if(end.reason != wire::FinishedReason && drained)
         {
+            fail(end.reason == wire::Evicted    ? "evicted: the publisher ended the session"
+                 : end.reason == wire::Protocol ? "the publisher ended the session: protocol"
+                                                : "the publisher closed");
             outcome.store(int(TangoBulk::Outcome::Failed));
             queue.signal();
             return;
@@ -677,6 +682,8 @@ std::string PendingSubscription::open_message() const
     m.depth = s.plan.D;
     m.batch = s.plan.batch;
     m.every = s.every;
+    if(s.options.max_rate > 0)
+        m.min_interval_ns = std::uint64_t(std::min(1e9 / s.options.max_rate, 9.2e18));
     m.gpu = false;
     m.label_bytes = std::uint8_t(s.options.label.size());
     std::memcpy(m.label.data(), s.options.label.data(), m.label_bytes);

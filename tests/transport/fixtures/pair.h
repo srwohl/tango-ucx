@@ -18,6 +18,22 @@ inline auto deadline(std::chrono::seconds n = std::chrono::seconds(5))
 {
     return std::chrono::steady_clock::now() + n;
 }
+// Health and BulkSessions are sampled every 256 loop turns: poll until `done` or the deadline.
+template <class Done> bool eventually(Done done, std::chrono::seconds s = std::chrono::seconds(10))
+{
+    for(auto until = deadline(s); !done();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5)))
+        if(std::chrono::steady_clock::now() > until)
+            return done();
+    return true;
+}
+// A numeric field of the first BulkSessions row, such as "room"; ~0 when there is no row.
+inline std::uint64_t first_row(const Publisher &publisher, std::string_view key)
+{
+    auto rows = transport::session_rows(publisher);
+    auto at = rows.empty() ? std::string::npos : rows[0].find("|" + std::string(key) + "=");
+    return at == std::string::npos ? ~0ull : std::stoull(rows[0].substr(at + key.size() + 2));
+}
 inline Description small_description()
 {
     return {Element::U8, {128}, 8, "u1"};
@@ -38,6 +54,11 @@ inline SubscriptionOptions small_options()
     o.max_wait = std::chrono::microseconds(100);
     return o;
 }
+// What a subscriber learns from the BulkStream attribute.
+inline transport::Offer offer_of(const Publisher &publisher)
+{
+    return transport::parse_bulk_stream(transport::bulk_stream(publisher));
+}
 inline transport::Closer closer_for(Publisher &publisher)
 {
     return [&publisher](std::string_view doc, Deadline)
@@ -50,7 +71,7 @@ inline Subscription subscribe(Publisher &publisher, bool every,
                               SubscriptionOptions options = small_options(),
                               transport::Closer closer = {})
 {
-    auto pending = transport::prepare(transport::offer(publisher), every, std::move(options));
+    auto pending = transport::prepare(offer_of(publisher), every, std::move(options));
     auto open = pending.open_message();
     auto reply = transport::handle(publisher, open);
     if(!closer)

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <format>
 #include <stdexcept>
 #include <utility>
 
@@ -20,12 +21,16 @@ struct SourceSlot
 struct PubRow
 {
     Pub *pub = nullptr;
-    std::uint8_t ordinal = 0;
+    std::uint8_t row = 0;
+    std::uint32_t ordinal = 0;
     ucp_ep_h ep = nullptr;
-    std::uint64_t id = 0, first_grant = 0, sent = 0, credited = 0;
+    std::uint64_t id = 0, first_grant = 0, sent = 0, credited = 0, skipped = 0;
     std::uint32_t depth = 0, in_flight = 0, reserved = 0;
-    bool used = false, ready = false, closing = false, end_due = false, end_sent = false,
-         failed = false;
+    std::int64_t min_interval_ns = 0, last_send_ns = 0, blocked_since_ns = 0;
+    std::int64_t transfer_max_ns = 0, transfer_sum_ns = 0;
+    Text<64> label, transport;
+    bool used = false, ready = false, every = false, closing = false, end_due = false,
+         end_sent = false, failed = false;
     bool flush_started = false, flush_done = false, close_started = false, close_done = false,
          forced = false;
     wire::Reason reason = wire::FinishedReason;
@@ -40,6 +45,21 @@ struct OpMeta
     std::uint8_t kind = 0;
     bool in_flight = false;
     std::int64_t sent_ns = 0;
+};
+struct RowObservation
+{
+    std::uint32_t ordinal = 0, depth = 0, room = 0;
+    bool every = false, retiring = false;
+    std::uint64_t sent = 0, skipped = 0;
+    std::int64_t transfer_max_ns = 0, transfer_mean_ns = 0;
+    Text<64> label, transport;
+};
+struct Observation
+{
+    std::uint64_t frames = 0, skipped = 0;
+    std::uint32_t failed_every = 0, pressure_from = 0, slots_free = 0, slots_held = 0, count = 0;
+    bool memory_hooks = true;
+    std::array<RowObservation, 64> rows{};
 };
 struct Pub final : Owner, std::enable_shared_from_this<Pub>
 {
@@ -56,11 +76,11 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::array<PubRow, 64> rows{};
     std::uint64_t ready_mask = 0, every_mask = 0, retiring_mask = 0;
     std::uint64_t issued = 0, routed = 0, index = 0, skipped = 0, turn = 0;
-    std::uint32_t scan = 0, failed_every = 0, blocked = 0;
+    std::uint32_t scan = 0, failed_every = 0, blocked = 0, ordinals = 0;
     std::uint32_t req = 0;
     IndexRing grants;
     ControlTable control;
-    HealthCopyBase health_copy;
+    HealthCopy<Observation> health_copy;
     std::jthread loop;
     std::atomic<bool> finishing{false}, stopping{false};
     bool ended = false, quarantined = false, setup_ok = false;
@@ -85,6 +105,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     bool route_pass(std::int64_t);
     bool grant_pass();
     bool retire_pass(std::int64_t);
+    void timer_pass(std::int64_t);
     void publish_health();
     void retire(std::uint32_t, wire::Reason, bool failed = false);
     void send_ready(std::uint32_t);
@@ -118,7 +139,7 @@ void ep_error(void *arg, ucp_ep_h, ucs_status_t)
 {
     auto *r = static_cast<PubRow *>(arg);
     if(r && r->pub)
-        r->pub->retire(r->ordinal, wire::Closing, true);
+        r->pub->retire(r->row, wire::Closing, true);
 }
 ucs_status_t on_credit(void *arg, const void *h, size_t n, void *, size_t,
                        const ucp_am_recv_param_t *)
@@ -133,12 +154,10 @@ ucs_status_t on_credit(void *arg, const void *h, size_t n, void *, size_t,
     auto &row = p->rows[r];
     if(!row.ready || row.closing)
         return UCS_OK;
-    if(m.credit > row.sent || m.credit < row.credited)
-    {
+    if(m.credit > row.sent)
         p->retire(r, wire::Protocol, true);
-        return UCS_OK;
-    }
-    row.credited = m.credit;
+    else
+        row.credited = std::max(row.credited, m.credit); // a Credit overtaken by a later one
     return UCS_OK;
 }
 } // namespace
@@ -192,7 +211,7 @@ void Pub::setup()
     for(std::uint32_t r = 0; r < plan.M; ++r)
     {
         rows[r].pub = this;
-        rows[r].ordinal = r;
+        rows[r].row = std::uint8_t(r);
         for(unsigned c = 0; c < 4; ++c)
         {
             auto *o = ctrl_op(r, c);
@@ -238,7 +257,7 @@ void Pub::run()
         work |= grant_pass();
         work |= retire_pass(now);
         if(++turn % 256 == 0)
-            publish_health();
+            timer_pass(now);
         idle = work ? 0 : idle + 1;
         if(idle > 64)
         {
@@ -363,6 +382,7 @@ void Pub::send_frame(std::uint32_t k, std::uint32_t r, std::int64_t now)
     }
     o.sent_ns = now;
     o.in_flight = true;
+    row.last_send_ns = now;
     ++row.sent;
     ++row.in_flight;
     ++slots[k].sends;
@@ -393,6 +413,9 @@ void Pub::on_send(OpMeta *o, ucs_status_t st)
         --row.in_flight;
     if(k < plan.S && slots[k].sends)
         --slots[k].sends;
+    auto t = now_ns() - o->sent_ns;
+    row.transfer_max_ns = std::max(row.transfer_max_ns, t);
+    row.transfer_sum_ns += t;
     if(st != UCS_OK && st != UCS_ERR_CANCELED)
         retire(r, st == UCS_ERR_REJECTED ? wire::Protocol : wire::Closing, true);
 }
@@ -501,10 +524,15 @@ bool Pub::control_pass()
             auto &row = rows[r];
             row = PubRow{};
             row.pub = this;
-            row.ordinal = std::uint8_t(r);
+            row.row = std::uint8_t(r);
+            row.ordinal = ++ordinals;
             row.used = true;
+            row.every = m.every;
             row.depth = m.depth;
             row.id = m.session;
+            row.min_interval_ns =
+                std::int64_t(std::min<std::uint64_t>(m.min_interval_ns, INT64_MAX));
+            row.label.set({m.label.data(), m.label_bytes});
             try
             {
                 row.ep = worker->endpoint({m.address.data(), m.address_bytes}, &row, ep_error);
@@ -517,7 +545,9 @@ bool Pub::control_pass()
             }
             // The subscriber registered its rings and handlers before Open: it is ready now.
             row.ready = true;
+            // Grants already issued reserved no room in this row, so none of them reach it.
             row.first_grant = issued;
+            row.transport.n = std::uint8_t(worker->transports(row.ep, row.transport.c));
             ready_mask |= std::uint64_t{1} << r;
             if(m.every)
                 every_mask |= std::uint64_t{1} << r;
@@ -576,17 +606,17 @@ bool Pub::route_pass(std::int64_t now)
                     if(g >= row.first_grant)
                         to |= bit;
                 }
-                else if(row.sent - row.credited < row.depth && row.in_flight == 0)
+                else if(row.sent - row.credited < row.depth && row.in_flight == 0 &&
+                        now - row.last_send_ns >= row.min_interval_ns)
                     to |= bit;
             }
-            bool any = false;
             for(std::uint32_t r = 0; r < plan.M; ++r)
             {
                 auto bit = std::uint64_t{1} << r;
                 if(ready_mask & bit && !(every_mask & bit) && !(to & bit))
                 {
                     ++skipped;
-                    any = true;
+                    ++rows[r].skipped;
                 }
             }
             for(std::uint32_t r = 0; r < plan.M; ++r)
@@ -759,24 +789,53 @@ bool Pub::retire_pass(std::int64_t now)
     }
     return work;
 }
+// Eviction counts only while the device waits for a grant, so an idle device evicts nobody.
+void Pub::timer_pass(std::int64_t now)
+{
+    bool waiting = grants.empty();
+    auto timeout = std::chrono::nanoseconds(limits.pressure_timeout).count();
+    for(std::uint32_t r = 0; r < plan.M; ++r)
+    {
+        auto &row = rows[r];
+        bool blocking = waiting && (ready_mask & every_mask) >> r & 1 &&
+                        row.sent + row.reserved - row.credited >= row.depth;
+        if(!blocking)
+            row.blocked_since_ns = 0;
+        else if(!row.blocked_since_ns)
+            row.blocked_since_ns = now;
+        else if(timeout && now - row.blocked_since_ns > timeout)
+            retire(r, wire::Evicted, true);
+    }
+    publish_health();
+}
 void Pub::publish_health()
 {
-    Health h{};
-    h.frames = index;
-    h.skipped = skipped;
-    h.every = std::popcount(ready_mask & every_mask);
-    h.latest = std::popcount(ready_mask & ~every_mask);
-    h.failed_every = failed_every;
-    h.pressure = blocked != 0;
-    h.pressure_from = blocked ? blocked - 1 : 0;
-    h.slots_free = 0;
+    Observation o;
+    o.frames = index;
+    o.skipped = skipped;
+    o.failed_every = failed_every;
+    o.pressure_from = grants.empty() && blocked ? rows[blocked - 1].ordinal : 0;
     for(std::uint32_t k = 0; k < plan.S; ++k)
-        if(!slots[k].held && slots[k].sends == 0)
-            ++h.slots_free;
-    h.slots_held = plan.S - h.slots_free;
-    h.quarantined_bytes = quarantine().total.load();
-    h.memory_hooks = context->memory_hooks();
-    health_copy.write(h);
+    {
+        o.slots_free += !slots[k].held && slots[k].sends == 0;
+        o.slots_held += slots[k].held;
+    }
+    o.memory_hooks = context->memory_hooks();
+    for(const auto &w : rows)
+        if(w.used)
+            o.rows[o.count++] = {
+                w.ordinal,
+                w.depth,
+                std::uint32_t(w.depth - std::min<std::uint64_t>(w.depth, w.sent - w.credited)),
+                w.every,
+                w.closing,
+                w.sent,
+                w.skipped,
+                w.transfer_max_ns,
+                w.sent ? w.transfer_sum_ns / std::int64_t(w.sent) : 0,
+                w.label,
+                w.transport};
+    health_copy.write(o);
 }
 void Pub::quarantine_owner()
 {
@@ -791,7 +850,10 @@ void Pub::shutdown()
     auto now = now_ns();
     for(std::uint32_t r = 0; r < plan.M; ++r)
         if(rows[r].used && !rows[r].closing)
+        {
             retire(r, wire::Closing, false);
+            rows[r].end_due = true; // the subscriber learns why its session ended
+        }
     auto deadline = now + k_close_ns + k_quarantine_ns;
     while(now_ns() < deadline)
     {
@@ -912,7 +974,26 @@ Health Publisher::health() const
 {
     if(!p_)
         return {};
-    return p_->health_copy.read();
+    auto o = p_->health_copy.read();
+    Health h{.frames = o.frames,
+             .skipped = o.skipped,
+             .failed_every = o.failed_every,
+             .pressure = o.pressure_from != 0,
+             .pressure_from = o.pressure_from,
+             .slots_free = o.slots_free,
+             .slots_held = o.slots_held,
+             .quarantined_bytes = transport::quarantine().total.load(),
+             .memory_hooks = o.memory_hooks};
+    for(const auto &w : std::span(o.rows).first(o.count))
+    {
+        if(!w.retiring)
+            ++(w.every ? h.every : h.latest);
+        h.transfer_max_ns = std::max<std::uint64_t>(h.transfer_max_ns, w.transfer_max_ns);
+        h.transfer_mean_ns = std::max<std::uint64_t>(h.transfer_mean_ns, w.transfer_mean_ns);
+        if(w.transport.n && h.transport.find(w.transport.view()) == std::string::npos)
+            h.transport += (h.transport.empty() ? "" : ";") + std::string(w.transport.view());
+    }
+    return h;
 }
 const Description &Publisher::description() const
 {
@@ -933,10 +1014,25 @@ std::string handle(Publisher &p, std::string_view document)
     return wire::format(
         p.p_->control.call(request, std::chrono::steady_clock::now() + std::chrono::seconds(3)));
 }
-Offer offer(const Publisher &p)
+std::string bulk_stream(const Publisher &p)
 {
     if(!p.p_)
         throw std::logic_error("moved publisher");
-    return {p.p_->description, p.p_->limits, p.p_->incarnation};
+    return wire::format(wire::StreamMessage{p.p_->incarnation, p.p_->description,
+                                            p.p_->limits.allow_every, p.p_->limits.max_sessions});
+}
+std::vector<std::string> session_rows(const Publisher &p)
+{
+    std::vector<std::string> out;
+    if(!p.p_)
+        return out;
+    auto o = p.p_->health_copy.read();
+    for(const auto &w : std::span(o.rows).first(o.count))
+        out.push_back(std::format("{}|{}|{}|{}|depth={}|room={}|sent={}|skipped={}|"
+                                  "transfer_max_us={}|{}",
+                                  w.ordinal, w.label.view(), w.every ? "every" : "latest",
+                                  w.retiring ? "retiring" : "ready", w.depth, w.room, w.sent,
+                                  w.skipped, w.transfer_max_ns / 1000, w.transport.view()));
+    return out;
 }
 } // namespace TangoBulk::transport

@@ -17,6 +17,9 @@ inline constexpr std::uint8_t k_minor = 0;
 inline constexpr std::size_t k_max_document = 16 * 1024;
 inline constexpr std::size_t k_max_address = 4096;
 inline constexpr std::size_t k_max_label = 64;
+// The bulk commands' type descriptions; a client finds the commands by them.
+inline constexpr const char *k_open_marker = "tango-bulk/3 open";
+inline constexpr const char *k_close_marker = "tango-bulk/3 close";
 // Data-plane messages; the value is the UCX active-message id.
 enum Type : std::uint8_t
 {
@@ -74,12 +77,22 @@ struct Reply
     std::array<std::byte, k_max_address> address{};
     std::uint16_t address_bytes = 0;
 };
+// The BulkStream attribute: what every frame of this incarnation is.
+struct StreamMessage
+{
+    std::uint64_t incarnation = 0;
+    Description description;
+    bool allow_every = false;
+    std::uint32_t max_sessions = 0;
+};
 
 std::string format(const OpenMessage &);
 std::string format(const CloseMessage &);
 std::string format(const Reply &);
+std::string format(const StreamMessage &);
 Status parse(std::string_view, Request &);
 bool parse(std::string_view, Reply &);
+Status parse(std::string_view, StreamMessage &);
 std::string_view status_name(Status);
 
 // Data plane: fixed little-endian structs; the active-message id is the type.

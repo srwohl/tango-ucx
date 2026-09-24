@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "wire.h"
+#include "transport.h"
 
 #include <nlohmann/json.hpp>
 
@@ -8,6 +9,7 @@
 #include <charconv>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 
 namespace TangoBulk::wire
 {
@@ -15,7 +17,9 @@ namespace
 {
 using json = nlohmann::ordered_json;
 constexpr std::string_view k_open = "tango-bulk-open", k_close = "tango-bulk-close",
-                           k_reply = "tango-bulk-reply";
+                           k_reply = "tango-bulk-reply", k_stream = "tango-bulk-stream";
+constexpr std::array<std::string_view, 11> k_element_names{
+    "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bytes"};
 constexpr std::array<std::string_view, 11> k_status_names{
     "ok",       "malformed", "version",         "incarnation", "every-refused", "no-session",
     "endpoint", "finished",  "unknown-session", "busy",        "timeout"};
@@ -170,6 +174,50 @@ std::string format(const Reply &r)
         j["address"] = hex({r.address.data(), r.address_bytes});
     return dump(j);
 }
+std::string format(const StreamMessage &m)
+{
+    const auto &d = m.description;
+    return dump({{"interface", interface(k_stream)},
+                 {"incarnation", m.incarnation},
+                 {"element", k_element_names.at(std::size_t(d.element))},
+                 {"shape", d.shape},
+                 {"field_bytes", d.field_bytes},
+                 {"field_dtype", d.field_dtype},
+                 {"allow_every", m.allow_every},
+                 {"max_sessions", m.max_sessions}});
+}
+Status parse(std::string_view doc, StreamMessage &m)
+{
+    auto j = parse_json(doc);
+    std::string_view name, element, dtype;
+    if(auto st = check_interface(j, name); st != Ok)
+        return st;
+    m = {};
+    std::uint64_t field_bytes = 0, sessions = 0;
+    auto shape = j.find("shape");
+    bool ok =
+        name == k_stream &&
+        unsigned_key(j, "incarnation", std::numeric_limits<std::uint64_t>::max(), m.incarnation) &&
+        string_key(j, "element", 8, element) && unsigned_key(j, "field_bytes", 1024, field_bytes) &&
+        string_key(j, "field_dtype", k_max_document, dtype) &&
+        bool_key(j, "allow_every", m.allow_every) &&
+        unsigned_key(j, "max_sessions", 64, sessions) && sessions && shape != j.end() &&
+        shape->is_array() && !shape->empty() && shape->size() <= 8;
+    auto e = std::find(k_element_names.begin(), k_element_names.end(), element);
+    if(!ok || e == k_element_names.end())
+        return Malformed;
+    for(const auto &extent : *shape)
+    {
+        if(!extent.is_number_unsigned() || extent.get<std::uint64_t>() == 0)
+            return Malformed;
+        m.description.shape.push_back(extent.get<std::uint64_t>());
+    }
+    m.description.element = Element(e - k_element_names.begin());
+    m.description.field_bytes = std::uint32_t(field_bytes);
+    m.description.field_dtype = dtype;
+    m.max_sessions = std::uint32_t(sessions);
+    return Ok;
+}
 Status parse(std::string_view doc, Request &r)
 {
     auto j = parse_json(doc);
@@ -291,3 +339,34 @@ bool decode(std::span<const std::byte> b, EndMessage &m)
     return true;
 }
 } // namespace TangoBulk::wire
+
+namespace TangoBulk::transport
+{
+int marker_major(std::string_view description)
+{
+    constexpr std::string_view prefix = "tango-bulk/";
+    if(!description.starts_with(prefix))
+        return -1;
+    description.remove_prefix(prefix.size());
+    auto space = description.find(' ');
+    unsigned major = 0;
+    if(space == description.npos || !wire::number(description.substr(0, space), major) ||
+       major > 255)
+        return -1;
+    auto role = description.substr(space + 1);
+    return role == "open" || role == "close" ? int(major) : -1;
+}
+Offer parse_bulk_stream(std::string_view document)
+{
+    wire::StreamMessage m;
+    auto status = wire::parse(document, m);
+    if(status != wire::Ok)
+        throw std::runtime_error(status == wire::Version
+                                     ? "BulkStream speaks another tango-bulk major version"
+                                     : "BulkStream is not a valid tango-bulk-stream document");
+    Offer offer{std::move(m.description), {}, m.incarnation};
+    offer.limits.allow_every = m.allow_every;
+    offer.limits.max_sessions = m.max_sessions;
+    return offer;
+}
+} // namespace TangoBulk::transport
