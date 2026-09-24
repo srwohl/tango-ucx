@@ -1,0 +1,11 @@
+{
+    // pixi configures build/ and writes compile_commands.json there; clangd asks pixi's compiler
+    // for its own include paths, so the standard library and UCX headers match the build.
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/build",
+        "--query-driver=${workspaceFolder}/.pixi/envs/*/bin/*"
+    ],
+    // CMake Tools would configure build/ with the system compiler and replace pixi's cache.
+    "cmake.configureOnOpen": false,
+    "cmake.automaticReconfigure": false
+}

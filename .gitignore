@@ -1,0 +1,20 @@
+# Build trees: build/ from pixi run build, build-asan/ from pixi run test-asan.
+/build/
+/build-*/
+/compile_commands.json
+/CMakeUserPresets.json
+
+# pixi environments; pixi.lock is tracked.
+/.pixi/
+/pixi.lock.bak
+
+# Python (phase 2).
+__pycache__/
+*.py[cod]
+/.pytest_cache/
+*.egg-info/
+
+# Editors: clangd's index, and VS Code files other than the shared settings.
+/.cache/
+/.vscode/*
+!/.vscode/settings.json

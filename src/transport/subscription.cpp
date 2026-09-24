@@ -1,0 +1,803 @@
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-License-Identifier: LGPL-3.0-or-later
+#include "tables.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <stdexcept>
+
+namespace TangoBulk::transport
+{
+namespace
+{
+constexpr std::int64_t k_end_grace_ns = 2'000'000'000LL, k_quarantine_ns = 1'000'000'000LL;
+std::int64_t now_ns()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+std::int64_t deadline_ns(Deadline d)
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(d.time_since_epoch()).count();
+}
+std::string status_text(wire::Status s)
+{
+    switch(s)
+    {
+        case wire::Incarnation:
+            return "publisher incarnation changed";
+        case wire::EveryRefused:
+            return "publisher refuses every";
+        case wire::NoSession:
+            return "publisher has no free session row";
+        case wire::Endpoint:
+            return "publisher could not create endpoint";
+        case wire::Finished:
+            return "publisher has finished";
+        case wire::Busy:
+            return "publisher is busy";
+        case wire::Version:
+            return "publisher speaks another protocol major";
+        case wire::Timeout:
+            return "publisher did not answer in time";
+        default:
+            return "malformed or refused control message";
+    }
+}
+void send_cb(void *, ucs_status_t st, void *arg)
+{
+    auto *o = static_cast<SubOpMeta *>(arg);
+    static_cast<Sub *>(o->owner)->on_ctrl(o, st);
+}
+void recv_cb(void *, ucs_status_t st, size_t, void *arg)
+{
+    auto *o = static_cast<SubOpMeta *>(arg);
+    static_cast<Sub *>(o->owner)->on_recv(o, st);
+}
+void ep_error(void *arg, ucp_ep_h, ucs_status_t)
+{
+    auto *s = static_cast<Sub *>(arg);
+    if(!s->stop.load())
+        s->fail("the publisher is unreachable");
+}
+ucs_status_t on_frame(void *arg, const void *h, size_t hn, void *data, size_t n,
+                      const ucp_am_recv_param_t *param)
+{
+    auto *s = static_cast<Sub *>(arg);
+    if(s->stop.load(std::memory_order_acquire))
+        return UCS_OK;
+    auto rndv = (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV) != 0;
+    wire::FrameMessage f;
+    if(!wire::decode({static_cast<const std::byte *>(h), hn}, s->plan.sizes.padded_fields, f) ||
+       f.session != s->session || f.payload_bytes != s->plan.sizes.frame_bytes ||
+       n != s->plan.sizes.frame_bytes || f.sequence < s->credited ||
+       f.sequence >= s->credited + s->plan.D ||
+       s->rings->bit_test(s->rings->busy, f.sequence % s->plan.D))
+    {
+        s->fail("the publisher sent an invalid frame");
+        return rndv ? UCS_ERR_REJECTED : UCS_OK;
+    }
+    auto k = std::uint32_t(f.sequence % s->plan.D);
+    s->rings->bit_set(s->rings->busy, k);
+    auto *r = s->rings->record(k);
+    wire::put64(r, f.index);
+    wire::put64(r + 8, f.timestamp_ns);
+    std::memcpy(r + 16, f.record.data(), s->plan.sizes.padded_fields);
+    if(!rndv)
+    {
+        if(!data)
+        {
+            s->fail("an eager frame had no payload");
+            return UCS_OK;
+        }
+        std::memcpy(s->rings->payload + std::uint64_t(k) * s->plan.sizes.frame_bytes, data, n);
+        s->landed(k);
+        return UCS_OK;
+    }
+    auto *o = s->recv_op(k);
+    if(o->in_flight)
+    {
+        s->fail("a receive slot was reused while busy");
+        return UCS_ERR_REJECTED;
+    }
+    o->in_flight = true;
+    ++s->receiving;
+    ucp_request_param_t p{};
+    p.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
+                     UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMH |
+                     UCP_OP_ATTR_FIELD_MEMORY_TYPE;
+    p.request = o;
+    p.cb.recv_am = recv_cb;
+    p.user_data = o;
+    p.memh = s->receive.memh();
+    p.memory_type = UCS_MEMORY_TYPE_HOST;
+    auto *q = ucp_am_recv_data_nbx(s->worker->get(), data,
+                                   s->rings->payload + std::uint64_t(k) * s->plan.sizes.frame_bytes,
+                                   n, &p);
+    if(!UCS_PTR_IS_PTR(q))
+    {
+        s->on_recv(o, UCS_PTR_STATUS(q));
+        return UCS_OK;
+    }
+    return UCS_INPROGRESS;
+}
+ucs_status_t on_ready(void *arg, const void *h, size_t n, void *, size_t,
+                      const ucp_am_recv_param_t *)
+{
+    auto *s = static_cast<Sub *>(arg);
+    wire::SessionMessage m;
+    if(wire::decode({static_cast<const std::byte *>(h), n}, m) && m.session == s->session)
+        s->ready = true;
+    return UCS_OK;
+}
+ucs_status_t on_end(void *arg, const void *h, size_t n, void *, size_t, const ucp_am_recv_param_t *)
+{
+    auto *s = static_cast<Sub *>(arg);
+    wire::EndMessage m;
+    if(wire::decode({static_cast<const std::byte *>(h), n}, m) && m.session == s->session &&
+       !s->has_end)
+    {
+        s->end = m;
+        s->has_end = true;
+        s->end_at_ns = now_ns();
+    }
+    return UCS_OK;
+}
+} // namespace
+
+Sub::Sub(Offer o, bool e, SubscriptionOptions opts)
+    : offer(std::move(o)), options(std::move(opts)), every(e)
+{
+    reply_future = reply_promise.get_future();
+    started_result = started.get_future();
+}
+Sub::~Sub()
+{
+    if(loop.joinable())
+    {
+        stop = true;
+        close = true;
+        queue.signal();
+        loop.join();
+    }
+}
+void Sub::start_loop()
+{
+    loop = std::jthread([this] { run(); });
+}
+void Sub::setup()
+{
+    context = std::make_unique<ucx::Context>();
+    worker = std::make_unique<ucx::Worker>(*context);
+    req = context->request_bytes();
+    plan = plan_subscription(offer, every, options, req);
+    rings = std::make_shared<Rings>();
+    rings->plan = plan;
+    rings->description = offer.description;
+    auto storage = new std::byte[plan.payload_bytes];
+    rings->storage =
+        std::shared_ptr<void>(storage, [](void *p) { delete[] static_cast<std::byte *>(p); });
+    rings->payload = storage;
+    rings->records.resize(plan.records_bytes);
+    rings->batches.resize(plan.D);
+    rings->released.reserve(plan.D);
+    auto words = (plan.D + 63) / 64;
+    rings->busy.assign(words, 0);
+    rings->landed.assign(words, 0);
+    rings->returned.assign(words, 0);
+    receive = Region::adopt(context->get(), rings->storage, plan.payload_bytes);
+    recv_ops.resize(std::uint64_t(plan.D) * plan.op_stride);
+    ctrl_ops.resize(std::uint64_t(3) * plan.op_stride);
+    queue.reserve(plan.D);
+    for(std::uint32_t k = 0; k < plan.D; ++k)
+    {
+        auto *o = recv_op(k);
+        std::construct_at(o);
+        o->owner = this;
+        o->slot = k;
+        o->kind = 4;
+    }
+    for(unsigned k = 0; k < 3; ++k)
+    {
+        auto *o = ctrl_op(k);
+        std::construct_at(o);
+        o->owner = this;
+        o->slot = k;
+        o->kind = k;
+    }
+    do
+        session = random64();
+    while(!session);
+    auto a = worker->address();
+    own_address_bytes = std::uint16_t(a.size());
+    std::memcpy(own_address.data(), a.data(), a.size());
+    worker->set_am(wire::Frame, on_frame, this);
+    worker->set_am(wire::Ready, on_ready, this);
+    worker->set_am(wire::End, on_end, this);
+}
+void Sub::run()
+{
+    try
+    {
+        setup();
+        setup_done.set_value();
+    }
+    catch(...)
+    {
+        try
+        {
+            setup_done.set_exception(std::current_exception());
+        }
+        catch(...)
+        {
+        };
+        receive.unmap();
+        if(worker)
+            worker->destroy();
+        if(context)
+            context->destroy();
+        return;
+    }
+    unsigned idle = 0;
+    while(!close.load(std::memory_order_acquire))
+    {
+        auto now = now_ns();
+        bool work = false;
+        if(start_requested.load(std::memory_order_acquire) && !begun)
+        {
+            open_reply = reply_future.get();
+            begin();
+            begun = true;
+            work = true;
+        }
+        if(worker)
+            work |= worker->progress() != 0;
+        if(begun && !started_sent)
+        {
+            if(ready)
+            {
+                started.set_value("");
+                started_sent = true;
+                transport_bytes = std::uint8_t(worker->transports(ep, transport));
+                work = true;
+            }
+            else if(failed || std::chrono::steady_clock::now() >= start_by)
+            {
+                if(!failed)
+                    fail("no Ready from the publisher before the deadline");
+                started.set_value(std::string(failure.data()));
+                started_sent = true;
+                work = true;
+            }
+        }
+        if(begun)
+        {
+            release_pass();
+            work |= assemble(now);
+            credit_pass();
+            decide(now);
+            publish_health();
+        }
+        quiet_turns = work ? 0 : quiet_turns + 1;
+        idle = work ? 0 : idle + 1;
+        if(idle > 64)
+        {
+            idle = 0;
+            std::this_thread::yield();
+        }
+    }
+    finish_close();
+}
+void Sub::begin()
+{
+    try
+    {
+        ep =
+            worker->endpoint({open_reply.address.data(), open_reply.address_bytes}, this, ep_error);
+    }
+    catch(...)
+    {
+        fail("could not create an endpoint to the publisher");
+    }
+}
+SubOpMeta *Sub::recv_op(std::uint32_t k)
+{
+    return reinterpret_cast<SubOpMeta *>(recv_ops.data() + std::uint64_t(k) * plan.op_stride + req);
+}
+SubOpMeta *Sub::ctrl_op(unsigned k)
+{
+    return reinterpret_cast<SubOpMeta *>(ctrl_ops.data() + std::uint64_t(k) * plan.op_stride + req);
+}
+std::byte *Sub::req_ptr(SubOpMeta *o)
+{
+    return reinterpret_cast<std::byte *>(o);
+}
+void Sub::send_credit(std::uint64_t credit)
+{
+    auto *o = ctrl_op(0);
+    if(!ep || o->in_flight)
+        return;
+    credit_header = wire::encode(wire::CreditMessage{session, credit});
+    o->kind = 0;
+    o->in_flight = true;
+    ucp_request_param_t p{};
+    p.op_attr_mask =
+        UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
+    p.request = o;
+    p.cb.send = send_cb;
+    p.user_data = o;
+    auto *q = ucp_am_send_nbx(ep, wire::Credit, credit_header.data(), credit_header.size(), nullptr,
+                              0, &p);
+    if(!UCS_PTR_IS_PTR(q))
+        on_ctrl(o, UCS_PTR_STATUS(q));
+}
+void Sub::on_recv(SubOpMeta *o, ucs_status_t st)
+{
+    if(!o->in_flight)
+        return;
+    o->in_flight = false;
+    if(receiving)
+        --receiving;
+    if(st == UCS_OK)
+        landed(o->slot);
+    else if(!stop.load())
+        fail("a frame transfer failed");
+}
+void Sub::on_ctrl(SubOpMeta *o, ucs_status_t st)
+{
+    if(!o->in_flight)
+        return;
+    o->in_flight = false;
+    if(o->kind == 0)
+    {
+        if(st != UCS_OK && !stop.load())
+            fail("Credit could not be sent");
+        return;
+    }
+    if(o->kind == 1)
+    {
+        if(st != UCS_OK)
+            fenced = false;
+        flush_done = true;
+        return;
+    }
+    if(o->kind == 2)
+    {
+        close_done = true;
+        ep = nullptr;
+        return;
+    }
+}
+void Sub::fail(std::string_view why)
+{
+    if(failed)
+        return;
+    failed = true;
+    auto n = std::min(why.size(), failure.size() - 1);
+    std::memcpy(failure.data(), why.data(), n);
+    failure[n] = 0;
+}
+void Sub::landed(std::uint32_t k)
+{
+    rings->bit_set(rings->landed, k);
+    last_landed_ns = now_ns();
+    if(!first_landed_ns)
+        first_landed_ns = last_landed_ns;
+}
+bool Sub::assemble(std::int64_t now)
+{
+    bool work = false;
+    auto bound = has_end ? end.sequences : UINT64_MAX;
+    for(;;)
+    {
+        if(assembled >= bound)
+            break;
+        auto k = std::uint32_t(assembled % plan.D);
+        auto cap = std::min<std::uint64_t>({plan.batch, plan.D - k, bound - assembled});
+        std::uint32_t n = 0;
+        while(n < cap && rings->bit_test(rings->landed, k + n))
+            ++n;
+        if(!n)
+            break;
+        if(n < cap && first_landed_ns && now - first_landed_ns < std::int64_t(plan.max_wait_ns) &&
+           !failed && !has_end)
+            break;
+        deliver(k, n);
+        work = true;
+    }
+    return work;
+}
+void Sub::deliver(std::uint32_t k, std::uint32_t n)
+{
+    auto &b = rings->batches[k];
+    b.first_sequence = assembled;
+    b.frames = n;
+    for(std::uint32_t i = 0; i < n; ++i)
+    {
+        rings->bit_clear(rings->landed, k + i);
+        auto idx = wire::get64(rings->record(k + i));
+        if(last_index != UINT64_MAX && idx > last_index + 1)
+        {
+            skipped += idx - last_index - 1;
+            gap = true;
+        }
+        last_index = idx;
+    }
+    assembled += n;
+    frames += n;
+    first_landed_ns = 0;
+    if(!every)
+        for(int old; (old = queue.try_pop()) >= 0;)
+            release_batch(old);
+    queue.push(k);
+}
+void Sub::decide(std::int64_t now)
+{
+    if(outcome.load())
+        return;
+    bool drained = receiving == 0 && rings->bit_count(rings->landed) == 0;
+    if(has_end)
+    {
+        if(end.reason != wire::FinishedReason && drained)
+        {
+            outcome.store(int(TangoBulk::Outcome::Failed));
+            queue.signal();
+            return;
+        }
+        if(assembled == end.sequences)
+        {
+            bool complete = !every || end.sequences == 0 || !gap;
+            outcome.store(int(complete ? TangoBulk::Outcome::End : TangoBulk::Outcome::Failed));
+            queue.signal();
+            return;
+        }
+        auto last = std::max(last_landed_ns, end_at_ns);
+        if(drained && quiet_turns > 64 && now - last > k_end_grace_ns)
+        {
+            fail("a sequence below End never arrived");
+            outcome.store(int(TangoBulk::Outcome::Failed));
+            queue.signal();
+            return;
+        }
+    }
+    if(failed && drained)
+    {
+        outcome.store(int(TangoBulk::Outcome::Failed));
+        queue.signal();
+    }
+}
+void Sub::release_batch(std::uint32_t k)
+{
+    if(k >= plan.D)
+        return;
+    auto row = rings->batches[k];
+    for(std::uint32_t i = 0; i < row.frames; ++i)
+        rings->bit_set(rings->returned, (row.first_sequence + i) % plan.D);
+    rings->batches[k].frames = 0;
+}
+void Sub::release_pass()
+{
+    for(int k; (k = rings->released.try_pop()) >= 0;)
+        release_batch(std::uint32_t(k));
+}
+void Sub::credit_pass()
+{
+    if(stop.load() || failed)
+        return;
+    auto c = credited;
+    while(c < assembled && rings->bit_test(rings->returned, c % plan.D))
+    {
+        rings->bit_clear(rings->returned, c % plan.D);
+        rings->bit_clear(rings->busy, c % plan.D);
+        ++c;
+    }
+    credited = c;
+    if(c > credit_sent && !ctrl_op(0)->in_flight)
+    {
+        credit_sent = c;
+        send_credit(c);
+    }
+}
+void Sub::publish_health()
+{
+    std::lock_guard l(health_mutex);
+    observation.frames = frames;
+    observation.skipped = skipped;
+    observation.last_index = last_index == UINT64_MAX ? 0 : last_index;
+    observation.slots_free = plan.D - rings->bit_count(rings->busy);
+    observation.slots_held = rings->bit_count(rings->busy);
+    observation.memory_hooks = context->memory_hooks();
+}
+void Sub::cancel_receives()
+{
+    for(std::uint32_t k = 0; k < plan.D; ++k)
+    {
+        auto *o = recv_op(k);
+        if(o->in_flight)
+            ucp_request_cancel(worker->get(), o);
+    }
+}
+void Sub::finish_close()
+{
+    if(!context || !worker)
+    {
+        if(!outcome.load())
+        {
+            outcome = int(TangoBulk::Outcome::Cancelled);
+            queue.signal();
+        }
+        return;
+    }
+    cancel_receives();
+    auto hard = std::max(deadline_ns(close_by), now_ns()) + k_quarantine_ns;
+    bool force = !fenced;
+    if(!ep)
+        close_done = true;
+    while(now_ns() < hard)
+    {
+        worker->progress();
+        release_pass();
+        if(receiving == 0 && ep && !close_started)
+        {
+            auto *o = ctrl_op(force ? 2 : 1);
+            if(!o->in_flight)
+            {
+                o->kind = force ? 2 : 1;
+                o->in_flight = true;
+                ucp_request_param_t p{};
+                p.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
+                                 UCP_OP_ATTR_FIELD_USER_DATA |
+                                 (force ? UCP_OP_ATTR_FIELD_FLAGS : 0);
+                p.request = o;
+                p.cb.send = send_cb;
+                p.user_data = o;
+                if(force)
+                {
+                    p.flags = UCP_EP_CLOSE_FLAG_FORCE;
+                    close_started = true;
+                    auto *q = ucp_ep_close_nbx(ep, &p);
+                    if(!UCS_PTR_IS_PTR(q))
+                        on_ctrl(o, UCS_PTR_STATUS(q));
+                }
+                else
+                {
+                    flush_started = true;
+                    auto *q = ucp_ep_flush_nbx(ep, &p);
+                    if(!UCS_PTR_IS_PTR(q))
+                        on_ctrl(o, UCS_PTR_STATUS(q));
+                }
+            }
+        }
+        if(receiving == 0 && ep && flush_done && !close_started)
+        {
+            force = now_ns() >= deadline_ns(close_by);
+            auto *o = ctrl_op(2);
+            if(!o->in_flight)
+            {
+                o->kind = 2;
+                o->in_flight = true;
+                ucp_request_param_t p{};
+                p.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
+                                 UCP_OP_ATTR_FIELD_USER_DATA |
+                                 (force ? UCP_OP_ATTR_FIELD_FLAGS : 0);
+                p.request = o;
+                p.cb.send = send_cb;
+                p.user_data = o;
+                if(force)
+                    p.flags = UCP_EP_CLOSE_FLAG_FORCE;
+                close_started = true;
+                auto *q = ucp_ep_close_nbx(ep, &p);
+                if(!UCS_PTR_IS_PTR(q))
+                    on_ctrl(o, UCS_PTR_STATUS(q));
+            }
+        }
+        if(receiving == 0 && close_done && !ctrl_op(0)->in_flight && !ctrl_op(1)->in_flight &&
+           !ctrl_op(2)->in_flight)
+            break;
+        if(now_ns() >= deadline_ns(close_by))
+            force = true;
+        std::this_thread::yield();
+    }
+    queue.clear();
+    if(!outcome.load())
+    {
+        outcome = int(TangoBulk::Outcome::Cancelled);
+        queue.signal();
+    }
+    if(receiving || ep || ctrl_op(0)->in_flight || ctrl_op(1)->in_flight || ctrl_op(2)->in_flight)
+    {
+        quarantine_owner();
+        return;
+    }
+    receive.unmap();
+    worker->destroy();
+    context->destroy();
+}
+void Sub::quarantine_owner()
+{
+    if(quarantined)
+        return;
+    quarantined = true;
+    quarantine().keep(*this, plan.charge);
+}
+
+void Rings::bit_set(std::vector<std::uint64_t> &v, std::uint32_t i)
+{
+    v[i / 64] |= std::uint64_t{1} << (i % 64);
+}
+void Rings::bit_clear(std::vector<std::uint64_t> &v, std::uint32_t i)
+{
+    v[i / 64] &= ~(std::uint64_t{1} << (i % 64));
+}
+bool Rings::bit_test(const std::vector<std::uint64_t> &v, std::uint32_t i) const
+{
+    return (v[i / 64] >> (i % 64)) & 1;
+}
+std::uint32_t Rings::bit_count(const std::vector<std::uint64_t> &v) const
+{
+    std::uint32_t n = 0;
+    for(auto x : v)
+        n += std::popcount(x);
+    return n;
+}
+
+struct PendingSubscription::Impl
+{
+    std::unique_ptr<Sub> sub;
+    explicit Impl(std::unique_ptr<Sub> s) : sub(std::move(s)) {};
+};
+PendingSubscription::PendingSubscription(std::unique_ptr<Impl> p) : p_(std::move(p)) {}
+PendingSubscription::PendingSubscription(PendingSubscription &&) noexcept = default;
+PendingSubscription &PendingSubscription::operator=(PendingSubscription &&) noexcept = default;
+PendingSubscription::~PendingSubscription()
+{
+    if(p_ && p_->sub)
+    {
+        auto &s = *p_->sub;
+        s.stop = true;
+        s.close = true;
+        s.close_by = std::chrono::steady_clock::now();
+        s.queue.signal();
+        if(s.loop.joinable())
+            s.loop.join();
+        if(s.quarantined)
+            p_->sub.release();
+    }
+}
+std::string PendingSubscription::open_message() const
+{
+    if(!p_ || !p_->sub)
+        throw std::logic_error("empty pending subscription");
+    auto &s = *p_->sub;
+    wire::OpenMessage m{};
+    m.session = s.session;
+    m.incarnation = s.offer.incarnation;
+    m.depth = s.plan.D;
+    m.batch = s.plan.batch;
+    m.every = s.every;
+    m.gpu = false;
+    m.label_bytes = std::uint8_t(s.options.label.size());
+    std::memcpy(m.label.data(), s.options.label.data(), m.label_bytes);
+    m.address_bytes = s.own_address_bytes;
+    std::memcpy(m.address.data(), s.own_address.data(), m.address_bytes);
+    return wire::format(m);
+}
+Subscription PendingSubscription::start(std::string_view reply, Deadline d, Closer closer) &&
+{
+    if(!p_ || !p_->sub)
+        throw std::logic_error("empty pending subscription");
+    auto &s = *p_->sub;
+    s.closer = std::move(closer);
+    s.start_by = d;
+    wire::Reply m;
+    if(!wire::parse(reply, m))
+        throw std::runtime_error("invalid reply to Open");
+    if(m.status != wire::Ok)
+        throw std::runtime_error(status_text(m.status));
+    if(!m.address_bytes)
+        throw std::runtime_error("reply to Open has no address");
+    s.reply_promise.set_value(m);
+    s.start_requested.store(true, std::memory_order_release);
+    auto why = s.started_result.get();
+    if(!why.empty())
+    {
+        s.stop = true;
+        s.close_by = d;
+        s.close = true;
+        s.queue.signal();
+        if(s.loop.joinable())
+            s.loop.join();
+        if(s.quarantined)
+            p_->sub.release();
+        p_.reset();
+        throw std::runtime_error(why);
+    }
+    auto sub = std::move(p_->sub);
+    p_.reset();
+    return Subscription(std::move(sub));
+}
+PendingSubscription prepare(const Offer &o, bool every, SubscriptionOptions options)
+{
+    auto s = std::make_unique<Sub>(o, every, std::move(options));
+    auto ready = s->setup_done.get_future();
+    s->start_loop();
+    ready.get();
+    return PendingSubscription(std::make_unique<PendingSubscription::Impl>(std::move(s)));
+}
+} // namespace TangoBulk::transport
+
+namespace TangoBulk
+{
+Subscription::Subscription(std::unique_ptr<transport::Sub> s) : s_(std::move(s)) {}
+Subscription::Subscription(Subscription &&) noexcept = default;
+Subscription &Subscription::operator=(Subscription &&) noexcept = default;
+Subscription::~Subscription()
+{
+    close(std::chrono::steady_clock::now() + std::chrono::seconds(2));
+}
+std::optional<Batch> Subscription::read(Deadline d)
+{
+    if(!s_)
+        return {};
+    int k = s_->queue.pop_until(d, [&] { return s_->outcome.load() != 0; });
+    if(k < 0)
+        return {};
+    return Batch(s_->rings, std::uint32_t(k));
+}
+std::optional<Outcome> Subscription::outcome() const
+{
+    if(!s_ || !s_->outcome.load() || !s_->queue.empty())
+        return {};
+    return Outcome(s_->outcome.load());
+}
+int Subscription::fd() const
+{
+    return s_ ? s_->queue.fd.fd() : -1;
+}
+const Description &Subscription::description() const
+{
+    if(!s_)
+        throw std::logic_error("moved subscription");
+    return s_->offer.description;
+}
+void Subscription::close(Deadline d)
+{
+    if(!s_ || !s_->loop.joinable())
+        return;
+    auto *s = s_.get();
+    s->stop.store(true, std::memory_order_release);
+    bool fenced = false;
+    if(s->closer)
+    {
+        auto doc = wire::format(wire::CloseMessage{s->session});
+        try
+        {
+            fenced = s->closer(doc, d);
+        }
+        catch(...)
+        {
+            fenced = false;
+        }
+    }
+    s->fenced = fenced;
+    s->close_by = d;
+    s->close.store(true, std::memory_order_release);
+    s->queue.signal();
+    s->loop.join();
+    if(s->quarantined)
+        s_.release();
+}
+Health Subscription::health() const
+{
+    if(!s_)
+        return {};
+    std::lock_guard l(s_->health_mutex);
+    auto h = s_->observation;
+    h.failure = s_->failure.data();
+    h.transport.assign(s_->transport.data(), s_->transport_bytes);
+    h.quarantined_bytes = transport::quarantine().total.load();
+    return h;
+}
+} // namespace TangoBulk

@@ -1,0 +1,232 @@
+# The estimates come from prototypes/final_shape/fixed_tables_v2.md, section 10.
+# Phase totals are cumulative; per-file entries are allowances, not targets.
+
+[project]
+active_phase = 1
+line_ceiling = 10000
+public_name_limit = 74
+
+[phases."1"]
+library = 4802
+tests = 2623
+total = 7425
+
+[phases."2"]
+library = 5483
+tests = 3063
+total = 8546
+
+[phases."3"]
+library = 6197
+tests = 3435
+total = 9632
+
+[[allowance]]
+name = "publisher"
+phase = 1
+kind = "library"
+lines = 1144
+patterns = ["src/transport/publisher.cpp"]
+
+[[allowance]]
+name = "subscription"
+phase = 1
+kind = "library"
+lines = 908
+patterns = ["src/transport/subscription.cpp"]
+
+[[allowance]]
+name = "tables"
+phase = 1
+kind = "library"
+lines = 425
+patterns = ["src/transport/tables.h"]
+
+[[allowance]]
+name = "batch"
+phase = 1
+kind = "library"
+lines = 130
+patterns = ["src/transport/batch.cpp"]
+
+[[allowance]]
+name = "memory"
+phase = 1
+kind = "library"
+lines = 443
+patterns = ["src/transport/memory.h", "src/transport/memory.cpp"]
+
+[[allowance]]
+name = "ucx"
+phase = 1
+kind = "library"
+lines = 363
+patterns = ["src/transport/ucx.h", "src/transport/ucx.cpp"]
+
+[[allowance]]
+name = "wire"
+phase = 1
+kind = "library"
+lines = 670
+patterns = ["src/transport/wire.h", "src/transport/wire.cpp"]
+
+[[allowance]]
+name = "public_headers"
+phase = 1
+kind = "library"
+lines = 356
+patterns = ["include/tango-bulk/bulk.h", "include/tango-bulk/tango.h", "src/transport/transport.h"]
+
+[[allowance]]
+name = "tango_device"
+phase = 1
+kind = "library"
+lines = 205
+patterns = ["src/tango/device.cpp"]
+
+[[allowance]]
+name = "tango_subscribe"
+phase = 1
+kind = "library"
+lines = 158
+patterns = ["src/tango/subscribe.cpp"]
+
+[[allowance]]
+name = "test_wire"
+phase = 1
+kind = "tests"
+lines = 300
+patterns = ["tests/transport/test_wire.cpp"]
+
+[[allowance]]
+name = "test_plan"
+phase = 1
+kind = "tests"
+lines = 130
+patterns = ["tests/transport/test_plan.cpp"]
+
+[[allowance]]
+name = "test_tables"
+phase = 1
+kind = "tests"
+lines = 250
+patterns = ["tests/transport/test_tables.cpp"]
+
+[[allowance]]
+name = "transport_fixtures"
+phase = 1
+kind = "tests"
+lines = 290
+patterns = ["tests/transport/fixtures/pair.h", "tests/transport/fixtures/fault_adapter.h", "tests/transport/fixtures/fork.h"]
+
+[[allowance]]
+name = "test_ucx"
+phase = 1
+kind = "tests"
+lines = 152
+patterns = ["tests/transport/test_ucx.cpp"]
+
+[[allowance]]
+name = "test_publisher"
+phase = 1
+kind = "tests"
+lines = 342
+patterns = ["tests/transport/test_publisher.cpp"]
+
+[[allowance]]
+name = "test_subscription"
+phase = 1
+kind = "tests"
+lines = 342
+patterns = ["tests/transport/test_subscription.cpp"]
+
+[[allowance]]
+name = "test_failure"
+phase = 1
+kind = "tests"
+lines = 258
+patterns = ["tests/transport/test_failure.cpp"]
+
+[[allowance]]
+name = "tango_tests"
+phase = 1
+kind = "tests"
+lines = 559
+patterns = ["tests/tango/**"]
+
+[[allowance]]
+name = "python_core"
+phase = 2
+kind = "library"
+lines = 341
+patterns = ["python/_core.cpp"]
+
+[[allowance]]
+name = "python_package"
+phase = 2
+kind = "library"
+lines = 340
+patterns = ["python/tango_bulk/*.py"]
+
+[[allowance]]
+name = "python_tests"
+phase = 2
+kind = "tests"
+lines = 440
+patterns = ["python/tests/*.py"]
+
+[[allowance]]
+name = "subscription"
+phase = 3
+kind = "library"
+lines = 87
+patterns = ["src/transport/subscription.cpp"]
+
+[[allowance]]
+name = "batch"
+phase = 3
+kind = "library"
+lines = 59
+patterns = ["src/transport/batch.cpp"]
+
+[[allowance]]
+name = "memory"
+phase = 3
+kind = "library"
+lines = 24
+patterns = ["src/transport/memory.h", "src/transport/memory.cpp"]
+
+[[allowance]]
+name = "ucx"
+phase = 3
+kind = "library"
+lines = 25
+patterns = ["src/transport/ucx.h", "src/transport/ucx.cpp"]
+
+[[allowance]]
+name = "public_headers"
+phase = 3
+kind = "library"
+lines = 54
+patterns = ["src/transport/transport.h"]
+
+[[allowance]]
+name = "python_core"
+phase = 3
+kind = "library"
+lines = 253
+patterns = ["python/_core.cpp"]
+
+[[allowance]]
+name = "cuda_runtime"
+phase = 3
+kind = "library"
+lines = 212
+patterns = ["src/cuda/**"]
+
+[[allowance]]
+name = "gpu_tests"
+phase = 3
+kind = "tests"
+lines = 372
+patterns = ["tests/gpu/**"]

@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+# SPDX-License-Identifier: LGPL-3.0-or-later
+
+[workspace]
+name = "tango-bulk2"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+requires-pixi = ">=0.55"
+
+[dependencies]
+cmake = "*"
+ninja = "*"
+clang-format = "*"
+cxx-compiler = "*"
+cpptango = ">=10.0"
+cppzmq = "*"
+ucx = ">=1.21"
+catch2 = ">=3.1.1"
+python = ">=3.11"
+pytango = ">=10.0"
+pybind11 = ">=3.1,<4"
+pytest = ">=8"
+numpy = "*"
+dlpack = "*"
+nlohmann_json = ">=3.12"
+
+[feature.gpu.dependencies]
+cuda-version = "12.9"
+cuda-cudart-dev = "*"
+cuda-nvcc = "*"
+cupy = ">=14"
+
+[environments]
+default = ["default"]
+gpu = ["default", "gpu"]
+
+[tasks]
+configure = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build -DBUILD_TESTING=ON" }
+build = { cmd = "cmake --build build", depends-on = ["configure"] }
+test = { cmd = "ctest --test-dir build -L 'unit|ucx|tango' --output-on-failure", depends-on = ["build"] }
+test-python = { cmd = "pytest python/tests" }
+test-gpu = { cmd = "ctest --test-dir build -L gpu --output-on-failure && pytest -m gpu", depends-on = ["build"] }
+_configure-asan = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build-asan -DBUILD_TESTING=ON -DTANGO_BULK_SANITIZERS=address,undefined" }
+_build-asan = { cmd = "cmake --build build-asan", depends-on = ["_configure-asan"] }
+test-asan = { cmd = "ctest --test-dir build-asan --output-on-failure", depends-on = ["_build-asan"] }
+check = "python tools/check.py"
+count = "python tools/count.py"

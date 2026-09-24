@@ -1,0 +1,2 @@
+# Public C++ API names, one identifier per line.
+# Keep this inventory in sync with include/tango-bulk/ and transport.h.
