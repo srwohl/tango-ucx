@@ -29,7 +29,6 @@ TEST_CASE("forced close preserves ownership around a large in-flight receive")
     options.batch = 1;
     options.max_wait = std::chrono::microseconds(0);
     auto sub = test::subscribe(publisher, true, options, test::FaultAdapter::lose_close_fence());
-    test::cancel_earlier_grants(publisher);
     for(std::uint64_t i = 0; i < 2; ++i)
     {
         auto slot = publisher.acquire(test::deadline());
@@ -118,7 +117,6 @@ TEST_CASE("a subscriber killed with SIGKILL is detected through the UCX peer end
     REQUIRE_FALSE(open.empty());
     auto reply = transport::handle(publisher, open);
     REQUIRE_FALSE(reply.empty());
-    test::cancel_earlier_grants(publisher);
     REQUIRE(test::write_text(to_child[1], reply));
     char ready = 0;
     REQUIRE(test::read_all(to_parent[0], &ready, 1));
@@ -179,9 +177,9 @@ TEST_CASE("a latest subscription gone without its Close keeps its session row, w
         test::publish_one(publisher); // a latest row never holds the device
     CHECK(test::eventually([&] { return test::first_row(publisher, "room") == 0; }));
     std::this_thread::sleep_for(std::chrono::seconds(3)); // past the 2 s keepalive interval
-    auto rows = transport::session_rows(publisher);
-    INFO(rows.at(0));
-    CHECK(rows[0].find("|latest|ready|") != std::string::npos);
+    auto row = test::sessions(publisher).at(0);
+    INFO(row.dump());
+    CHECK((row["delivery"] == "latest" && row["state"] == "ready"));
     CHECK(publisher.health().latest == 1);
     test::RawPeer another;
     CHECK(another.open(publisher, false, 4) == wire::NoSession); // until the publisher is destroyed
@@ -196,7 +194,6 @@ TEST_CASE("an every subscription gone without its Close holds the device until i
         Publisher publisher(test::small_description(), limits);
         auto sub = test::subscribe(publisher, true, {.budget = 128ull << 10},
                                    test::FaultAdapter::lose_close_fence());
-        test::cancel_earlier_grants(publisher);
         test::publish_one(publisher);
         REQUIRE(sub.read(test::deadline()));
         auto room = [&] { return test::first_row(publisher, "room"); };
@@ -218,7 +215,7 @@ TEST_CASE("an every subscription gone without its Close holds the device until i
         CHECK(slot);
         CHECK(std::chrono::steady_clock::now() - waiting >= timeout);
         CHECK(test::eventually([&] { return publisher.health().failed_every == 1; }));
-        CHECK(test::eventually([&] { return transport::session_rows(publisher).empty(); }));
+        CHECK(test::eventually([&] { return test::sessions(publisher).empty(); }));
     }
 }
 
@@ -227,9 +224,8 @@ TEST_CASE("an every subscription gone before its first frame fails that frame's 
     Publisher publisher(test::small_description(), test::small_limits(1));
     auto sub = test::subscribe(publisher, true, test::small_options(),
                                test::FaultAdapter::lose_close_fence());
-    test::cancel_earlier_grants(publisher);
     sub.close(test::deadline());
     test::publish_one(publisher); // UCX cannot attach the gone worker's shared memory
     CHECK(test::eventually([&] { return publisher.health().failed_every == 1; }));
-    CHECK(test::eventually([&] { return transport::session_rows(publisher).empty(); }));
+    CHECK(test::eventually([&] { return test::sessions(publisher).empty(); }));
 }

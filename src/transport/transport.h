@@ -7,7 +7,6 @@
 #include <functional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace TangoBulk::transport
 {
@@ -24,8 +23,8 @@ struct Offer
 // A bulk command's JSON document in, its reply document out; parsed on the calling thread.
 std::string handle(Publisher &, std::string_view document);
 std::string bulk_stream(const Publisher &);
-// One row per session, from the last Health sample.
-std::vector<std::string> session_rows(const Publisher &);
+// The BulkSessions document: the sessions of the last Health sample.
+std::string bulk_sessions(const Publisher &);
 // "tango-bulk/3 open" -> 3; -1 when the description is not a bulk command marker.
 int marker_major(std::string_view type_description);
 // Throws when the document is malformed or of another major version.

@@ -150,8 +150,8 @@ SubscriptionPlan plan_subscription(const Offer &o, bool every, const Subscriptio
         throw std::invalid_argument("label exceeds 64 bytes");
     if(options.gpu >= 0)
         throw std::invalid_argument("GPU receive is not available in the host-only phase");
-    if(!(options.max_rate >= 0))
-        throw std::invalid_argument("max_rate must be 0 or more");
+    if(!(options.max_rate >= 0) || (every && options.max_rate > 0))
+        throw std::invalid_argument("max_rate must be 0 or more, and applies to latest only");
     p.batch = options.batch;
     p.max_wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(options.max_wait).count();
     p.op_stride = std::uint32_t(align(add({request, 16}), 64));

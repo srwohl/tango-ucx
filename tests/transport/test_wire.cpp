@@ -4,6 +4,8 @@
 #include <transport.h>
 #include <wire.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cstring>
 #include <functional>
@@ -203,6 +205,29 @@ TEST_CASE("the BulkStream document matches its golden JSON and refuses what it c
             {R"("max_sessions":8)", R"("max_sessions":65)"},
             {"tango-bulk-stream", "tango-bulk-open"}})
         CHECK(status(replace(doc, from, to)) == wire::Malformed);
+}
+
+TEST_CASE("the BulkSessions document matches its golden JSON and is never capped")
+{
+    wire::SessionsMessage m{12648430, {}};
+    CHECK(wire::format(m) ==
+          R"({"interface":"tango-bulk-sessions/3.0","incarnation":12648430,"sessions":[]})");
+    m.sessions = {{1, "archiver", true, false, 256, 250, 6, 0, 12, "sysv/memory"},
+                  {2, "a\"b", false, true, 8, 8, 0, 3, 0, ""}};
+    CHECK(wire::format(m) ==
+          R"({"interface":"tango-bulk-sessions/3.0","incarnation":12648430,"sessions":[)"
+          R"({"ordinal":1,"label":"archiver","delivery":"every","state":"ready","depth":256,)"
+          R"("room":250,"sent":6,"skipped":0,"transfer_max_us":12,"transport":"sysv/memory"},)"
+          R"({"ordinal":2,"label":"a\"b","delivery":"latest","state":"retiring","depth":8,)"
+          R"("room":8,"sent":0,"skipped":3,"transfer_max_us":0,"transport":""}]})");
+    // The most a publisher can list is more than the 16 KiB a reader of a command accepts.
+    m.sessions.assign(64, {64, std::string(64, 'l'), true, true, 65536, 65536, ~0ull, ~0ull, ~0ull,
+                           std::string(64, 't')});
+    auto doc = wire::format(m);
+    CHECK(doc.size() > wire::k_max_document);
+    auto back = nlohmann::json::parse(doc);
+    REQUIRE(back["sessions"].size() == 64);
+    CHECK(back["sessions"][63]["label"] == std::string(64, 'l'));
 }
 
 TEST_CASE("a bulk command marker names its major version")

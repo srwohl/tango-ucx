@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
-#include <format>
 #include <stdexcept>
 #include <utility>
 
@@ -13,7 +12,7 @@ namespace TangoBulk::transport
 {
 struct SourceSlot
 {
-    std::atomic<bool> posted{false}, claimed{false};
+    std::atomic<bool> posted{false};
     bool cancel = false, held = false;
     std::uint64_t timestamp = 0;
     std::uint32_t sends = 0;
@@ -102,6 +101,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::uint64_t id_for(std::uint32_t) const;
     int find_row(std::uint64_t) const;
     bool control_pass();
+    void unissue_grants();
     bool route_pass(std::int64_t);
     bool grant_pass();
     bool retire_pass(std::int64_t);
@@ -545,7 +545,7 @@ bool Pub::control_pass()
             }
             // The subscriber registered its rings and handlers before Open: it is ready now.
             row.ready = true;
-            // Grants already issued reserved no room in this row, so none of them reach it.
+            // A new every row starts at the first grant issued after its Open.
             row.first_grant = issued;
             row.transport.n = std::uint8_t(worker->transports(row.ep, row.transport.c));
             ready_mask |= std::uint64_t{1} << r;
@@ -556,24 +556,30 @@ bool Pub::control_pass()
             auto a = worker->address();
             reply.address_bytes = std::uint16_t(a.size());
             std::memcpy(reply.address.data(), a.data(), a.size());
-            control.reply(e, reply);
+            if(!control.reply(e, reply))
+                retire(r, wire::Closing, false); // its caller gave up: nobody will use the session
         });
+}
+// The grant ring is first in, first out, so the grants still queued are the newest issued, and
+// the device never saw them. Un-issued, they use no frame index and their slots are free at once.
+// Each ready every row reserved room for each of them, since its first grant is at most `routed`.
+void Pub::unissue_grants()
+{
+    std::lock_guard l(grants.m);
+    auto n = grants.size;
+    for(int k; (k = grants.take_locked()) >= 0;)
+        slots[k].held = false;
+    issued -= n;
+    for(std::uint32_t r = 0; r < plan.M; ++r)
+        if((ready_mask & every_mask) >> r & 1)
+            rows[r].reserved -= n;
 }
 
 bool Pub::route_pass(std::int64_t now)
 {
     bool work = false;
     if(finishing.load(std::memory_order_relaxed))
-    {
-        std::lock_guard l(grants.m);
-        for(std::uint32_t k = 0; k < plan.S; ++k)
-            if(slots[k].held && !slots[k].claimed.load(std::memory_order_acquire) &&
-               !slots[k].posted.load())
-            {
-                slots[k].cancel = true;
-                slots[k].posted.store(true, std::memory_order_release);
-            }
-    }
+        unissue_grants();
     while(routed < issued)
     {
         auto k = order[routed % plan.S];
@@ -582,7 +588,6 @@ bool Pub::route_pass(std::int64_t now)
             break;
         s.posted.store(false, std::memory_order_relaxed);
         s.held = false;
-        s.claimed.store(false, std::memory_order_relaxed);
         auto g = routed++;
         for(std::uint32_t r = 0; r < plan.M; ++r)
             if((every_mask & (std::uint64_t{1} << r)) && g >= rows[r].first_grant &&
@@ -681,7 +686,6 @@ bool Pub::grant_pass()
             if((ready_mask & every_mask) & (std::uint64_t{1} << r))
                 ++rows[r].reserved;
         slots[k].held = true;
-        slots[k].claimed.store(false, std::memory_order_relaxed);
         order[issued % plan.S] = k;
         grants.push(k);
         ++issued;
@@ -789,10 +793,12 @@ bool Pub::retire_pass(std::int64_t now)
     }
     return work;
 }
-// Eviction counts only while the device waits for a grant, so an idle device evicts nobody.
+// Eviction counts only while the device waits for a grant that a free slot could serve but a row
+// has no room for: the pressure Health reports. An idle device evicts nobody, and after finish()
+// the device waits for no grant.
 void Pub::timer_pass(std::int64_t now)
 {
-    bool waiting = grants.empty();
+    bool waiting = !finishing.load(std::memory_order_relaxed) && grants.empty() && blocked;
     auto timeout = std::chrono::nanoseconds(limits.pressure_timeout).count();
     for(std::uint32_t r = 0; r < plan.M; ++r)
     {
@@ -955,9 +961,7 @@ std::optional<Slot> Publisher::acquire(Deadline d)
 {
     if(!p_ || p_->finishing.load())
         return {};
-    int k = p_->grants.pop_until(
-        d, [&] { return p_->finishing.load() || p_->stopping.load(); },
-        [&](std::uint32_t i) { p_->slots[i].claimed.store(true, std::memory_order_release); });
+    int k = p_->grants.pop_until(d, [&] { return p_->finishing.load() || p_->stopping.load(); });
     if(k < 0)
         return {};
     return Slot(p_, k);
@@ -1021,18 +1025,17 @@ std::string bulk_stream(const Publisher &p)
     return wire::format(wire::StreamMessage{p.p_->incarnation, p.p_->description,
                                             p.p_->limits.allow_every, p.p_->limits.max_sessions});
 }
-std::vector<std::string> session_rows(const Publisher &p)
+// Formatted on the calling thread, from the loop's fixed Health copy.
+std::string bulk_sessions(const Publisher &p)
 {
-    std::vector<std::string> out;
     if(!p.p_)
-        return out;
+        throw std::logic_error("moved publisher");
     auto o = p.p_->health_copy.read();
+    wire::SessionsMessage m{p.p_->incarnation, {}};
     for(const auto &w : std::span(o.rows).first(o.count))
-        out.push_back(std::format("{}|{}|{}|{}|depth={}|room={}|sent={}|skipped={}|"
-                                  "transfer_max_us={}|{}",
-                                  w.ordinal, w.label.view(), w.every ? "every" : "latest",
-                                  w.retiring ? "retiring" : "ready", w.depth, w.room, w.sent,
-                                  w.skipped, w.transfer_max_ns / 1000, w.transport.view()));
-    return out;
+        m.sessions.push_back({w.ordinal, std::string(w.label.view()), w.every, w.retiring, w.depth,
+                              w.room, w.sent, w.skipped, std::uint64_t(w.transfer_max_ns) / 1000,
+                              std::string(w.transport.view())});
+    return wire::format(m);
 }
 } // namespace TangoBulk::transport

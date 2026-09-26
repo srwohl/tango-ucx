@@ -17,7 +17,8 @@ namespace
 {
 using json = nlohmann::ordered_json;
 constexpr std::string_view k_open = "tango-bulk-open", k_close = "tango-bulk-close",
-                           k_reply = "tango-bulk-reply", k_stream = "tango-bulk-stream";
+                           k_reply = "tango-bulk-reply", k_stream = "tango-bulk-stream",
+                           k_sessions = "tango-bulk-sessions";
 constexpr std::array<std::string_view, 11> k_element_names{
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bytes"};
 constexpr std::array<std::string_view, 11> k_status_names{
@@ -185,6 +186,24 @@ std::string format(const StreamMessage &m)
                  {"field_dtype", d.field_dtype},
                  {"allow_every", m.allow_every},
                  {"max_sessions", m.max_sessions}});
+}
+std::string format(const SessionsMessage &m)
+{
+    auto sessions = json::array();
+    for(const auto &r : m.sessions)
+        sessions.push_back(json{{"ordinal", r.ordinal},
+                                {"label", r.label},
+                                {"delivery", r.every ? "every" : "latest"},
+                                {"state", r.retiring ? "retiring" : "ready"},
+                                {"depth", r.depth},
+                                {"room", r.room},
+                                {"sent", r.sent},
+                                {"skipped", r.skipped},
+                                {"transfer_max_us", r.transfer_max_us},
+                                {"transport", r.transport}});
+    return dump({{"interface", interface(k_sessions)},
+                 {"incarnation", m.incarnation},
+                 {"sessions", std::move(sessions)}});
 }
 Status parse(std::string_view doc, StreamMessage &m)
 {

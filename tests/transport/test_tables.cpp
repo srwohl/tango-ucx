@@ -102,6 +102,21 @@ TEST_CASE("ControlTable frees an entry whose caller gave up once the loop replie
     CHECK(taken.load()->state == ControlEntry::Free);
 }
 
+TEST_CASE("ControlTable frees an entry whose caller gave up before the loop took it")
+{
+    ControlTable table;
+    for(int i = 0; i < 9; ++i) // one more than the table holds
+        CHECK(table.call(close_request(1), std::chrono::steady_clock::now() + 1ms).status ==
+              wire::Timeout);
+    std::jthread loop(
+        [&](std::stop_token stop)
+        {
+            while(!stop.stop_requested())
+                table.drain([&](ControlEntry &e) { table.reply(e, {wire::Ok}); });
+        });
+    CHECK(table.call(close_request(1), test::deadline()).status == wire::Ok);
+}
+
 TEST_CASE("HealthCopy never makes the loop wait for a thread reading it")
 {
     HealthCopy<int> copy;
@@ -147,7 +162,6 @@ TEST_CASE("a Credit below one already received is ignored")
     Publisher publisher(test::small_description(), test::small_limits(1));
     test::RawPeer peer;
     REQUIRE(peer.open(publisher, true, 4) == wire::Ok);
-    test::cancel_earlier_grants(publisher);
     test::publish_one(publisher);
     test::publish_one(publisher);
     REQUIRE(peer.progress_until([&] { return peer.count(wire::Frame) == 2; }));
@@ -165,7 +179,6 @@ TEST_CASE("Credit follows only the released prefix, whatever order batches are r
 {
     Publisher publisher(test::small_description(), test::small_limits(1));
     auto sub = test::subscribe(publisher, true);
-    test::cancel_earlier_grants(publisher);
     std::vector<std::optional<Batch>> held;
     for(int i = 0; i < 3; ++i)
     {
@@ -191,7 +204,6 @@ TEST_CASE("sequences wrap the receive ring and frames keep their order")
     auto options = test::small_options();
     options.budget = 128ull << 10;
     auto sub = test::subscribe(publisher, true, options);
-    test::cancel_earlier_grants(publisher);
     REQUIRE(test::eventually([&] { return test::first_row(publisher, "depth") != ~0ull; }));
     auto depth = test::first_row(publisher, "depth");
     REQUIRE(depth < 100);

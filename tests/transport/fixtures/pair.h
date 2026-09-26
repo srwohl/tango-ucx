@@ -6,6 +6,8 @@
 #include <transport.h>
 #include <wire.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -27,12 +29,16 @@ template <class Done> bool eventually(Done done, std::chrono::seconds s = std::c
             return done();
     return true;
 }
-// A numeric field of the first BulkSessions row, such as "room"; ~0 when there is no row.
-inline std::uint64_t first_row(const Publisher &publisher, std::string_view key)
+// The sessions the BulkSessions document lists.
+inline nlohmann::json sessions(const Publisher &publisher)
 {
-    auto rows = transport::session_rows(publisher);
-    auto at = rows.empty() ? std::string::npos : rows[0].find("|" + std::string(key) + "=");
-    return at == std::string::npos ? ~0ull : std::stoull(rows[0].substr(at + key.size() + 2));
+    return nlohmann::json::parse(transport::bulk_sessions(publisher)).at("sessions");
+}
+// A numeric field of the first session, such as "room"; ~0 when there is no session.
+inline std::uint64_t first_row(const Publisher &publisher, const char *key)
+{
+    auto s = sessions(publisher);
+    return s.empty() ? ~0ull : s[0].at(key).get<std::uint64_t>();
 }
 inline Description small_description()
 {
@@ -59,6 +65,22 @@ inline transport::Offer offer_of(const Publisher &publisher)
 {
     return transport::parse_bulk_stream(transport::bulk_stream(publisher));
 }
+// Slots granted before an every row's Open remain ahead of its first grant. Ordinary tests drain
+// that prefix so their first publish exercises the row; grant-lookahead tests leave it in place.
+inline std::uint32_t granted(const Publisher &publisher)
+{
+    auto h = publisher.health();
+    for(auto until = deadline(); h.slots_held == 0 && std::chrono::steady_clock::now() < until;
+        h = publisher.health())
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return h.slots_held;
+}
+inline void cancel_earlier_grants(Publisher &publisher)
+{
+    for(auto n = granted(publisher); n; --n)
+        if(!publisher.acquire(deadline()))
+            throw std::runtime_error("publisher did not grant a slot");
+}
 inline transport::Closer closer_for(Publisher &publisher)
 {
     return [&publisher](std::string_view doc, Deadline)
@@ -69,32 +91,17 @@ inline transport::Closer closer_for(Publisher &publisher)
 }
 inline Subscription subscribe(Publisher &publisher, bool every,
                               SubscriptionOptions options = small_options(),
-                              transport::Closer closer = {})
+                              transport::Closer closer = {}, bool drain_initial_grants = true)
 {
     auto pending = transport::prepare(offer_of(publisher), every, std::move(options));
     auto open = pending.open_message();
     auto reply = transport::handle(publisher, open);
     if(!closer)
         closer = closer_for(publisher);
-    return std::move(pending).start(reply, deadline(), std::move(closer));
-}
-// Slots granted and not yet published or cancelled. The publisher thread refreshes Health only
-// every 256 turns, so wait for a copy that counts them.
-inline std::uint32_t granted(const Publisher &publisher)
-{
-    auto h = publisher.health();
-    for(auto until = deadline(); h.slots_held == 0 && std::chrono::steady_clock::now() < until;
-        h = publisher.health())
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    return h.slots_held;
-}
-// Grants issued before an every row's Open reserve no room in it and never reach it. Before
-// anything is published, every held slot is such a grant: cancel them all.
-inline void cancel_earlier_grants(Publisher &publisher)
-{
-    for(auto n = granted(publisher); n; --n)
-        if(!publisher.acquire(deadline()))
-            throw std::runtime_error("publisher did not grant a slot");
+    auto sub = std::move(pending).start(reply, deadline(), std::move(closer));
+    if(every && drain_initial_grants)
+        cancel_earlier_grants(publisher);
+    return sub;
 }
 inline void publish_one(Publisher &publisher, std::byte value = std::byte{0x5a},
                         std::uint64_t timestamp = 123)

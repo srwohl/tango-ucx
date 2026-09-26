@@ -6,6 +6,7 @@
 #include <transport.h>
 #include <wire.h>
 
+#include <nlohmann/json.hpp>
 #include <tango/tango.h>
 
 #include <atomic>
@@ -32,6 +33,12 @@ Tango::DevLong publish(Tango::DeviceProxy &p, Tango::DevLong n)
     p.command_inout("Publish", d) >> done;
     return done;
 }
+void command(Tango::DeviceProxy &p, const char *name, Tango::DevLong n)
+{
+    Tango::DeviceData d;
+    d << n;
+    p.command_inout(name, d);
+}
 template <class T> T attribute(Tango::DeviceProxy &p, const char *name)
 {
     T v{};
@@ -40,26 +47,63 @@ template <class T> T attribute(Tango::DeviceProxy &p, const char *name)
     a >> v;
     return v;
 }
-// Cancels the grants issued before the last Open; see Device::drain.
-void drain(Tango::DeviceProxy &p)
+std::uint64_t incarnation(Tango::DeviceProxy &p)
 {
-    Tango::DevLong n = 0;
-    p.command_inout("Drain") >> n;
-    REQUIRE(n > 0);
+    return transport::parse_bulk_stream(attribute<std::string>(p, "BulkStream")).incarnation;
 }
-// BulkSessions is refreshed every 256 loop turns: wait for rows that contain `text`.
-std::vector<std::string> sessions_with(Tango::DeviceProxy &p, const std::string &text)
+// BulkSessions is sampled every 256 loop turns: read it until `done` accepts it, or the deadline.
+template <class Done> bool sessions_until(Tango::DeviceProxy &p, Done done, Deadline until)
 {
-    auto rows = attribute<std::vector<std::string>>(p, "BulkSessions");
-    for(auto until = in(); std::chrono::steady_clock::now() < until;
-        std::this_thread::sleep_for(10ms))
+    for(;; std::this_thread::sleep_for(10ms))
+        if(done(nlohmann::json::parse(attribute<std::string>(p, "BulkSessions"))))
+            return true;
+        else if(std::chrono::steady_clock::now() > until)
+            return false;
+}
+// What a sequencer checks before it starts a capture: each label names a ready every session of
+// this incarnation.
+bool ready(const nlohmann::json &doc, std::uint64_t incarnation, std::vector<std::string> labels)
+{
+    for(const auto &s : doc.at("sessions"))
+        if(s.at("delivery") == "every" && s.at("state") == "ready")
+            std::erase(labels, s.at("label").get<std::string>());
+    return doc.at("incarnation") == incarnation && labels.empty();
+}
+// An archiver: joins after `delay`, then reads until its outcome, `pause` after each batch.
+struct Archiver
+{
+    std::vector<std::uint64_t> indices;
+    std::optional<Outcome> outcome;
+    std::string failure;
+    std::jthread thread;
+    Archiver(std::string label, std::chrono::milliseconds delay, std::chrono::milliseconds pause,
+             std::uint64_t budget = 1 << 20)
+        : thread(
+              [=, this]
+              {
+                  std::this_thread::sleep_for(delay);
+                  try
+                  {
+                      auto proxy = device();
+                      auto sub = every(proxy, {.budget = budget, .batch = 4, .label = label});
+                      for(auto until = in(30s);
+                          !(outcome = sub.outcome()) && std::chrono::steady_clock::now() < until;)
+                          if(auto batch = sub.read(in(1s)))
+                          {
+                              for(std::size_t i = 0; i < batch->frames(); ++i)
+                                  indices.push_back(batch->index(i));
+                              std::this_thread::sleep_for(pause);
+                          }
+                      sub.close(in());
+                  }
+                  catch(...)
+                  {
+                      failure = "the archiver threw";
+                  }
+              })
     {
-        rows = attribute<std::vector<std::string>>(p, "BulkSessions");
-        if(!rows.empty() && rows[0].find(text) != std::string::npos)
-            break;
     }
-    return rows;
-}
+};
 std::string status(std::string_view reply)
 {
     wire::Reply r;
@@ -95,7 +139,6 @@ TEST_CASE("every and latest subscriptions receive a device server's frames")
     auto proxy = device();
     auto all = every(proxy, {.batch = 4, .max_wait = 20ms});
     auto newest = latest(proxy);
-    drain(proxy);
     REQUIRE(publish(proxy, 12) == 12);
     std::uint64_t next = 0;
     while(next < 12)
@@ -130,7 +173,6 @@ TEST_CASE("BulkClose answers once the session row is free")
         first.close(in());
         first = every(proxy); // refused with no-session if the row were still retiring
     }
-    drain(proxy);
     CHECK(publish(proxy, 1) == 1);
     CHECK(first.read(in()));
     first.close(in());
@@ -152,13 +194,17 @@ TEST_CASE("the bulk attributes describe the stream and its sessions")
         CHECK_FALSE(proxy.attribute_query(name).description.empty());
 
     auto sub = every(proxy, {.label = "archiver"});
-    drain(proxy);
     REQUIRE(publish(proxy, 3) == 3);
-    auto rows = sessions_with(proxy, "sent=3");
-    REQUIRE(rows.size() == 1);
-    INFO(rows[0]);
-    CHECK(rows[0].starts_with("1|archiver|every|ready|depth="));
-    CHECK(rows[0].find("|skipped=0|") != std::string::npos);
+    nlohmann::json doc;
+    CHECK(sessions_until(
+        proxy, [&](auto d)
+        { return (doc = d)["sessions"].size() == 1 && doc["sessions"][0]["sent"] == 3; }, in()));
+    INFO(doc.dump());
+    CHECK(doc["interface"] == "tango-bulk-sessions/3.0");
+    CHECK(doc["incarnation"] == offer.incarnation);
+    auto row = doc["sessions"][0];
+    CHECK((row["ordinal"] == 1 && row["label"] == "archiver" && row["delivery"] == "every" &&
+           row["state"] == "ready" && row["skipped"] == 0));
     CHECK(attribute<Tango::DevULong64>(proxy, "BulkPublished") == 3);
     CHECK(attribute<Tango::DevULong64>(proxy, "BulkSkipped") == 0);
     CHECK(attribute<Tango::DevULong>(proxy, "BulkPressure") == 0);
@@ -169,7 +215,7 @@ TEST_CASE("the bulk attributes describe the stream and its sessions")
 TEST_CASE("detach_publisher waits for the bulk commands inside the publisher")
 {
     auto proxy = device();
-    auto before = transport::parse_bulk_stream(attribute<std::string>(proxy, "BulkStream"));
+    auto before = incarnation(proxy);
     std::atomic<bool> stop{false};
     std::atomic<int> replies{0}, unavailable{0}, other{0};
     auto hammer = [&]
@@ -192,18 +238,84 @@ TEST_CASE("detach_publisher waits for the bulk commands inside the publisher")
     };
     std::jthread a(hammer), b(hammer);
     for(int i = 0; i < 20; ++i)
-        proxy.command_inout("Restart");
+        command(proxy, "Prepare", 2);
     stop = true;
     a.join();
     b.join();
     CHECK(replies > 0);
     CHECK(other == 0);
     INFO("replies " << replies << ", unavailable " << unavailable);
-    auto after = transport::parse_bulk_stream(attribute<std::string>(proxy, "BulkStream"));
-    CHECK(after.incarnation != before.incarnation);
+    CHECK(incarnation(proxy) != before);
     auto sub = every(proxy);
-    drain(proxy);
     REQUIRE(publish(proxy, 1) == 1);
     CHECK(sub.read(in()));
     sub.close(in());
+}
+
+TEST_CASE("a sequencer starts a capture once its archivers are ready, and each gets every frame")
+{
+    auto proxy = device();
+    proxy.set_timeout_millis(10'000); // Prepare waits for the preview to close its session
+    std::atomic<int> previews{0};
+    std::optional<Outcome> ended; // the first preview's outcome
+    std::jthread preview(         // a latest subscription that subscribes again whenever it ends
+        [&](std::stop_token stop)
+        {
+            auto own = device();
+            while(!stop.stop_requested())
+                try
+                {
+                    auto sub = latest(own, {.budget = 1 << 20});
+                    ++previews;
+                    while(!stop.stop_requested() && !sub.outcome())
+                        sub.read(in(1s));
+                    if(!ended)
+                        ended = sub.outcome();
+                }
+                catch(...) // the finished incarnation refuses Opens until Prepare replaces it
+                {
+                    std::this_thread::sleep_for(50ms);
+                }
+        });
+    REQUIRE(sessions_until(proxy, [](auto d) { return d["sessions"].size() == 1; }, in()));
+    command(proxy, "Prepare", 4);
+    auto now = incarnation(proxy);
+    Archiver fast("fast", 0ms, 0ms), steady("steady", 50ms, 1ms),
+        slow("slow", 150ms, 20ms, 192 << 10); // its ring is shorter than the capture
+    REQUIRE(sessions_until(
+        proxy, [&](auto d) { return ready(d, now, {"fast", "steady", "slow"}); }, in()));
+    constexpr std::uint64_t n = 40;
+    command(proxy, "Start", n);
+    for(auto *a : {&fast, &steady, &slow})
+    {
+        a->thread.join();
+        INFO(a->failure);
+        CHECK(a->indices.size() == n);
+        for(std::uint64_t i = 0; i < a->indices.size(); ++i)
+            CHECK(a->indices[i] == i);
+        CHECK(a->outcome == Outcome::End);
+    }
+    for(auto until = in(); previews < 2 && std::chrono::steady_clock::now() < until;)
+        std::this_thread::sleep_for(10ms);
+    CHECK(previews >= 2);
+    CHECK(ended == Outcome::End);
+}
+
+TEST_CASE("a sequencer whose archiver never joins does not start the capture")
+{
+    auto proxy = device();
+    command(proxy, "Prepare", 4);
+    auto now = incarnation(proxy);
+    Archiver fast("fast", 0ms, 0ms), steady("steady", 50ms, 0ms); // "slow" never joins
+    CHECK(sessions_until(proxy, [&](auto d) { return ready(d, now, {"fast", "steady"}); }, in()));
+    CHECK_FALSE(sessions_until(
+        proxy, [&](auto d) { return ready(d, now, {"fast", "steady", "slow"}); }, in(2s)));
+    CHECK(attribute<Tango::DevULong64>(proxy, "BulkPublished") == 0);
+    proxy.command_inout("Finish");
+    for(auto *a : {&fast, &steady})
+    {
+        a->thread.join();
+        CHECK(a->indices.empty());
+        CHECK(a->outcome == Outcome::End);
+    }
 }

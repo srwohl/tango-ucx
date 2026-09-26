@@ -1,2 +1,12 @@
 # Public C++ API names, one identifier per line.
 # Keep this inventory in sync with include/tango-bulk/ and transport.h.
+install_bulk_commands
+install_bulk_attributes
+attach_publisher
+detach_publisher
+every
+latest
+bulk_stream
+bulk_sessions
+marker_major
+parse_bulk_stream

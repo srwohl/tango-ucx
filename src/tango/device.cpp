@@ -6,9 +6,12 @@
 
 #include <tango/tango.h>
 
+#include <algorithm>
+#include <cctype>
 #include <map>
 #include <mutex>
 #include <shared_mutex>
+#include <stdexcept>
 #include <string>
 
 namespace TangoBulk
@@ -44,46 +47,56 @@ template <class F> auto with_publisher(Tango::DeviceImpl *device, F f)
     }
 }
 
+std::string command_reply(Tango::DeviceImpl *device, std::string_view document)
+{
+    auto &r = registry();
+    std::shared_lock l(r.m);
+    auto it = r.publishers.find(device);
+    if(it == r.publishers.end())
+        return wire::format(wire::Reply{wire::Finished});
+    try
+    {
+        return transport::handle(*it->second, document);
+    }
+    catch(const std::exception &e)
+    {
+        Tango::Except::throw_exception("BulkFailed", e.what(), "tango-bulk");
+    }
+}
+
 class BulkCommand : public Tango::Command
 {
   public:
     BulkCommand(const std::string &name, const char *marker)
         : Tango::Command(name, Tango::DEV_STRING, Tango::DEV_STRING, marker,
-                         "tango-bulk-reply JSON document", Tango::EXPERT)
+                         "a tango-bulk-reply JSON document", Tango::OPERATOR)
     {
     }
     CORBA::Any *execute(Tango::DeviceImpl *device, const CORBA::Any &in) override
     {
         const char *document = nullptr;
         extract(in, document);
-        auto reply =
-            with_publisher(device, [&](Publisher &p) { return transport::handle(p, document); });
+        auto reply = command_reply(device, document);
         return insert(reply.c_str());
     }
 };
 
-class StreamAttr : public Tango::Attr
+// A scalar DevString attribute holding one JSON document.
+class DocumentAttr : public Tango::Attr
 {
   public:
-    StreamAttr() : Tango::Attr("BulkStream", Tango::DEV_STRING, Tango::READ) {}
+    DocumentAttr(const char *name, std::string (*get)(const Publisher &))
+        : Tango::Attr(name, Tango::DEV_STRING, Tango::READ), get_(get)
+    {
+    }
     void read(Tango::DeviceImpl *device, Tango::Attribute &a) override
     {
-        auto doc = with_publisher(device, [](Publisher &p) { return transport::bulk_stream(p); });
+        auto doc = with_publisher(device, [&](Publisher &p) { return get_(p); });
         a.set_value(new Tango::DevString(Tango::string_dup(doc.c_str())), 1, 0, true);
     }
-};
-class SessionsAttr : public Tango::SpectrumAttr
-{
-  public:
-    SessionsAttr() : Tango::SpectrumAttr("BulkSessions", Tango::DEV_STRING, Tango::READ, 64) {}
-    void read(Tango::DeviceImpl *device, Tango::Attribute &a) override
-    {
-        auto rows = with_publisher(device, [](Publisher &p) { return transport::session_rows(p); });
-        auto *values = new Tango::DevString[rows.size()];
-        for(std::size_t i = 0; i < rows.size(); ++i)
-            values[i] = Tango::string_dup(rows[i].c_str());
-        a.set_value(values, long(rows.size()), 0, true);
-    }
+
+  private:
+    std::string (*get_)(const Publisher &);
 };
 template <class T> class HealthAttr : public Tango::Attr
 {
@@ -108,21 +121,33 @@ void add(std::vector<Tango::Attr *> &list, Tango::Attr *attr, const char *descri
     attr->set_default_properties(properties);
     list.push_back(attr);
 }
+std::string lower(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
+    return s;
+}
 } // namespace
 
 void install_bulk_commands(std::vector<Tango::Command *> &list, std::string_view prefix)
 {
-    list.push_back(new BulkCommand(std::string(prefix) + "Open", wire::k_open_marker));
-    list.push_back(new BulkCommand(std::string(prefix) + "Close", wire::k_close_marker));
+    std::string open = std::string(prefix) + "Open", close = std::string(prefix) + "Close";
+    for(auto *command : list)
+        if(command && (lower(command->get_name()) == lower(open) ||
+                       lower(command->get_name()) == lower(close)))
+            throw std::invalid_argument("the device already has a command named " +
+                                        command->get_name());
+    list.push_back(new BulkCommand(open, wire::k_open_marker));
+    list.push_back(new BulkCommand(close, wire::k_close_marker));
 }
 void install_bulk_attributes(std::vector<Tango::Attr *> &list)
 {
     using U64 = Tango::DevULong64;
     using U32 = Tango::DevULong;
-    add(list, new StreamAttr, "The bulk stream: a tango-bulk-stream JSON document");
-    add(list, new SessionsAttr,
-        "One row per session: ordinal|label|delivery|state|depth|room|sent|skipped|"
-        "transfer_max_us|transport");
+    add(list, new DocumentAttr("BulkStream", transport::bulk_stream),
+        "The bulk stream: a tango-bulk-stream JSON document");
+    add(list, new DocumentAttr("BulkSessions", transport::bulk_sessions),
+        "The sessions, sampled with Health: a tango-bulk-sessions JSON document");
     add(list,
         new HealthAttr<U64>("BulkPublished", Tango::DEV_ULONG64,
                             [](const Health &h) { return U64(h.frames); }),

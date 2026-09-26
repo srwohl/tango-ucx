@@ -31,7 +31,7 @@ class Device : public TANGO_BASE_CLASS
     {
         PublisherLimits limits;
         limits.budget = 16ull << 20;
-        limits.max_sessions = 2;
+        limits.max_sessions = sessions;
         limits.allow_every = true;
         bulk.emplace(Description{Element::U8, {4096}, 8, "<u8"}, limits);
         next = 0;
@@ -40,38 +40,60 @@ class Device : public TANGO_BASE_CLASS
     }
     void delete_device() override
     {
+        frames = {};
         detach_publisher(*this);
         bulk.reset();
+    }
+    void publish(Slot &slot)
+    {
+        std::memset(slot.payload().data(), int(next & 0xff), slot.payload().size());
+        std::memcpy(slot.fields().data(), &next, sizeof(next));
+        std::move(slot).publish();
+        ++next;
     }
     Tango::DevLong publish(Tango::DevLong n)
     {
         Tango::DevLong done = 0;
-        for(; done < n; ++done, ++next)
+        for(; done < n; ++done)
         {
             auto slot = bulk->acquire(std::chrono::steady_clock::now() + std::chrono::seconds(1));
             if(!slot)
                 break;
-            std::memset(slot->payload().data(), int(next & 0xff), slot->payload().size());
-            std::memcpy(slot->fields().data(), &next, sizeof(next));
-            std::move(*slot).publish();
+            publish(*slot);
         }
         return done;
     }
-    // The loop grants every free slot ahead of the device, and grants issued before an every
-    // session's Open never reach it. Cancelling them, which uses no frame index, lets the next
-    // frame reach every open session.
-    Tango::DevLong drain()
+    // Ends this incarnation and makes another with `rows` session rows. The subscribers of this
+    // one get End, and five seconds to close their sessions.
+    void prepare(Tango::DevLong rows)
     {
+        bulk->finish();
         auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        auto n = bulk->health().slots_held;
-        for(; !n && std::chrono::steady_clock::now() < until; n = bulk->health().slots_held)
+        for(auto h = bulk->health(); h.every + h.latest && std::chrono::steady_clock::now() < until;
+            h = bulk->health())
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        for(auto i = n; i; --i)
-            bulk->acquire(std::chrono::steady_clock::now() + std::chrono::seconds(1));
-        return Tango::DevLong(n);
+        delete_device();
+        sessions = std::uint32_t(rows);
+        init_device();
+    }
+    // Publishes n frames from a thread of the device, as fast as its sessions allow, then ends
+    // the incarnation.
+    void start(Tango::DevLong n)
+    {
+        frames = std::jthread(
+            [this, n](std::stop_token stop)
+            {
+                for(Tango::DevLong i = 0; i < n && !stop.stop_requested();)
+                    if(auto slot = bulk->acquire(std::chrono::steady_clock::now() +
+                                                 std::chrono::milliseconds(100)))
+                        publish(*slot), ++i;
+                bulk->finish();
+            });
     }
     std::optional<Publisher> bulk;
     std::uint64_t next = 0;
+    std::uint32_t sessions = 2;
+    std::jthread frames;
 };
 
 class Command : public Tango::Command
@@ -102,21 +124,26 @@ class DeviceClass : public Tango::DeviceClass
                                                c.extract(in, n);
                                                return c.insert(d.publish(n));
                                            }));
-        command_list.push_back(new Command("Drain", Tango::DEV_VOID, Tango::DEV_LONG,
-                                           [](Command &c, Device &d, const CORBA::Any &)
-                                           { return c.insert(d.drain()); }));
         command_list.push_back(new Command("Finish", Tango::DEV_VOID, Tango::DEV_VOID,
                                            [](Command &c, Device &d, const CORBA::Any &)
                                            {
                                                d.bulk->finish();
                                                return c.insert();
                                            }));
-        // A new incarnation: detach, destroy the publisher, make and attach another.
-        command_list.push_back(new Command("Restart", Tango::DEV_VOID, Tango::DEV_VOID,
-                                           [](Command &c, Device &d, const CORBA::Any &)
+        command_list.push_back(new Command("Prepare", Tango::DEV_LONG, Tango::DEV_VOID,
+                                           [](Command &c, Device &d, const CORBA::Any &in)
                                            {
-                                               d.delete_device();
-                                               d.init_device();
+                                               Tango::DevLong n = 0;
+                                               c.extract(in, n);
+                                               d.prepare(n);
+                                               return c.insert();
+                                           }));
+        command_list.push_back(new Command("Start", Tango::DEV_LONG, Tango::DEV_VOID,
+                                           [](Command &c, Device &d, const CORBA::Any &in)
+                                           {
+                                               Tango::DevLong n = 0;
+                                               c.extract(in, n);
+                                               d.start(n);
                                                return c.insert();
                                            }));
         install_bulk_commands(command_list, "Stream");
@@ -156,7 +183,7 @@ int main(int argc, char *argv[])
             [](Tango::DeviceClass *c, const std::string &name, const std::string &description,
                Tango::DevState state, const std::string &status) -> Tango::DServer *
             { return new Server(c, name.c_str(), description.c_str(), state, status.c_str()); });
-        // Bulk commands run concurrently with Restart, so detach_publisher's wait is exercised.
+        // Bulk commands run concurrently with Prepare, so detach_publisher's wait is exercised.
         util->set_serial_model(Tango::NO_SYNC);
         util->server_init();
         (void)!::write(3, "READY\n", 6);

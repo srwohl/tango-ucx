@@ -256,7 +256,7 @@ void Sub::run()
             work |= worker->progress() != 0;
         if(begun && !started_sent)
         {
-            if(ready)
+            if(ready && !failed) // Ready may arrive before start, and an endpoint still fail
             {
                 started.set_value("");
                 started_sent = true;
@@ -703,27 +703,19 @@ Subscription PendingSubscription::start(std::string_view reply, Deadline d, Clos
         throw std::runtime_error("invalid reply to Open");
     if(m.status != wire::Ok)
         throw std::runtime_error(status_text(m.status));
-    if(!m.address_bytes)
-        throw std::runtime_error("reply to Open has no address");
+    // The Open was accepted, so the publisher holds a row: a failure from here on closes the
+    // session. A reply without an address fails at the endpoint.
     s.reply_promise.set_value(m);
     s.start_requested.store(true, std::memory_order_release);
     auto why = s.started_result.get();
+    Subscription sub(std::move(p_->sub));
+    p_.reset();
     if(!why.empty())
     {
-        s.stop = true;
-        s.close_by = d;
-        s.close = true;
-        s.queue.signal();
-        if(s.loop.joinable())
-            s.loop.join();
-        if(s.quarantined)
-            p_->sub.release();
-        p_.reset();
+        sub.close(std::chrono::steady_clock::now() + std::chrono::seconds(2));
         throw std::runtime_error(why);
     }
-    auto sub = std::move(p_->sub);
-    p_.reset();
-    return Subscription(std::move(sub));
+    return sub;
 }
 PendingSubscription prepare(const Offer &o, bool every, SubscriptionOptions options)
 {

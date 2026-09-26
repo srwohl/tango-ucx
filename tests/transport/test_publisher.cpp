@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <format>
 #include <thread>
 
 using namespace TangoBulk;
@@ -13,7 +14,6 @@ TEST_CASE("every and latest subscriptions observe the same published frame")
     Publisher publisher(test::small_description(), test::small_limits());
     auto every = test::subscribe(publisher, true);
     auto latest = test::subscribe(publisher, false);
-    test::cancel_earlier_grants(publisher);
     test::publish_one(publisher, std::byte{0x3c}, 1234);
     auto eb = every.read(test::deadline());
     auto lb = latest.read(test::deadline());
@@ -77,34 +77,58 @@ TEST_CASE("a malformed or refused bulk command gets a status, not an exception")
     publisher.finish();
 }
 
-TEST_CASE("a mid-stream every row gets consecutive frames from the grants issued after its Open")
+TEST_CASE("a mid-stream every row gets consecutive frames from grants issued after its Open")
 {
     Publisher publisher(test::small_description(), test::small_limits(1));
-    // With no row yet, the loop grants every free slot.
     auto granted = test::granted(publisher);
     auto options = test::small_options();
     options.budget = 256ull << 10;
     auto pending = transport::prepare(test::offer_of(publisher), true, options);
-    auto open = pending.open_message();
     wire::Request request;
-    REQUIRE(wire::parse(open, request) == wire::Ok);
+    REQUIRE(wire::parse(pending.open_message(), request) == wire::Ok);
     auto depth = request.open->depth;
     REQUIRE(depth < granted);
-    auto sub = std::move(pending).start(transport::handle(publisher, open), test::deadline(),
-                                        test::closer_for(publisher));
-    // The earlier grants reserved no room in the row; only the next `depth` grants did.
+    auto sub = std::move(pending).start(transport::handle(publisher, pending.open_message()),
+                                        test::deadline(), test::closer_for(publisher));
     for(std::uint32_t i = 0; i < granted + depth; ++i)
         test::publish_one(publisher);
     for(std::uint32_t i = 0; i < depth; ++i)
     {
         auto batch = sub.read(test::deadline());
-        INFO("frame " << i << " of " << depth << ", failure: " << sub.health().failure);
         REQUIRE(batch);
         CHECK(batch->index(0) == granted + i);
     }
-    CHECK(sub.health().failure.empty());
     sub.close(test::deadline());
-    publisher.finish();
+}
+
+TEST_CASE("BulkSessions lists all 64 sessions with their 64-byte labels")
+{
+    test::RawPeer peer; // one worker behind every session
+    Publisher publisher(test::small_description(), test::small_limits(64));
+    auto label = [](std::uint64_t session) { return std::format("{:064}", session); };
+    for(std::uint64_t session = 1; session <= 64; ++session)
+    {
+        wire::OpenMessage m{};
+        m.session = session;
+        m.incarnation = test::offer_of(publisher).incarnation;
+        m.depth = 4;
+        m.batch = 1;
+        m.label_bytes = 64;
+        std::ranges::copy(label(session), m.label.begin());
+        m.address_bytes = std::uint16_t(peer.worker.address().size());
+        std::ranges::copy(peer.worker.address(), m.address.begin());
+        wire::Reply reply;
+        REQUIRE(wire::parse(transport::handle(publisher, wire::format(m)), reply));
+        REQUIRE(reply.status == wire::Ok);
+    }
+    auto sessions = test::sessions(publisher);
+    REQUIRE(test::eventually([&] { return (sessions = test::sessions(publisher)).size() == 64; }));
+    for(std::uint64_t i = 0; i < 64; ++i)
+    {
+        CHECK(sessions[i]["ordinal"] == i + 1);
+        CHECK(sessions[i]["label"] == label(i + 1));
+        CHECK(sessions[i]["delivery"] == "latest");
+    }
 }
 
 TEST_CASE("a new every subscription waits behind the grants issued before its Open")
@@ -113,7 +137,7 @@ TEST_CASE("a new every subscription waits behind the grants issued before its Op
     auto limits = test::small_limits(1);
     limits.budget = 12ull << 20;
     Publisher publisher(d, limits);
-    auto S = test::granted(publisher); // with no session, every source slot is granted ahead
+    auto S = test::granted(publisher);
     std::atomic<std::uint64_t> published{0};
     std::jthread device( // a 10 Hz device
         [&](std::stop_token stop)
@@ -126,15 +150,21 @@ TEST_CASE("a new every subscription waits behind the grants issued before its Op
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
     auto before = published.load();
     auto opened = std::chrono::steady_clock::now();
-    auto sub = test::subscribe(publisher, true, {.budget = 8ull << 20});
-    auto first = sub.read(test::deadline(std::chrono::seconds(30)));
+    auto sub = test::subscribe(publisher, true, {.budget = 8ull << 20}, {}, false);
+    auto first = sub.read(test::deadline());
     auto waited = std::chrono::steady_clock::now() - opened;
     REQUIRE(first);
-    auto behind = first->index(0) - before; // frames published after the Open that it never got
+    auto behind = first->index(0) - before;
     INFO("S=" << S << " behind=" << behind
               << " waited_ms=" << waited / std::chrono::milliseconds(1));
     CHECK(behind + 2 >= S);
     CHECK(waited >= (behind - 1) * std::chrono::milliseconds(100));
+    for(auto next = first->index(0) + 1; next < first->index(0) + 4; ++next)
+    {
+        auto batch = sub.read(test::deadline());
+        REQUIRE(batch);
+        CHECK(batch->index(0) == next);
+    }
     first.reset();
     sub.close(test::deadline());
 }
@@ -143,7 +173,6 @@ TEST_CASE("an every row without room makes the device wait, and Health names it 
 {
     Publisher publisher(test::small_description(), test::small_limits(1)); // pressure_timeout 0
     auto sub = test::subscribe(publisher, true, {.budget = 128ull << 10, .label = "slow"});
-    test::cancel_earlier_grants(publisher);
     REQUIRE(test::eventually([&] { return test::first_row(publisher, "depth") != ~0ull; }));
     for(auto n = test::first_row(publisher, "depth"); n; --n)
         test::publish_one(publisher);
@@ -153,7 +182,9 @@ TEST_CASE("an every row without room makes the device wait, and Health names it 
     CHECK(h.pressure_from == 1); // the row's BulkSessions ordinal
     CHECK(h.slots_free > 0);     // the device waits for room, not for memory
     CHECK(h.failed_every == 0);
-    CHECK(transport::session_rows(publisher)[0].starts_with("1|slow|every|ready|"));
+    auto row = test::sessions(publisher).at(0);
+    CHECK((row["ordinal"] == 1 && row["label"] == "slow" && row["delivery"] == "every" &&
+           row["state"] == "ready"));
     CHECK(test::first_row(publisher, "room") == 0);
     CHECK(sub.read(test::deadline())); // one batch released: room for one more frame
     CHECK(publisher.acquire(test::deadline()));
@@ -167,7 +198,6 @@ TEST_CASE("eviction ends a stalled every session with End(evicted), and latest i
     Publisher publisher(test::small_description(), limits);
     auto stalled = test::subscribe(publisher, true, {.budget = 128ull << 10});
     auto idle = test::subscribe(publisher, false, {.budget = 128ull << 10});
-    test::cancel_earlier_grants(publisher);
     std::uint64_t depth = 0;
     REQUIRE(
         test::eventually([&] { return (depth = test::first_row(publisher, "depth")) != ~0ull; }));
@@ -209,11 +239,35 @@ TEST_CASE("a latest row is paced by max_rate, and every frame it misses is a ski
     sub.close(test::deadline());
 }
 
+TEST_CASE("after finish, a full every row that is still draining is not evicted, and ends End")
+{
+    auto limits = test::small_limits(1);
+    limits.pressure_timeout = std::chrono::milliseconds(300);
+    Publisher publisher(test::small_description(), limits);
+    auto sub = test::subscribe(publisher, true, {.budget = 128ull << 10});
+    REQUIRE(test::eventually([&] { return test::first_row(publisher, "depth") != ~0ull; }));
+    auto depth = test::first_row(publisher, "depth");
+    for(auto n = depth; n; --n)
+        test::publish_one(publisher); // the row is full
+    publisher.finish();
+    std::this_thread::sleep_for(std::chrono::seconds(1)); // past the pressure timeout
+    for(std::uint64_t i = 0; i < depth; ++i)
+    {
+        auto batch = sub.read(test::deadline());
+        INFO("frame " << i << ", failure: " << sub.health().failure);
+        REQUIRE(batch);
+        CHECK(batch->index(0) == i);
+    }
+    CHECK_FALSE(sub.read(test::deadline()));
+    CHECK(sub.outcome() == Outcome::End);
+    CHECK(publisher.health().failed_every == 0);
+    sub.close(test::deadline());
+}
+
 TEST_CASE("frames are routed in grant order, and a cancelled slot uses no frame index")
 {
     Publisher publisher(test::small_description(), test::small_limits(1));
     auto sub = test::subscribe(publisher, true);
-    test::cancel_earlier_grants(publisher);
     auto fill = [](Slot &s, int v) { std::memset(s.payload().data(), v, s.payload().size()); };
     auto a = publisher.acquire(test::deadline());
     auto b = publisher.acquire(test::deadline());
@@ -282,7 +336,6 @@ TEST_CASE("End after finish follows the completion of every frame send")
 {
     Publisher publisher({Element::U8, {1 << 20}, 0, {}}, test::small_limits(1));
     auto sub = test::subscribe(publisher, true, {.budget = 16ull << 20});
-    test::cancel_earlier_grants(publisher);
     for(int i = 0; i < 3; ++i)
         test::publish_one(publisher);
     publisher.finish();

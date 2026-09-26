@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace TangoBulk::wire
 {
@@ -85,11 +86,27 @@ struct StreamMessage
     bool allow_every = false;
     std::uint32_t max_sessions = 0;
 };
+// The BulkSessions attribute: the sessions of one Health sample.
+struct SessionRow
+{
+    std::uint32_t ordinal = 0;
+    std::string label;
+    bool every = false, retiring = false;
+    std::uint32_t depth = 0, room = 0;
+    std::uint64_t sent = 0, skipped = 0, transfer_max_us = 0;
+    std::string transport;
+};
+struct SessionsMessage
+{
+    std::uint64_t incarnation = 0;
+    std::vector<SessionRow> sessions;
+};
 
 std::string format(const OpenMessage &);
 std::string format(const CloseMessage &);
 std::string format(const Reply &);
 std::string format(const StreamMessage &);
+std::string format(const SessionsMessage &);
 Status parse(std::string_view, Request &);
 bool parse(std::string_view, Reply &);
 Status parse(std::string_view, StreamMessage &);

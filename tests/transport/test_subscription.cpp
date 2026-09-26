@@ -43,7 +43,6 @@ TEST_CASE("a held batch keeps its host storage alive after close")
 {
     Publisher publisher(test::small_description(), test::small_limits());
     auto sub = test::subscribe(publisher, true);
-    test::cancel_earlier_grants(publisher);
     test::publish_one(publisher, std::byte{0x6d});
     auto batch = sub.read(test::deadline());
     REQUIRE(batch);
@@ -150,7 +149,6 @@ TEST_CASE("a copy holds no receive slots")
 {
     Publisher publisher(test::small_description(), test::small_limits(1));
     auto sub = test::subscribe(publisher, true);
-    test::cancel_earlier_grants(publisher);
     test::publish_one(publisher, std::byte{0x77});
     auto batch = sub.read(test::deadline());
     REQUIRE(batch);
@@ -201,7 +199,6 @@ TEST_CASE("frames arriving while a subscription closes are ignored, and nothing 
 {
     Publisher publisher(test::small_description(), test::small_limits(1));
     auto sub = test::subscribe(publisher, true);
-    test::cancel_earlier_grants(publisher);
     std::jthread device(
         [&](std::stop_token stop)
         {
@@ -213,8 +210,46 @@ TEST_CASE("frames arriving while a subscription closes are ignored, and nothing 
         CHECK(sub.read(test::deadline()));
     sub.close(test::deadline());
     CHECK(sub.outcome() == Outcome::Cancelled);
-    CHECK(test::eventually([&] { return transport::session_rows(publisher).empty(); }));
+    CHECK(test::eventually([&] { return test::sessions(publisher).empty(); }));
     CHECK(publisher.health().failed_every == 0);
+}
+
+TEST_CASE("a start that fails after an accepted Open closes the session the Open made")
+{
+    Publisher publisher(test::small_description(), test::small_limits(1)); // one session row
+    auto pending = transport::prepare(test::offer_of(publisher), true, test::small_options());
+    wire::Reply reply;
+    REQUIRE(wire::parse(transport::handle(publisher, pending.open_message()), reply));
+    REQUIRE(reply.status == wire::Ok);
+    reply.address_bytes = 0; // without the publisher's address, start cannot make its endpoint
+    CHECK_THROWS(std::move(pending).start(wire::format(reply), test::deadline(),
+                                          test::closer_for(publisher)));
+    auto sub = test::subscribe(publisher, true); // refused with no-session if the row were kept
+    test::publish_one(publisher);
+    CHECK(sub.read(test::deadline()));
+    sub.close(test::deadline());
+}
+
+TEST_CASE("a start with no Ready by its deadline sends Close for its session")
+{
+    test::RawPeer peer; // answers the Open but never sends Ready
+    auto pending = transport::prepare({test::small_description(), test::small_limits(), 7}, true,
+                                      test::small_options());
+    wire::Request open;
+    REQUIRE(wire::parse(pending.open_message(), open) == wire::Ok);
+    wire::Reply reply{wire::Ok};
+    reply.address_bytes = std::uint16_t(peer.worker.address().size());
+    std::ranges::copy(peer.worker.address(), reply.address.begin());
+    std::vector<std::uint64_t> closed;
+    auto closer = [&](std::string_view doc, Deadline)
+    {
+        wire::Request r;
+        if(wire::parse(doc, r) == wire::Ok && !r.open)
+            closed.push_back(r.close.session);
+        return false;
+    };
+    CHECK_THROWS(std::move(pending).start(wire::format(reply), test::deadline(1s), closer));
+    CHECK(closed == std::vector{open.open->session});
 }
 
 TEST_CASE("a publisher that closes tells its subscriptions why they end")

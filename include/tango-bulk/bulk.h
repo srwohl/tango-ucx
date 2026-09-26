@@ -82,7 +82,7 @@ struct Sub;
 class PendingSubscription;
 std::string handle(Publisher &, std::string_view);
 std::string bulk_stream(const Publisher &);
-std::vector<std::string> session_rows(const Publisher &);
+std::string bulk_sessions(const Publisher &);
 } // namespace transport
 
 class Slot
@@ -125,7 +125,7 @@ class Publisher
     friend struct transport::Sub;
     friend std::string transport::handle(Publisher &, std::string_view);
     friend std::string transport::bulk_stream(const Publisher &);
-    friend std::vector<std::string> transport::session_rows(const Publisher &);
+    friend std::string transport::bulk_sessions(const Publisher &);
     std::shared_ptr<transport::Pub> p_;
 };
 

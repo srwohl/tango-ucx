@@ -93,18 +93,11 @@ struct IndexRing
         std::lock_guard l(m);
         return take_locked();
     }
-    template <class Done, class Took> int pop_until(Deadline d, Done done, Took took)
+    template <class Done> int pop_until(Deadline d, Done done)
     {
         std::unique_lock l(m);
         cv.wait_until(l, d, [&] { return size || done(); });
-        int x = take_locked();
-        if(x >= 0)
-            took(std::uint32_t(x));
-        return x;
-    }
-    template <class Done> int pop_until(Deadline d, Done done)
-    {
-        return pop_until(d, done, [](std::uint32_t) {});
+        return take_locked();
     }
     bool empty()
     {
@@ -232,8 +225,9 @@ struct ControlTable
                l, d,
                [&] { return e->state.load(std::memory_order_acquire) == ControlEntry::Replied; }))
         {
+            // Not taken yet: nothing else will free the entry. Taken: the loop frees it.
             std::uint8_t expected = ControlEntry::Posted;
-            if(e->state.compare_exchange_strong(expected, ControlEntry::Abandoned))
+            if(e->state.compare_exchange_strong(expected, ControlEntry::Free))
                 return {wire::Timeout};
             expected = ControlEntry::Taken;
             if(e->state.compare_exchange_strong(expected, ControlEntry::Abandoned))
@@ -258,14 +252,17 @@ struct ControlTable
         }
         return any;
     }
-    void reply(ControlEntry &e, const wire::Reply &r)
+    // False when the caller had given up: nobody reads the reply.
+    bool reply(ControlEntry &e, const wire::Reply &r)
     {
         e.out = r;
         std::uint8_t t = ControlEntry::Taken;
-        if(!e.state.compare_exchange_strong(t, ControlEntry::Replied))
+        bool delivered = e.state.compare_exchange_strong(t, ControlEntry::Replied);
+        if(!delivered)
             e.state.store(ControlEntry::Free);
         std::lock_guard l(m); // a caller between its check and its wait must not miss this
         cv.notify_all();
+        return delivered;
     }
     void wake()
     {

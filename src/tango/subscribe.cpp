@@ -20,26 +20,35 @@ struct Commands
     std::string open, close;
 };
 // The bulk commands, whatever the device named them.
-Commands find_commands(Tango::DeviceProxy &proxy)
+Commands discover(Tango::DeviceProxy &proxy)
 {
     std::unique_ptr<Tango::CommandInfoList> list(proxy.command_list_query());
     Commands found;
+    int other = -1;
     for(const auto &c : *list)
     {
         int major = transport::marker_major(c.in_type_desc);
-        if(major < 0 || c.in_type != Tango::DEV_STRING)
+        if(major < 0 || c.in_type != Tango::DEV_STRING || c.out_type != Tango::DEV_STRING)
             continue;
         if(major != wire::k_major)
-            throw std::runtime_error(
-                std::format("{} speaks tango-bulk/{}; this library tango-bulk/{}", c.cmd_name,
-                            major, wire::k_major));
-        auto &name = c.in_type_desc.ends_with(" open") ? found.open : found.close;
-        if(!name.empty())
-            throw std::runtime_error("the device has more than one set of bulk commands");
-        name = c.cmd_name;
+        {
+            other = major;
+            continue;
+        }
+        std::string *name = c.in_type_desc == wire::k_open_marker ? &found.open
+                            : c.in_type_desc == wire::k_close_marker ? &found.close
+                                                                     : nullptr;
+        if(!name)
+            continue;
+        if(!name->empty())
+            throw std::runtime_error(proxy.dev_name() + " has two sets of bulk commands");
+        *name = c.cmd_name;
     }
     if(found.open.empty() || found.close.empty())
-        throw std::runtime_error("the device has no bulk commands");
+        throw std::runtime_error(
+            other < 0 ? proxy.dev_name() + " has no bulk commands"
+                      : proxy.dev_name() + " speaks tango-bulk/" + std::to_string(other) +
+                            "; this library speaks tango-bulk/" + std::to_string(wire::k_major));
     return found;
 }
 std::string command(Tango::DeviceProxy &proxy, const std::string &name, std::string_view document)
@@ -52,7 +61,7 @@ std::string command(Tango::DeviceProxy &proxy, const std::string &name, std::str
 }
 Subscription subscribe(Tango::DeviceProxy &proxy, bool every, SubscriptionOptions options)
 {
-    auto names = find_commands(proxy);
+    auto names = discover(proxy);
     std::string stream;
     proxy.read_attribute("BulkStream") >> stream;
     auto pending =
