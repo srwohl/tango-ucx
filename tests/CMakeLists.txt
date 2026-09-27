@@ -25,3 +25,11 @@ target_link_libraries(test_tango PRIVATE tango-bulk Catch2::Catch2WithMain nlohm
 target_compile_definitions(test_tango PRIVATE TANGO_BULK_FIXTURE_DEVICE="$<TARGET_FILE:fixture_device>")
 add_dependencies(test_tango fixture_device)
 catch_discover_tests(test_tango PROPERTIES LABELS tango)
+
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME test_python
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "PYTHONPATH=${CMAKE_BINARY_DIR}/python"
+        "TANGO_BULK_FIXTURE_DEVICE=$<TARGET_FILE:fixture_device>"
+        "${Python3_EXECUTABLE}" -m pytest "${PROJECT_SOURCE_DIR}/python/tests")
+set_tests_properties(test_python PROPERTIES LABELS python)

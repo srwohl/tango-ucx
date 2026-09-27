@@ -37,8 +37,8 @@ gpu = ["default", "gpu"]
 [tasks]
 configure = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build -DBUILD_TESTING=ON" }
 build = { cmd = "cmake --build build", depends-on = ["configure"] }
-test = { cmd = "ctest --test-dir build -L 'unit|ucx|tango' --output-on-failure", depends-on = ["build"] }
-test-python = { cmd = "pytest python/tests" }
+test = { cmd = "ctest --test-dir build -L 'unit|ucx|tango|python' --output-on-failure", depends-on = ["build"] }
+test-python = { cmd = "PYTHONPATH=build/python TANGO_BULK_FIXTURE_DEVICE=build/tests/fixture_device pytest python/tests", depends-on = ["build"] }
 test-gpu = { cmd = "ctest --test-dir build -L gpu --output-on-failure && pytest -m gpu", depends-on = ["build"] }
 _configure-asan = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build-asan -DBUILD_TESTING=ON -DTANGO_BULK_SANITIZERS=address,undefined" }
 _build-asan = { cmd = "cmake --build build-asan", depends-on = ["_configure-asan"] }

@@ -31,6 +31,7 @@ endif()
 
 add_subdirectory(src/transport)
 add_subdirectory(src/tango)
+add_subdirectory(python)
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()

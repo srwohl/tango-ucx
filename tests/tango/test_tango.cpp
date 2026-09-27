@@ -229,11 +229,20 @@ TEST_CASE("detach_publisher waits for the bulk commands inside the publisher")
                 d << doc;
                 std::string reply;
                 own.command_inout("StreamClose", d) >> reply;
-                ++(status(reply) == "unknown-session" ? replies : other);
+                auto result = status(reply);
+                if(result == "unknown-session")
+                    ++replies;
+                else if(result == "finished")
+                    ++unavailable;
+                else
+                    ++other;
             }
             catch(const Tango::DevFailed &e)
             {
-                ++(std::string(e.errors[0].reason) == "BulkUnavailable" ? unavailable : other);
+                if(std::string(e.errors[0].reason) == "BulkUnavailable")
+                    ++unavailable;
+                else
+                    ++other;
             }
     };
     std::jthread a(hammer), b(hammer);

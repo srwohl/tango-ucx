@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+# SPDX-License-Identifier: LGPL-3.0-or-later
+
+import json
+import importlib
+import sys
+
+import pytest
+
+import tango_bulk
+
+
+def native_core():
+    return importlib.import_module("tango_bulk._core")
+
+
+@pytest.fixture(autouse=True)
+def release_native_core_module():
+    yield
+    native = sys.modules.pop("tango_bulk._core", None)
+    if getattr(tango_bulk, "_core", None) is native:
+        del tango_bulk._core
+
+
+@pytest.fixture
+def bulk_stream():
+    return json.dumps(
+        {
+            "interface": "tango-bulk-stream/3.0",
+            "incarnation": 12648430,
+            "element": "u16",
+            "shape": [4, 8],
+            "field_bytes": 8,
+            "field_dtype": "[('timestamp','<f8')]",
+            "allow_every": True,
+            "max_sessions": 4,
+        }
+    )
+
+
+def test_prepare_builds_an_open_message_from_bulk_stream_and_options(bulk_stream):
+    pending = native_core().prepare(
+        bulk_stream,
+        False,
+        8 << 20,
+        4,
+        0.025,
+        2.0,
+        False,
+        "preview",
+    )
+
+    message = json.loads(pending.open_message())
+    assert message["interface"] == "tango-bulk-open/3.0"
+    assert message["incarnation"] == 12648430
+    assert message["delivery"] == "latest"
+    assert message["batch"] == 4
+    assert message["min_interval_ns"] == 500_000_000
+    assert message["label"] == "preview"
+    assert message["gpu"] is False
+
+
+def test_prepare_rejects_every_when_the_publisher_does_not_allow_it(bulk_stream):
+    offer = json.loads(bulk_stream)
+    offer["allow_every"] = False
+
+    with pytest.raises(ValueError, match="refuses every"):
+        native_core().prepare(json.dumps(offer), True, 8 << 20, 1, 0.01, 0.0, False, "")
+
+
+def test_start_calls_the_python_closer_after_an_accepted_open_cannot_reach_ready(bulk_stream):
+    pending = native_core().prepare(bulk_stream, False, 8 << 20, 1, 0.01, 0.0, False, "")
+    session = json.loads(pending.open_message())["session"]
+    calls = []
+
+    def closer(document, remaining_seconds):
+        calls.append((json.loads(document), remaining_seconds))
+        return True
+
+    reply = '{"interface":"tango-bulk-reply/3.0","status":"ok"}'
+    with pytest.raises(RuntimeError, match="endpoint"):
+        pending.start(reply, closer, 0.5)
+
+    assert len(calls) == 1
+    assert calls[0][0] == {
+        "interface": "tango-bulk-close/3.0",
+        "session": session,
+    }
+    assert calls[0][1] > 0
+
+
+def test_start_rejects_non_finite_timeouts_before_consuming_the_pending_subscription(bulk_stream):
+    pending = native_core().prepare(bulk_stream, False, 8 << 20, 1, 0.01, 0.0, False, "")
+
+    with pytest.raises(ValueError, match="timeout"):
+        pending.start("{}", None, float("nan"))
+
+    assert json.loads(pending.open_message())["delivery"] == "latest"

@@ -2,15 +2,18 @@
 
 First implementation attempt for the selected fixed-table design in
 [`tango-bulk/prototypes/final_shape/fixed_tables_v2.md`](../tango-bulk/prototypes/final_shape/fixed_tables_v2.md).
-The implementation is intentionally empty at this stage. This tree starts with
-the build, packaging, line-budget, and architecture-check scaffolding; the first
-code milestone is the host-only UCX vertical slice described in section 16 of
-that design.
+The host-only UCX vertical slice, Tango control, and Python host subscriber are
+implemented. CUDA receive through DLPack is Phase 3; pull delivery remains
+backlog.
 
-The first attempt covers C++ publication and Tango control, the Python
-subscriber, and CUDA receive through DLPack. Pull delivery remains backlog.
-Library and test source must remain under 10,000 physical lines, with the
-published estimates and per-file allowances recorded in `budget.toml`.
+Library and test source must remain under 10,000 physical lines, with estimates
+and per-file allowances recorded in `budget.toml`.
+
+The Python host subscriber is built at `build/python/tango_bulk` by `pixi run build`.
+Import it from the checkout with `PYTHONPATH=build/python pixi run python -c 'import tango_bulk'`.
+Pass a Tango device name or an existing PyTango `DeviceProxy` to `every()` or `latest()`;
+each returned `Batch` exposes read-only NumPy payload and record arrays. Async
+iteration and callback delivery are available on the same subscription.
 
 ## Development
 
@@ -20,7 +23,7 @@ Use the default pixi environment for host development:
 pixi run configure
 pixi run build
 pixi run test
-pixi run test-python
+pixi run test-python # focused Python suite; also included in pixi run test
 pixi run check
 pixi run count
 ```
