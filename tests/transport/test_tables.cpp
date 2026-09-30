@@ -54,6 +54,21 @@ TEST_CASE("IndexRing keeps FIFO order across its wrap, and its fd is readable wh
     CHECK(ring.pop_until(test::deadline(), [&] { return ended.load(); }) == -1);
 }
 
+TEST_CASE("IndexRing waits without a deadline, leaving the lock to the thread that pushes")
+{
+    IndexRing ring;
+    ring.reserve(1);
+    std::atomic<int> checks{0};
+    std::jthread t(
+        [&]
+        {
+            std::this_thread::sleep_for(100ms);
+            CHECK(checks.load() <= 2);
+            ring.push(7);
+        });
+    CHECK(ring.pop_until(Deadline::max(), [&] { return ++checks, false; }) == 7);
+}
+
 TEST_CASE("ControlTable returns the loop's reply to the caller that posted the request")
 {
     ControlTable table;

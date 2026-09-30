@@ -55,6 +55,20 @@ struct EventFd
     }
 };
 
+// Near the clock's range limit (Deadline::max() is "no deadline"), glibc refuses the timeout and
+// libstdc++ reports it as not reached, so cv.wait_until spins holding the mutex. Wait untimed.
+template <class Ready>
+bool wait_until(std::condition_variable &cv, std::unique_lock<std::mutex> &l, Deadline d,
+                Ready ready)
+{
+    if(d > Deadline::clock::now() + std::chrono::hours(24 * 365 * 100))
+    {
+        cv.wait(l, ready);
+        return true;
+    }
+    return cv.wait_until(l, d, ready);
+}
+
 struct IndexRing
 {
     std::mutex m;
@@ -96,7 +110,7 @@ struct IndexRing
     template <class Done> int pop_until(Deadline d, Done done)
     {
         std::unique_lock l(m);
-        cv.wait_until(l, d, [&] { return size || done(); });
+        wait_until(cv, l, d, [&] { return size || done(); });
         return take_locked();
     }
     bool empty()
@@ -221,8 +235,8 @@ struct ControlTable
         e->state.store(ControlEntry::Posted, std::memory_order_release);
         cv.notify_all();
         std::unique_lock l(m);
-        if(!cv.wait_until(
-               l, d,
+        if(!wait_until(
+               cv, l, d,
                [&] { return e->state.load(std::memory_order_acquire) == ControlEntry::Replied; }))
         {
             // Not taken yet: nothing else will free the entry. Taken: the loop frees it.
