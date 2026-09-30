@@ -3,6 +3,7 @@
 #include "fixtures/fault_adapter.h"
 #include "fixtures/fork.h"
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <tables.h>
 
 #include <array>
@@ -11,6 +12,7 @@
 #include <string_view>
 #include <sys/wait.h>
 #include <thread>
+#include <vector>
 
 using namespace TangoBulk;
 
@@ -48,56 +50,41 @@ TEST_CASE("forced close preserves ownership around a large in-flight receive")
     publisher.finish();
 }
 
+namespace
+{
+// Runs a case once for each way UCX finds a dead peer: over shared memory it checks the peer's
+// process, over tcp it sees the socket close.
+std::string peer_transport()
+{
+    auto tls = GENERATE(as<std::string>{}, "all", "tcp");
+    ::setenv("TANGO_BULK_UCX_TLS", tls.c_str(), 1);
+    return tls;
+}
+} // namespace
+
 TEST_CASE("a subscriber killed with SIGKILL is detected through the UCX peer endpoint")
 {
-    ::setenv("UCX_TLS", "tcp", 1); // Use a process-independent transport for the fixture.
-    int to_child[2], to_parent[2];
-    REQUIRE(::pipe(to_child) == 0);
-    REQUIRE(::pipe(to_parent) == 0);
-    auto pid = ::fork();
-    REQUIRE(pid >= 0);
-    struct ChildGuard
+    auto tls = peer_transport();
+    test::Forked child;
+    if(child.pid == 0)
     {
-        pid_t pid;
-        ~ChildGuard()
-        {
-            if(pid > 0)
-            {
-                int status = 0;
-                ::kill(pid, SIGKILL);
-                ::waitpid(pid, &status, 0);
-            }
-        }
-    } child_guard{pid};
-    if(pid == 0)
-    {
-        ::close(to_child[1]);
-        ::close(to_parent[0]);
         test::ForkOffer fo{};
-        if(!test::read_all(to_child[0], &fo, sizeof(fo)))
+        if(!test::read_all(child.in(), &fo, sizeof(fo)))
             ::_exit(2);
-        Description d = test::small_description();
-        PublisherLimits l = test::small_limits(fo.sessions);
-        l.allow_every = fo.every != 0;
-        SubscriptionOptions opts = test::small_options();
-        transport::Offer o{d, l, fo.incarnation};
+        transport::Offer o{test::small_description(), test::small_limits(fo.sessions),
+                           fo.incarnation};
+        o.limits.allow_every = fo.every != 0;
         try
         {
-            auto pending = transport::prepare(o, true, opts);
-            auto open = pending.open_message();
-            if(!test::write_text(to_parent[1], open))
+            auto pending = transport::prepare(o, true, test::small_options());
+            if(!test::write_text(child.out(), pending.open_message()))
                 ::_exit(3);
-            auto reply = test::read_text(to_child[0]);
+            auto reply = test::read_text(child.in());
             if(reply.empty())
                 ::_exit(4);
-            auto sub = std::move(pending).start(
-                reply, std::chrono::steady_clock::now() + std::chrono::seconds(10), {});
-            auto health = sub.health();
-            auto transport_bytes = std::uint8_t(health.transport.size());
-            char ready = 'R';
-            if(!test::write_all(to_parent[1], &ready, 1) ||
-               !test::write_all(to_parent[1], &transport_bytes, sizeof(transport_bytes)) ||
-               !test::write_all(to_parent[1], health.transport.data(), transport_bytes))
+            auto sub =
+                std::move(pending).start(reply, test::deadline(std::chrono::seconds(10)), {});
+            if(!test::write_text(child.out(), sub.health().transport))
                 ::_exit(5);
             for(;;)
                 ::pause();
@@ -107,33 +94,20 @@ TEST_CASE("a subscriber killed with SIGKILL is detected through the UCX peer end
             ::_exit(6);
         }
     }
-    ::close(to_child[0]);
-    ::close(to_parent[1]);
     Publisher publisher(test::small_description(), test::small_limits(2));
     auto o = test::offer_of(publisher);
     test::ForkOffer fo{o.incarnation, o.limits.max_sessions, std::uint8_t(o.limits.allow_every)};
-    REQUIRE(test::write_all(to_child[1], &fo, sizeof(fo)));
-    auto open = test::read_text(to_parent[0]);
+    REQUIRE(test::write_all(child.out(), &fo, sizeof(fo)));
+    auto open = test::read_text(child.in());
     REQUIRE_FALSE(open.empty());
-    auto reply = transport::handle(publisher, open);
-    REQUIRE_FALSE(reply.empty());
-    REQUIRE(test::write_text(to_child[1], reply));
-    char ready = 0;
-    REQUIRE(test::read_all(to_parent[0], &ready, 1));
-    REQUIRE(ready == 'R');
-    std::uint8_t transport_bytes = 0;
-    REQUIRE(test::read_all(to_parent[0], &transport_bytes, sizeof(transport_bytes)));
-    std::array<char, 32> transport{};
-    REQUIRE(transport_bytes < transport.size());
-    REQUIRE(test::read_all(to_parent[0], transport.data(), transport_bytes));
-    INFO("subscriber transport=" << transport.data());
-    CHECK(std::string_view(transport.data()).find("tcp") != std::string_view::npos);
-    REQUIRE(::kill(pid, SIGKILL) == 0);
-    int status = 0;
-    REQUIRE(::waitpid(pid, &status, 0) == pid);
-    CHECK(WIFSIGNALED(status));
-    CHECK(WTERMSIG(status) == SIGKILL);
-    auto until = std::chrono::steady_clock::now() + std::chrono::seconds(12);
+    REQUIRE(test::write_text(child.out(), transport::handle(publisher, open)));
+    auto transport = test::read_text(child.in());
+    REQUIRE_FALSE(transport.empty());
+    INFO("UCX_TLS=" << tls << ", subscriber transport=" << transport);
+    if(tls == "tcp")
+        CHECK(transport.find("tcp") != std::string::npos);
+    REQUIRE(child.kill());
+    auto until = test::deadline(std::chrono::seconds(12));
     Health h;
     std::uint32_t sends = 0;
     while(std::chrono::steady_clock::now() < until && sends < 1024)
@@ -158,8 +132,69 @@ TEST_CASE("a subscriber killed with SIGKILL is detected through the UCX peer end
     INFO("published after subscriber death=" << sends << " failed every=" << h.failed_every);
     CHECK(h.failed_every == 1);
     publisher.finish();
-    ::close(to_child[1]);
-    ::close(to_parent[0]);
+}
+
+TEST_CASE("a publisher killed with SIGKILL ends an every subscription Failed after its last frame")
+{
+    auto tls = peer_transport();
+    test::Forked child;
+    if(child.pid == 0)
+    {
+        try
+        {
+            Publisher publisher(test::small_description(), test::small_limits(1));
+            auto o = test::offer_of(publisher);
+            test::ForkOffer fo{o.incarnation, o.limits.max_sessions,
+                               std::uint8_t(o.limits.allow_every)};
+            if(!test::write_all(child.out(), &fo, sizeof(fo)))
+                ::_exit(2);
+            auto open = test::read_text(child.in());
+            if(open.empty() || !test::write_text(child.out(), transport::handle(publisher, open)))
+                ::_exit(3);
+            for(;;) // until killed; an every session holds the device while its ring is full
+                if(auto slot = publisher.acquire(test::deadline()))
+                    std::move(*slot).publish();
+        }
+        catch(...)
+        {
+            ::_exit(4);
+        }
+    }
+    test::ForkOffer fo{};
+    REQUIRE(test::read_all(child.in(), &fo, sizeof(fo)));
+    transport::Offer o{test::small_description(), test::small_limits(fo.sessions), fo.incarnation};
+    o.limits.allow_every = fo.every != 0;
+    auto pending = transport::prepare(o, true, test::small_options());
+    REQUIRE(test::write_text(child.out(), pending.open_message()));
+    auto reply = test::read_text(child.in());
+    REQUIRE_FALSE(reply.empty());
+    auto sub = std::move(pending).start(reply, test::deadline(), {});
+    INFO("UCX_TLS=" << tls << ", subscriber transport=" << sub.health().transport);
+    std::vector<std::uint64_t> indices;
+    auto take = [&](const Batch &batch)
+    {
+        for(std::size_t i = 0; i < batch.frames(); ++i)
+            indices.push_back(batch.index(i));
+    };
+    while(indices.size() < 3)
+    {
+        auto batch = sub.read(test::deadline());
+        REQUIRE(batch);
+        take(*batch);
+    }
+    REQUIRE(child.kill());
+    auto until = test::deadline(std::chrono::seconds(12));
+    while(!sub.outcome() && std::chrono::steady_clock::now() < until)
+        if(auto batch = sub.read(until))
+            take(*batch);
+    REQUIRE(sub.outcome() == Outcome::Failed);
+    auto h = sub.health();
+    INFO("failure=" << h.failure);
+    CHECK_FALSE(h.failure.empty());
+    CHECK(h.last_index == indices.back());
+    for(std::size_t i = 1; i < indices.size(); ++i)
+        CHECK(indices[i] == indices[i - 1] + 1);
+    sub.close(test::deadline(std::chrono::seconds(1)));
 }
 
 // Over shared memory, a peer that destroyed its worker while its process lives fires no PEER

@@ -3,10 +3,13 @@
 #pragma once
 
 #include <cerrno>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace TangoBulk::test
@@ -62,4 +65,44 @@ inline std::string read_text(int fd)
         return {};
     return s;
 }
+// A forked peer and a pipe each way. The parent kills and reaps it: over shared memory UCX
+// checks the peer's process, and sees an unreaped zombie as alive.
+struct Forked
+{
+    int to_child[2]{-1, -1}, to_parent[2]{-1, -1};
+    pid_t pid = -1;
+    Forked()
+    {
+        if(::pipe(to_child) != 0 || ::pipe(to_parent) != 0 || (pid = ::fork()) < 0)
+            throw std::runtime_error("fork harness");
+        ::close(pid == 0 ? to_child[1] : to_child[0]);
+        ::close(pid == 0 ? to_parent[0] : to_parent[1]);
+    }
+    Forked(const Forked &) = delete;
+    Forked &operator=(const Forked &) = delete;
+    int in() const
+    {
+        return pid == 0 ? to_child[0] : to_parent[0];
+    }
+    int out() const
+    {
+        return pid == 0 ? to_parent[1] : to_child[1];
+    }
+    // True when the child died of SIGKILL.
+    bool kill()
+    {
+        int status = 0;
+        bool killed = ::kill(pid, SIGKILL) == 0 && ::waitpid(pid, &status, 0) == pid &&
+                      WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL;
+        pid = -1;
+        return killed;
+    }
+    ~Forked()
+    {
+        if(pid > 0)
+            kill();
+        ::close(in());
+        ::close(out());
+    }
+};
 } // namespace TangoBulk::test
