@@ -246,6 +246,7 @@ def test_stopping_callbacks_waits_for_running_callback_and_skips_queued_batches(
         release.set()
         assert stop_returned.wait(timeout=1)
         assert seen == [first]
+        assert sub.read(timeout=0) is second  # still there for the application
     finally:
         release.set()
         listener.stop()
