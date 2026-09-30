@@ -6,6 +6,7 @@
 active_phase = 2
 line_ceiling = 10000
 public_name_limit = 74
+python_name_limit = 31
 
 [phases."1"]
 library = 4000

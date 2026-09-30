@@ -1,12 +1,76 @@
-# Public C++ API names, one identifier per line.
-# Keep this inventory in sync with include/tango-bulk/ and transport.h.
+# Public C++ names in include/tango-bulk/, as tools/check.py reads them: types and free
+# functions bare, members as Type::name. Special members, operators and enumerators are not
+# names. A name declared there and missing here, or listed here and not declared, fails.
+
+# Device author
+Deadline
+Element
+Description
+Description::element
+Description::shape
+Description::field_bytes
+Description::field_dtype
+PublisherLimits
+PublisherLimits::budget
+PublisherLimits::max_sessions
+PublisherLimits::allow_every
+PublisherLimits::pressure_timeout
+Publisher
+Publisher::acquire
+Publisher::finish
+Publisher::health
+Publisher::description
+Slot
+Slot::payload
+Slot::fields
+Slot::publish
+Health
 install_bulk_commands
 install_bulk_attributes
 attach_publisher
 detach_publisher
+
+# Pipeline author
+SubscriptionOptions
+SubscriptionOptions::budget
+SubscriptionOptions::batch
+SubscriptionOptions::max_wait
+SubscriptionOptions::max_rate
+SubscriptionOptions::gpu
+SubscriptionOptions::allow_gpu_over_tcp
+SubscriptionOptions::label
+Subscription
+Subscription::read
+Subscription::outcome
+Subscription::fd
+Subscription::description
+Subscription::close
+Subscription::health
+Batch
+Batch::frames
+Batch::index
+Batch::payload
+Batch::records
+Batch::gpu
+Batch::copy
+Outcome
 every
 latest
-bulk_stream
-bulk_sessions
-marker_major
-parse_bulk_stream
+
+# Both: what Health reports
+Health::frames
+Health::skipped
+Health::every
+Health::latest
+Health::failed_every
+Health::pressure
+Health::pressure_from
+Health::slots_free
+Health::slots_held
+Health::last_index
+Health::transfer_max_ns
+Health::transfer_mean_ns
+Health::quarantined_bytes
+Health::memory_hooks
+Health::transport
+Health::failure
