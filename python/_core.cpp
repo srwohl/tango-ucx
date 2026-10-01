@@ -5,6 +5,7 @@
 
 #include <tango-bulk/bulk.h>
 
+#include <dlpack/dlpack.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 
@@ -335,8 +336,8 @@ py::ssize_t checked_ssize(std::uint64_t value)
 class PythonBatch
 {
   public:
-    PythonBatch(Batch batch, Description description)
-        : batch_(std::move(batch)), description_(std::move(description))
+    PythonBatch(Batch batch, Description description, int gpu = -1)
+        : batch_(std::move(batch)), description_(std::move(description)), gpu_(gpu)
     {
     }
 
@@ -357,6 +358,8 @@ class PythonBatch
 
     py::array array(const std::shared_ptr<PythonBatch> &self) const
     {
+        if(batch_.gpu()) // its payload is GPU memory: NumPy would read a device pointer
+            throw py::value_error("a GPU batch has no host payload array");
         const auto dtype = payload_dtype(description_.element);
         std::vector<py::ssize_t> shape;
         shape.reserve(description_.shape.size() + 1);
@@ -396,8 +399,125 @@ class PythonBatch
     }
 
   private:
+    friend class PythonGpuView;
     Batch batch_;
     Description description_;
+    int gpu_ = -1;
+    bool viewed_ = false;
+};
+
+// DLPack's stream: None and -1 name none, 1 is CUDA's default stream, 2 its per-thread default,
+// anything larger a stream's pointer.
+std::optional<GpuStream> gpu_stream(py::handle stream)
+{
+    if(stream.is_none())
+        return std::nullopt;
+    const auto value = stream.cast<std::intptr_t>();
+    if(value == -1)
+        return std::nullopt;
+    if(value <= 0)
+        throw py::buffer_error("stream must be None, -1, 1, 2 or a CUDA stream's pointer");
+    return GpuStream{value == 1 ? nullptr : reinterpret_cast<void *>(value)};
+}
+
+// One DLPack export. The managed-tensor deleter destroys it: the hold ends before the batch.
+struct Export
+{
+    DLManagedTensorVersioned managed{};
+    std::vector<std::int64_t> shape, strides;
+    std::shared_ptr<PythonBatch> batch;
+    std::shared_ptr<void> hold;
+};
+
+// The GPU view of one batch. The first export begins the batch's hold on the view's GPU stream;
+// the view's scope and every export keep it, and the last of them to end records the event.
+class PythonGpuView
+{
+  public:
+    PythonGpuView(std::shared_ptr<PythonBatch> batch, py::handle stream)
+        : batch_(std::move(batch)), stream_(gpu_stream(stream))
+    {
+        if(!batch_->gpu() || std::exchange(batch_->viewed_, true))
+            throw std::logic_error("gpu_view needs a GPU batch; a batch has one GPU view");
+    }
+
+    py::tuple device() const
+    {
+        return py::make_tuple(int(kDLCUDA), require_open().gpu_);
+    }
+
+    py::capsule dlpack(py::handle stream, py::handle max_version, py::handle dl_device,
+                       py::handle copy)
+    {
+        const PythonBatch &batch = require_open();
+        // The unversioned capsule cannot say read-only, and the receive ring is.
+        if(max_version.is_none() || max_version.cast<std::pair<int, int>>().first < 1)
+            throw py::buffer_error("a GPU view exports DLPack 1.0: pass max_version=(1, 0)");
+        if(!dl_device.is_none() && !dl_device.equal(device()))
+            throw py::buffer_error("a GPU view exports on the GPU of its batch only");
+        if(copy.ptr() == Py_True)
+            throw py::buffer_error("a GPU view does not copy");
+        const auto named = gpu_stream(stream);
+        if(named && stream_ && named->handle != stream_->handle)
+            throw py::buffer_error("every export of a GPU view uses the view's GPU stream");
+        if(!stream_)
+            stream_ = named.value_or(GpuStream{});
+        if(!hold_)
+            hold_ = transport::begin_gpu_view(batch.batch_, *stream_);
+
+        auto e = std::make_unique<Export>();
+        e->batch = batch_;
+        e->hold = hold_;
+        e->shape.push_back(checked_ssize(batch.frames()));
+        for(auto extent : batch.description_.shape)
+            e->shape.push_back(checked_ssize(extent));
+        e->strides.assign(e->shape.size(), 1); // in elements
+        for(std::size_t i = e->shape.size() - 1; i > 0; --i)
+            e->strides[i - 1] = e->strides[i] * e->shape[i];
+        const auto dtype = payload_dtype(batch.description_.element);
+        const auto code = dtype.kind() == 'u' ? kDLUInt : dtype.kind() == 'i' ? kDLInt : kDLFloat;
+        e->managed.version = {1, 0};
+        e->managed.manager_ctx = e.get();
+        e->managed.deleter = [](DLManagedTensorVersioned *m)
+        { delete static_cast<Export *>(m->manager_ctx); };
+        e->managed.flags = DLPACK_FLAG_BITMASK_READ_ONLY;
+        e->managed.dl_tensor = {const_cast<void *>(batch.batch_.payload()),
+                                {kDLCUDA, batch.gpu_},
+                                std::int32_t(e->shape.size()),
+                                {std::uint8_t(code), std::uint8_t(dtype.itemsize() * 8), 1},
+                                e->shape.data(),
+                                e->strides.data(),
+                                0};
+        // A consumer renames the capsule and owns the deleter; an abandoned capsule calls it here.
+        py::capsule capsule(&e->managed, "dltensor_versioned", [](PyObject *abandoned) {
+            if(PyCapsule_IsValid(abandoned, "dltensor_versioned"))
+            {
+                auto *m = static_cast<DLManagedTensorVersioned *>(
+                    PyCapsule_GetPointer(abandoned, "dltensor_versioned"));
+                m->deleter(m);
+            }
+        });
+        (void)e.release();
+        return capsule;
+    }
+
+    void close()
+    {
+        hold_.reset();
+        batch_.reset();
+    }
+
+  private:
+    const PythonBatch &require_open() const
+    {
+        if(!batch_)
+            throw py::buffer_error("the GPU view has ended");
+        return *batch_;
+    }
+
+    std::shared_ptr<PythonBatch> batch_;
+    std::shared_ptr<void> hold_; // ends before batch_
+    std::optional<GpuStream> stream_;
 };
 
 class PythonCloser
@@ -474,8 +594,9 @@ class PythonCloser
 class PythonSubscription
 {
   public:
-    explicit PythonSubscription(Subscription subscription)
-        : subscription_(std::move(subscription)), description_(subscription_.description())
+    PythonSubscription(Subscription subscription, int gpu)
+        : subscription_(std::move(subscription)), description_(subscription_.description()),
+          gpu_(gpu)
     {
     }
 
@@ -500,7 +621,7 @@ class PythonSubscription
         }
         if(!batch)
             return py::none();
-        return py::cast(std::make_shared<PythonBatch>(std::move(*batch), description_));
+        return py::cast(std::make_shared<PythonBatch>(std::move(*batch), description_, gpu_));
     }
 
     int fd() const
@@ -533,13 +654,14 @@ class PythonSubscription
   private:
     Subscription subscription_;
     Description description_;
+    int gpu_;
 };
 
 class PythonPendingSubscription
 {
   public:
-    explicit PythonPendingSubscription(transport::PendingSubscription pending)
-        : pending_(std::move(pending))
+    PythonPendingSubscription(transport::PendingSubscription pending, int gpu)
+        : pending_(std::move(pending)), gpu_(gpu)
     {
     }
 
@@ -568,17 +690,19 @@ class PythonPendingSubscription
             py::gil_scoped_release release;
             subscription.emplace(std::move(pending_).start(open_reply, deadline, std::move(close)));
         }
-        return std::make_shared<PythonSubscription>(std::move(*subscription));
+        return std::make_shared<PythonSubscription>(std::move(*subscription), gpu_);
     }
 
   private:
     transport::PendingSubscription pending_;
+    int gpu_;
 };
 
 std::shared_ptr<PythonPendingSubscription> prepare(py::handle bulk_stream_json, py::handle every,
                                                    py::handle budget, py::handle batch,
                                                    py::handle max_wait_seconds, py::handle max_rate,
-                                                   py::handle allow_gpu_over_tcp, py::handle label)
+                                                   py::handle allow_gpu_over_tcp, py::handle label,
+                                                   int gpu)
 {
     const auto document = require_string(bulk_stream_json, "bulk_stream_json");
     const bool delivery_every = require_bool(every, "every");
@@ -601,6 +725,7 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle bulk_stream_json, 
         options.max_rate = require_seconds(max_rate, "max_rate");
     options.allow_gpu_over_tcp = require_bool(allow_gpu_over_tcp, "allow_gpu_over_tcp");
     options.label = require_string(label, "label");
+    options.gpu = gpu;
 
     auto offer = transport::parse_bulk_stream(document);
     std::optional<transport::PendingSubscription> pending;
@@ -608,7 +733,7 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle bulk_stream_json, 
         py::gil_scoped_release release;
         pending.emplace(transport::prepare(offer, delivery_every, std::move(options)));
     }
-    return std::make_shared<PythonPendingSubscription>(std::move(*pending));
+    return std::make_shared<PythonPendingSubscription>(std::move(*pending), gpu);
 }
 
 } // namespace
@@ -625,7 +750,18 @@ PYBIND11_MODULE(_core, module)
         .def_property_readonly("frames", &PythonBatch::frames)
         .def_property_readonly("gpu", &PythonBatch::gpu)
         .def("index", &PythonBatch::index, py::arg("frame"))
-        .def("copy", &PythonBatch::copy);
+        .def("copy", &PythonBatch::copy)
+        .def(
+            "gpu_view",
+            [](const std::shared_ptr<PythonBatch> &batch, py::handle stream)
+            { return std::make_shared<PythonGpuView>(batch, stream); },
+            py::arg("stream") = py::none());
+
+    py::class_<PythonGpuView, std::shared_ptr<PythonGpuView>>(module, "GpuView")
+        .def("dlpack", &PythonGpuView::dlpack, py::arg("stream"), py::arg("max_version"),
+             py::arg("dl_device"), py::arg("copy"))
+        .def_property_readonly("device", &PythonGpuView::device)
+        .def("close", &PythonGpuView::close);
 
     py::class_<PythonSubscription, std::shared_ptr<PythonSubscription>>(module, "Subscription")
         .def("read", &PythonSubscription::read, py::arg("timeout") = py::none())
@@ -643,5 +779,6 @@ PYBIND11_MODULE(_core, module)
 
     module.def("prepare", &prepare, py::arg("bulk_stream_json"), py::arg("every"),
                py::arg("budget"), py::arg("batch"), py::arg("max_wait_seconds"),
-               py::arg("max_rate"), py::arg("allow_gpu_over_tcp"), py::arg("label"));
+               py::arg("max_rate"), py::arg("allow_gpu_over_tcp"), py::arg("label"),
+               py::arg("gpu") = -1);
 }

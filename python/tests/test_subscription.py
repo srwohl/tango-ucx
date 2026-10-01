@@ -152,6 +152,12 @@ def test_budget_must_be_positive_and_use_supported_units(budget):
         tango_bulk.every("sys/test/1", budget=budget)
 
 
+@pytest.mark.parametrize("memory", ["cuda", "cuda:", "cuda:-1", "cuda:01", "gpu:0", 0, None])
+def test_memory_must_be_host_or_a_numbered_cuda_gpu(memory):
+    with pytest.raises(ValueError, match="memory must be 'host' or 'cuda:N'"):
+        tango_bulk.every("sys/test/1", memory=memory)
+
+
 @pytest.mark.parametrize("option", ["max_wait", "max_rate"])
 def test_time_options_reject_booleans(option):
     with pytest.raises(ValueError, match=f"{option} must be a non-negative number"):

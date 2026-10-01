@@ -102,22 +102,26 @@ Batch Batch::copy() const
 }
 // The view ends when its hold does: the event is recorded after every kernel the application
 // queued on the stream, and the loop frees the batch once that event is done.
-GpuView Batch::gpu_view(GpuStream stream) &&
+std::shared_ptr<void> transport::begin_gpu_view(const Batch &b, GpuStream stream)
 {
-    if(!gpu() || first_ == ~std::uint32_t{0})
+    if(!b.gpu() || b.first_ == ~std::uint32_t{0} || b.rings_->batches[b.first_].viewed)
         throw std::logic_error("gpu_view needs a GPU batch; a batch has one GPU view");
-    auto &row = rings_->batches[first_];
+    auto &row = b.rings_->batches[b.first_];
     row.viewed = true;
     row.gpu_stream = stream;
-    GpuView view;
-    view.hold_ = std::shared_ptr<void>(
+    return std::shared_ptr<void>(
         &row,
-        [rings = rings_](void *p)
+        [rings = b.rings_](void *p)
         {
             auto &row = *static_cast<transport::BatchRow *>(p);
             transport::gpu_runtime()->record(row.event, row.gpu_stream);
             row.recorded.store(true, std::memory_order_release); // the loop may query the event now
         });
+}
+GpuView Batch::gpu_view(GpuStream stream) &&
+{
+    GpuView view;
+    view.hold_ = transport::begin_gpu_view(*this, stream);
     view.batch_ = std::move(*this);
     return view;
 }

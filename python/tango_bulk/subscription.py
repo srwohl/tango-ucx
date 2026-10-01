@@ -13,6 +13,7 @@ from ._async import AsyncSubscription
 _MAJOR = 3
 _MARKER = re.compile(r"^tango-bulk/([0-9]+) (open|close)$")
 _BUDGET = re.compile(r"^\s*([0-9]+)\s*(B|KiB|MiB|GiB)\s*$", re.IGNORECASE)
+_MEMORY = re.compile(r"^cuda:(0|[1-9][0-9]*)$")
 _UNITS = {"b": 1, "kib": 1024, "mib": 1024**2, "gib": 1024**3}
 _SYNC = {"wait": True}
 
@@ -107,8 +108,12 @@ def _subscribe(
         raise ValueError("batch must be a positive integer")
     max_wait = _seconds(max_wait, "max_wait")
     max_rate = 0.0 if max_rate is None else _seconds(max_rate, "max_rate")
+    gpu = {}
     if memory != "host":
-        raise ValueError("this version supports memory='host'")
+        match = _MEMORY.fullmatch(memory) if isinstance(memory, str) else None
+        if not match:
+            raise ValueError("memory must be 'host' or 'cuda:N', N being the GPU's number")
+        gpu["gpu"] = int(match.group(1))
     if not isinstance(label, str):
         raise ValueError("label must be a string")
 
@@ -130,6 +135,7 @@ def _subscribe(
         max_rate,
         allow_gpu_over_tcp,
         label,
+        **gpu,
     )
     open_reply = _command(proxy, open_name, pending.open_message(), tango)
 
@@ -213,8 +219,6 @@ class Batch:
 
     @property
     def array(self):
-        if self.gpu:
-            raise ValueError("a GPU batch has no host payload array")
         array = self._native.array
         array.setflags(write=False)
         return array
@@ -235,6 +239,26 @@ class Batch:
 
     def copy(self):
         return Batch(self._native.copy())
+
+    def gpu_view(self, stream=None):
+        return GpuView(self._native.gpu_view(stream))
+
+
+class GpuView:
+    def __init__(self, native):
+        self._native = native
+
+    def __dlpack__(self, stream=None, max_version=None, dl_device=None, copy=None):
+        return self._native.dlpack(stream, max_version, dl_device, copy)
+
+    def __dlpack_device__(self):
+        return self._native.device
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self._native.close()
 
 
 class Subscription(AsyncSubscription):

@@ -7,6 +7,9 @@ find_package(pybind11 CONFIG REQUIRED)
 pybind11_add_module(_core MODULE _core.cpp)
 target_include_directories(_core PRIVATE "${PROJECT_SOURCE_DIR}/src/transport")
 target_link_libraries(_core PRIVATE tango-bulk-transport)
+if(TANGO_BULK_CUDA)
+    target_link_libraries(_core PRIVATE tango-bulk-cuda) # memory="cuda:N" needs the runtime
+endif()
 set_target_properties(_core PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python/tango_bulk")
 

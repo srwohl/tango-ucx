@@ -75,7 +75,9 @@ struct Health
 };
 
 class Publisher;
+class Batch;
 class GpuView;
+struct GpuStream;
 namespace transport
 {
 struct Pub;
@@ -85,6 +87,8 @@ class PendingSubscription;
 std::string handle(Publisher &, std::string_view);
 std::string bulk_stream(const Publisher &);
 std::string bulk_sessions(const Publisher &);
+// A GPU batch's one hold: when its last copy ends, the batch's event is recorded on the stream.
+std::shared_ptr<void> begin_gpu_view(const Batch &, GpuStream);
 } // namespace transport
 
 class Slot
@@ -157,6 +161,7 @@ class Batch
 
   private:
     friend class Subscription;
+    friend std::shared_ptr<void> transport::begin_gpu_view(const Batch &, GpuStream);
     Batch(std::shared_ptr<transport::Rings>, std::uint32_t);
     struct Copy;
     std::shared_ptr<transport::Rings> rings_;
