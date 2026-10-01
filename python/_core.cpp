@@ -590,7 +590,7 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle bulk_stream_json, 
     options.batch = static_cast<std::uint32_t>(batch_size);
 
     const double max_wait = require_seconds(max_wait_seconds, "max_wait_seconds");
-    const auto max_wait_us = std::chrono::duration<double, std::micro>(max_wait);
+    const std::chrono::duration<double, std::micro> max_wait_us = std::chrono::duration<double>(max_wait);
     if(max_wait_us.count() > std::numeric_limits<std::int64_t>::max())
         throw std::invalid_argument("max_wait_seconds is outside the supported range");
     options.max_wait = std::chrono::microseconds(static_cast<std::int64_t>(max_wait_us.count()));
