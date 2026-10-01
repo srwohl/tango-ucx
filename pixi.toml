@@ -25,10 +25,16 @@ dlpack = "*"
 nlohmann_json = ">=3.12"
 
 [feature.gpu.dependencies]
-cuda-version = "12.9"
+cuda-version = "12.9.*"
 cuda-cudart-dev = "*"
 cuda-nvcc = "*"
 cupy = ">=14"
+
+# The gpu environment resolves its own compiler and packages, so it builds in its own tree.
+[feature.gpu.tasks]
+_configure-gpu = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build-gpu -DBUILD_TESTING=ON -DTANGO_BULK_CUDA=ON" }
+build-gpu = { cmd = "cmake --build build-gpu", depends-on = ["_configure-gpu"] }
+test-gpu = { cmd = "ctest --test-dir build-gpu -L gpu --no-tests=error --output-on-failure", depends-on = ["build-gpu"] }
 
 [environments]
 default = ["default"]
@@ -39,7 +45,6 @@ configure = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build -DBUILD_TESTING=ON"
 build = { cmd = "cmake --build build", depends-on = ["configure"] }
 test = { cmd = "ctest --test-dir build -L 'unit|ucx|tango|python' --output-on-failure", depends-on = ["build"] }
 test-python = { cmd = "PYTHONPATH=build/python TANGO_BULK_FIXTURE_DEVICE=build/tests/fixture_device pytest python/tests", depends-on = ["build"] }
-test-gpu = { cmd = "ctest --test-dir build -L gpu --output-on-failure && pytest -m gpu", depends-on = ["build"] }
 _configure-asan = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build-asan -DBUILD_TESTING=ON -DTANGO_BULK_SANITIZERS=address,undefined" }
 _build-asan = { cmd = "cmake --build build-asan", depends-on = ["_configure-asan"] }
 test-asan = { cmd = "ctest --test-dir build-asan --output-on-failure", depends-on = ["_build-asan"] }

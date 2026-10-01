@@ -33,3 +33,7 @@ add_test(NAME test_python
         "TANGO_BULK_FIXTURE_DEVICE=$<TARGET_FILE:fixture_device>"
         "${Python3_EXECUTABLE}" -m pytest "${PROJECT_SOURCE_DIR}/python/tests")
 set_tests_properties(test_python PROPERTIES LABELS python)
+
+if(TANGO_BULK_CUDA)
+    add_subdirectory(gpu)
+endif()
