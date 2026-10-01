@@ -53,9 +53,14 @@ Batch::payload
 Batch::records
 Batch::gpu
 Batch::copy
+Batch::gpu_view
 Outcome
 GpuStream
 GpuStream::handle
+GpuView
+GpuView::payload
+GpuView::records
+GpuView::frames
 every
 latest
 

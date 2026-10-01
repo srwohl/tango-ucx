@@ -63,6 +63,7 @@ class Worker
     ucp_ep_h endpoint(std::span<const std::byte>, void *, ucp_err_handler_cb_t);
     void set_am(unsigned, ucp_am_recv_callback_t, void *);
     std::size_t transports(ucp_ep_h, std::span<char>) const;
+    bool only_tcp(ucp_ep_h) const; // every lane is tcp: no shared memory, no RDMA
     void destroy() noexcept;
 
   private:

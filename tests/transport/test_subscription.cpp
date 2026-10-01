@@ -68,12 +68,11 @@ TEST_CASE("End is a bound and does not complete before an earlier frame lands")
     sub->plan.batch = 1;
     sub->rings = std::make_shared<Rings>();
     sub->rings->plan = sub->plan;
-    sub->rings->description = d;
     sub->rings->payload = new std::byte[256];
     sub->rings->storage = std::shared_ptr<void>(sub->rings->payload, [](void *p)
                                                 { delete[] static_cast<std::byte *>(p); });
     sub->rings->records.resize(2 * sub->plan.sizes.record_stride);
-    sub->rings->batches.resize(2);
+    sub->rings->batches = std::vector<BatchRow>(2);
     sub->rings->released.reserve(2);
     sub->rings->busy.assign(1, 0);
     sub->rings->landed.assign(1, 0);

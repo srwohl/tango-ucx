@@ -16,7 +16,8 @@ namespace TangoBulk::transport
 {
 namespace
 {
-constexpr std::uint32_t k_max_sessions = 64, k_max_source_slots = 1024, k_max_depth = 65536;
+constexpr std::uint32_t k_max_sessions = 64, k_max_source_slots = 1024, k_max_depth = 65536,
+                        k_max_gpu_depth = 4096; // one GPU event per batch row
 constexpr std::uint64_t k_max_frame = std::uint64_t{1} << 31, k_region_charge = 64ull << 10;
 constexpr std::uint64_t k_pub_fixed =
     8ull * (sizeof(wire::Request) + sizeof(wire::Reply)) + 64ull * 384 + 16ull * 1024;
@@ -149,8 +150,9 @@ SubscriptionPlan plan_subscription(const Offer &o, bool every, const Subscriptio
         throw std::invalid_argument("batch must be at least one");
     if(options.label.size() > 64)
         throw std::invalid_argument("label exceeds 64 bytes");
-    if(options.gpu >= 0)
-        throw std::invalid_argument("GPU receive is not available in the host-only phase");
+    if(options.gpu >= 0 && !registered_gpu)
+        throw std::invalid_argument("GPU receive needs a GPU runtime: link tango-bulk-cuda");
+    p.gpu = options.gpu >= 0;
     if(!(options.max_rate >= 0) || (every && options.max_rate > 0))
         throw std::invalid_argument("max_rate must be 0 or more, and applies to latest only");
     p.batch = options.batch;
@@ -159,7 +161,7 @@ SubscriptionPlan plan_subscription(const Offer &o, bool every, const Subscriptio
     auto per = add({p.sizes.frame_bytes, p.sizes.record_stride, p.op_stride, 64, 12});
     auto fixed = add({k_sub_fixed, mul(3, p.op_stride), k_region_charge});
     auto fits = options.budget > fixed ? (options.budget - fixed) / per : 0;
-    auto depth = std::min<std::uint64_t>(fits, k_max_depth);
+    auto depth = std::min<std::uint64_t>(fits, p.gpu ? k_max_gpu_depth : k_max_depth);
     depth -= depth % p.batch;
     if(depth < 2ull * p.batch)
         throw std::invalid_argument(std::format(
@@ -236,19 +238,21 @@ Region Region::allocate(ucp_context_h ctx, std::uint64_t bytes)
     r.bytes_ = a.length;
     return r;
 }
-Region Region::adopt(ucp_context_h ctx, std::shared_ptr<void> owner, std::uint64_t bytes)
+Region Region::adopt(ucp_context_h ctx, std::shared_ptr<void> owner, std::uint64_t bytes,
+                     ucs_memory_type_t type)
 {
     Region r;
     r.context_ = ctx;
     r.owner_ = std::move(owner);
-    reserve_pin(bytes);
-    r.reserved_ = bytes;
+    auto pin = type == UCS_MEMORY_TYPE_HOST ? bytes : 0; // GPU memory is not locked host memory
+    reserve_pin(pin);
+    r.reserved_ = pin;
     ucp_mem_map_params_t p{};
     p.field_mask = UCP_MEM_MAP_PARAM_FIELD_ADDRESS | UCP_MEM_MAP_PARAM_FIELD_LENGTH |
                    UCP_MEM_MAP_PARAM_FIELD_MEMORY_TYPE;
     p.address = r.owner_.get();
     p.length = bytes;
-    p.memory_type = UCS_MEMORY_TYPE_HOST;
+    p.memory_type = type;
     auto st = ucp_mem_map(ctx, &p, &r.memh_);
     if(st != UCS_OK)
     {

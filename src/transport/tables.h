@@ -296,18 +296,20 @@ struct BatchRow
 {
     std::uint64_t first_sequence = 0;
     std::uint32_t frames = 0;
-    bool viewed = false;
+    bool viewed = false; // by the application before it posts the row; the loop reads it after
+    std::atomic<bool> recorded{false}; // the view ended and recorded the event
+    GpuStream gpu_stream;
+    GpuEvent event; // made at setup, recorded again for each view of the row
 };
 struct Rings
 {
     SubscriptionPlan plan;
-    Description description;
-    std::shared_ptr<void> storage;
+    std::shared_ptr<void> storage; // host bytes, or a GPU allocation with the rows' events
     std::byte *payload = nullptr;
     std::vector<std::byte> records;
     std::vector<BatchRow> batches;
     IndexRing released;
-    std::vector<std::uint64_t> busy, landed, returned;
+    std::vector<std::uint64_t> busy, landed, returned, event_wait;
     void bit_set(std::vector<std::uint64_t> &, std::uint32_t);
     void bit_clear(std::vector<std::uint64_t> &, std::uint32_t);
     bool bit_test(const std::vector<std::uint64_t> &, std::uint32_t) const;
@@ -337,8 +339,7 @@ struct Sub final : Owner
     std::array<std::byte, 16> credit_header{};
     IndexRing queue;
     std::atomic<bool> stop{false}, close{false};
-    bool ready = false, failed = false, ended = false, quarantined = false, fenced = false,
-         gap = false;
+    bool ready = false, failed = false, quarantined = false, fenced = false, gap = false;
     wire::EndMessage end{};
     bool has_end = false;
     std::uint64_t assembled = 0, credited = 0, credit_sent = 0, frames = 0, skipped = 0,
@@ -360,7 +361,7 @@ struct Sub final : Owner
     Closer closer;
     Deadline start_by{}, close_by{};
     std::atomic<bool> start_requested{false};
-    bool begun = false, started_sent = false, flush_started = false, flush_done = false,
+    bool begun = false, started_sent = false, keep_rings = false, flush_done = false,
          close_started = false, close_done = false;
     Sub(Offer, bool, SubscriptionOptions);
     ~Sub();
@@ -371,7 +372,6 @@ struct Sub final : Owner
     SubOpMeta *recv_op(std::uint32_t);
     SubOpMeta *ctrl_op(unsigned);
     void send_credit(std::uint64_t);
-    std::byte *req_ptr(SubOpMeta *);
     void on_recv(SubOpMeta *, ucs_status_t);
     void on_ctrl(SubOpMeta *, ucs_status_t);
     void fail(std::string_view);

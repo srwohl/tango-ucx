@@ -74,6 +74,7 @@ struct Health
 };
 
 class Publisher;
+class GpuView;
 namespace transport
 {
 struct Pub;
@@ -150,6 +151,7 @@ class Batch
     const void *records() const;
     bool gpu() const;
     Batch copy() const;
+    GpuView gpu_view(GpuStream) &&; // one per batch; the view takes the batch
 
   private:
     friend class Subscription;
@@ -161,6 +163,19 @@ class Batch
     std::size_t frames_ = 0, frame_bytes_ = 0, record_stride_ = 0;
     const std::byte *payload_ = nullptr;
     const std::byte *records_ = nullptr;
+};
+// Destroy it after the last kernel that reads the batch is queued on its stream.
+class GpuView
+{
+  public:
+    const void *payload() const;
+    const void *records() const;
+    std::size_t frames() const;
+
+  private:
+    friend class Batch;
+    Batch batch_;
+    std::shared_ptr<void> hold_; // ends before batch_, and records the batch's event
 };
 
 class Subscription

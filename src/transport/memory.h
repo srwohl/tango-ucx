@@ -29,6 +29,7 @@ struct SubscriptionPlan
     std::uint32_t D = 0, batch = 0, op_stride = 0;
     std::uint64_t payload_bytes = 0, records_bytes = 0, recv_ops_bytes = 0, charge = 0,
                   max_wait_ns = 0;
+    bool gpu = false;
 };
 
 Sizes sizes_of(const Description &);
@@ -47,7 +48,8 @@ class Region
     Region(const Region &) = delete;
     Region &operator=(const Region &) = delete;
     static Region allocate(ucp_context_h, std::uint64_t);
-    static Region adopt(ucp_context_h, std::shared_ptr<void>, std::uint64_t);
+    static Region adopt(ucp_context_h, std::shared_ptr<void>, std::uint64_t,
+                        ucs_memory_type_t = UCS_MEMORY_TYPE_HOST);
     void unmap() noexcept;
     std::byte *base() const noexcept
     {

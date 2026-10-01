@@ -46,6 +46,19 @@ std::string status_text(wire::Status s)
             return "malformed or refused control message";
     }
 }
+// The GPU ring and its rows' events: the last holder of the rings releases them, on any thread.
+struct GpuRing
+{
+    GpuRuntime *runtime = gpu_runtime();
+    Allocation memory;
+    std::vector<GpuEvent> events;
+    ~GpuRing()
+    {
+        for(auto e : events)
+            runtime->destroy_event(e);
+        runtime->release(memory);
+    }
+};
 void send_cb(void *, ucs_status_t st, void *arg)
 {
     auto *o = static_cast<SubOpMeta *>(arg);
@@ -72,7 +85,7 @@ ucs_status_t on_frame(void *arg, const void *h, size_t hn, void *data, size_t n,
     wire::FrameMessage f;
     if(!wire::decode({static_cast<const std::byte *>(h), hn}, s->plan.sizes.padded_fields, f) ||
        f.session != s->session || f.payload_bytes != s->plan.sizes.frame_bytes ||
-       n != s->plan.sizes.frame_bytes || f.sequence < s->credited ||
+       n != s->plan.sizes.frame_bytes || f.sequence < s->credited || (s->plan.gpu && !rndv) ||
        f.sequence >= s->credited + s->plan.D ||
        s->rings->bit_test(s->rings->busy, f.sequence % s->plan.D))
     {
@@ -112,7 +125,7 @@ ucs_status_t on_frame(void *arg, const void *h, size_t hn, void *data, size_t n,
     p.cb.recv_am = recv_cb;
     p.user_data = o;
     p.memh = s->receive.memh();
-    p.memory_type = UCS_MEMORY_TYPE_HOST;
+    p.memory_type = s->plan.gpu ? UCS_MEMORY_TYPE_CUDA : UCS_MEMORY_TYPE_HOST;
     auto *q = ucp_am_recv_data_nbx(s->worker->get(), data,
                                    s->rings->payload + std::uint64_t(k) * s->plan.sizes.frame_bytes,
                                    n, &p);
@@ -175,19 +188,29 @@ void Sub::setup()
     plan = plan_subscription(offer, every, options, req);
     rings = std::make_shared<Rings>();
     rings->plan = plan;
-    rings->description = offer.description;
-    auto storage = new std::byte[plan.payload_bytes];
-    rings->storage =
-        std::shared_ptr<void>(storage, [](void *p) { delete[] static_cast<std::byte *>(p); });
-    rings->payload = storage;
     rings->records.resize(plan.records_bytes);
-    rings->batches.resize(plan.D);
+    rings->batches = std::vector<BatchRow>(plan.D);
+    if(plan.gpu)
+    {
+        auto ring = std::make_shared<GpuRing>();
+        ring->events.reserve(plan.D);
+        ring->memory = ring->runtime->allocate(options.gpu, plan.payload_bytes);
+        for(auto &row : rings->batches)
+            ring->events.push_back(row.event = ring->runtime->make_event(options.gpu));
+        rings->storage = std::shared_ptr<void>(ring, ring->memory.base);
+    }
+    else
+        rings->storage = std::shared_ptr<void>(new std::byte[plan.payload_bytes], [](void *p)
+                                               { delete[] static_cast<std::byte *>(p); });
+    rings->payload = static_cast<std::byte *>(rings->storage.get());
     rings->released.reserve(plan.D);
     auto words = (plan.D + 63) / 64;
     rings->busy.assign(words, 0);
     rings->landed.assign(words, 0);
     rings->returned.assign(words, 0);
-    receive = Region::adopt(context->get(), rings->storage, plan.payload_bytes);
+    rings->event_wait.assign(words, 0);
+    receive = Region::adopt(context->get(), rings->storage, plan.payload_bytes,
+                            plan.gpu ? UCS_MEMORY_TYPE_CUDA : UCS_MEMORY_TYPE_HOST);
     recv_ops.resize(std::uint64_t(plan.D) * plan.op_stride);
     ctrl_ops.resize(std::uint64_t(3) * plan.op_stride);
     queue.reserve(plan.D);
@@ -256,6 +279,17 @@ void Sub::run()
             work |= worker->progress() != 0;
         if(begun && !started_sent)
         {
+            if(ready && !failed && plan.gpu && !options.allow_gpu_over_tcp && worker->only_tcp(ep))
+            {
+                std::array<char, 128> lanes{};
+                std::array<char, 256> why{};
+                worker->transports(ep, lanes);
+                std::snprintf(why.data(), why.size(),
+                              "UCX chose TCP for this GPU subscription (%s); set "
+                              "allow_gpu_over_tcp to accept host staging",
+                              lanes.data());
+                fail(why.data());
+            }
             if(ready && !failed) // Ready may arrive before start, and an endpoint still fail
             {
                 started.set_value("");
@@ -309,10 +343,6 @@ SubOpMeta *Sub::recv_op(std::uint32_t k)
 SubOpMeta *Sub::ctrl_op(unsigned k)
 {
     return reinterpret_cast<SubOpMeta *>(ctrl_ops.data() + std::uint64_t(k) * plan.op_stride + req);
-}
-std::byte *Sub::req_ptr(SubOpMeta *o)
-{
-    return reinterpret_cast<std::byte *>(o);
 }
 void Sub::send_credit(std::uint64_t credit)
 {
@@ -477,15 +507,42 @@ void Sub::release_batch(std::uint32_t k)
 {
     if(k >= plan.D)
         return;
-    auto row = rings->batches[k];
+    auto &row = rings->batches[k];
     for(std::uint32_t i = 0; i < row.frames; ++i)
         rings->bit_set(rings->returned, (row.first_sequence + i) % plan.D);
-    rings->batches[k].frames = 0;
+    row.frames = 0;
+    row.viewed = false;
+    row.recorded.store(false, std::memory_order_relaxed);
 }
 void Sub::release_pass()
 {
     for(int k; (k = rings->released.try_pop()) >= 0;)
-        release_batch(std::uint32_t(k));
+    {
+        if(std::uint32_t(k) < plan.D && rings->batches[k].viewed)
+            rings->bit_set(rings->event_wait, k); // released; its GPU event decides when it is free
+        else
+            release_batch(std::uint32_t(k));
+    }
+    for(std::uint32_t w = 0; plan.gpu && w < rings->event_wait.size(); ++w)
+        for(auto bits = rings->event_wait[w]; bits; bits &= bits - 1)
+        {
+            auto k = w * 64 + std::uint32_t(std::countr_zero(bits));
+            auto &row = rings->batches[k];
+            // A CUDA event that was never recorded reads as done: wait for the view to end.
+            if(!row.recorded.load(std::memory_order_acquire))
+                continue;
+            auto state = gpu_runtime()->query(row.event);
+            if(state == GpuEventState::Pending)
+                continue;
+            rings->bit_clear(rings->event_wait, k);
+            if(state == GpuEventState::Done)
+                release_batch(k);
+            else
+            {
+                keep_rings = true; // quarantined at close: a kernel may still read the memory
+                fail("a GPU event failed; its slots can never be credited");
+            }
+        }
 }
 void Sub::credit_pass()
 {
@@ -568,7 +625,6 @@ void Sub::finish_close()
                 }
                 else
                 {
-                    flush_started = true;
                     auto *q = ucp_ep_flush_nbx(ep, &p);
                     if(!UCS_PTR_IS_PTR(q))
                         on_ctrl(o, UCS_PTR_STATUS(q));
@@ -619,6 +675,8 @@ void Sub::finish_close()
     receive.unmap();
     worker->destroy();
     context->destroy();
+    if(keep_rings) // UCX is closed and safe; the rings behind the failed GPU event stay until exit
+        quarantine_owner();
 }
 void Sub::quarantine_owner()
 {
@@ -684,7 +742,7 @@ std::string PendingSubscription::open_message() const
     m.every = s.every;
     if(s.options.max_rate > 0)
         m.min_interval_ns = std::uint64_t(std::min(1e9 / s.options.max_rate, 9.2e18));
-    m.gpu = false;
+    m.gpu = s.plan.gpu;
     m.label_bytes = std::uint8_t(s.options.label.size());
     std::memcpy(m.label.data(), s.options.label.data(), m.label_bytes);
     m.address_bytes = s.own_address_bytes;

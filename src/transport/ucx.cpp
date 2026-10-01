@@ -165,4 +165,19 @@ std::size_t Worker::transports(ucp_ep_h ep, std::span<char> out) const
     }
     return used;
 }
+bool Worker::only_tcp(ucp_ep_h ep) const
+{
+    ucp_transport_entry_t entries[8]{};
+    ucp_ep_attr_t a{};
+    a.field_mask = UCP_EP_ATTR_FIELD_TRANSPORTS;
+    a.transports.entries = entries;
+    a.transports.num_entries = 8;
+    a.transports.entry_size = sizeof(entries[0]);
+    if(ucp_ep_query(ep, &a) != UCS_OK || !a.transports.num_entries)
+        return false;
+    for(unsigned i = 0; i < a.transports.num_entries; ++i)
+        if(!entries[i].transport_name || std::strcmp(entries[i].transport_name, "tcp") != 0)
+            return false;
+    return true;
+}
 } // namespace TangoBulk::transport::ucx
