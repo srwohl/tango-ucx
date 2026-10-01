@@ -44,6 +44,10 @@ if(BUILD_TESTING)
 endif()
 
 install(TARGETS tango-bulk-transport tango-bulk EXPORT tango-bulk-targets)
+if(TANGO_BULK_CUDA)
+    install(TARGETS tango-bulk-cuda EXPORT tango-bulk-targets
+        OBJECTS DESTINATION "${CMAKE_INSTALL_LIBDIR}/tango-bulk")
+endif()
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
     FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
 install(EXPORT tango-bulk-targets NAMESPACE tango-bulk::

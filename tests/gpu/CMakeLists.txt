@@ -8,3 +8,8 @@ add_test(NAME test_python_gpu
         "TANGO_BULK_FIXTURE_DEVICE=$<TARGET_FILE:fixture_device>"
         "${Python3_EXECUTABLE}" -m pytest -m gpu "${PROJECT_SOURCE_DIR}/python/tests")
 set_tests_properties(test_python_gpu PROPERTIES LABELS gpu SKIP_RETURN_CODE 5)
+
+add_executable(test_runtime test_runtime.cpp)
+target_include_directories(test_runtime PRIVATE "${PROJECT_SOURCE_DIR}/src/transport")
+target_link_libraries(test_runtime PRIVATE tango-bulk-cuda CUDA::cuda_driver Catch2::Catch2WithMain)
+catch_discover_tests(test_runtime PROPERTIES LABELS gpu)

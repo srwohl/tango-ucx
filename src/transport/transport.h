@@ -50,4 +50,35 @@ class PendingSubscription
 
 PendingSubscription prepare(const Offer &, bool every, SubscriptionOptions = {});
 
+enum class GpuEventState
+{
+    Pending,
+    Done,
+    Failed
+};
+struct GpuEvent
+{
+    void *handle = nullptr;
+};
+struct Allocation
+{
+    void *base = nullptr;
+    std::size_t bytes = 0;
+    int gpu = -1;
+};
+// What the transport needs of a GPU; tango-bulk-cuda implements it and registers itself.
+struct GpuRuntime
+{
+    virtual Allocation allocate(int gpu, std::size_t bytes) = 0;
+    virtual void release(Allocation) = 0;
+    virtual GpuEvent make_event(int gpu) = 0;
+    virtual void destroy_event(GpuEvent) = 0;
+    // Never throws: a failed record shows as Failed at query.
+    virtual void record(GpuEvent, GpuStream) = 0;
+    virtual GpuEventState query(GpuEvent) = 0;
+    virtual void copy_to_host(void *to, const void *from, std::size_t bytes) = 0;
+    virtual ~GpuRuntime() = default;
+};
+void register_gpu_runtime(GpuRuntime &);
+
 } // namespace TangoBulk::transport

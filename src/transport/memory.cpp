@@ -22,6 +22,7 @@ constexpr std::uint64_t k_pub_fixed =
     8ull * (sizeof(wire::Request) + sizeof(wire::Reply)) + 64ull * 384 + 16ull * 1024;
 constexpr std::uint64_t k_sub_fixed = 48ull * 1024;
 std::atomic<std::uint64_t> pinned{0};
+GpuRuntime *registered_gpu = nullptr; // set during static initialization, read after it
 std::uint64_t add(std::initializer_list<std::uint64_t> xs)
 {
     std::uint64_t r = 0;
@@ -281,5 +282,13 @@ void Region::unmap() noexcept
 std::uint64_t pinned_bytes() noexcept
 {
     return pinned.load(std::memory_order_acquire);
+}
+void register_gpu_runtime(GpuRuntime &r)
+{
+    registered_gpu = &r;
+}
+GpuRuntime *gpu_runtime() noexcept
+{
+    return registered_gpu;
 }
 } // namespace TangoBulk::transport

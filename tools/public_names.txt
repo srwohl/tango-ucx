@@ -54,6 +54,8 @@ Batch::records
 Batch::gpu
 Batch::copy
 Outcome
+GpuStream
+GpuStream::handle
 every
 latest
 

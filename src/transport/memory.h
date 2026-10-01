@@ -78,4 +78,6 @@ class Region
     std::shared_ptr<void> owner_;
 };
 std::uint64_t pinned_bytes() noexcept;
+struct GpuRuntime;
+GpuRuntime *gpu_runtime() noexcept; // the registered one; null when none is linked
 } // namespace TangoBulk::transport

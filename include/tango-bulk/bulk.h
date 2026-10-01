@@ -129,6 +129,12 @@ class Publisher
     std::shared_ptr<transport::Pub> p_;
 };
 
+// The application's CUDA stream; null is the default stream.
+struct GpuStream
+{
+    void *handle = nullptr;
+};
+
 class Batch
 {
   public:
