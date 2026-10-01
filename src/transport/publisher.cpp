@@ -29,7 +29,7 @@ struct PubRow
     std::int64_t transfer_max_ns = 0, transfer_sum_ns = 0;
     Text<64> label, transport;
     bool used = false, ready = false, every = false, closing = false, end_due = false,
-         end_sent = false;
+         end_sent = false, gpu = false;
     bool flush_started = false, flush_done = false, close_started = false, close_done = false,
          forced = false;
     wire::Reason reason = wire::FinishedReason;
@@ -389,7 +389,8 @@ void Pub::send_frame(std::uint32_t k, std::uint32_t r, std::int64_t now)
     ucp_request_param_t p{};
     p.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
                      UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMH |
-                     UCP_OP_ATTR_FIELD_MEMORY_TYPE;
+                     UCP_OP_ATTR_FIELD_MEMORY_TYPE | UCP_OP_ATTR_FIELD_FLAGS;
+    p.flags = row.gpu ? UCP_AM_SEND_FLAG_RNDV : 0; // an eager frame cannot land in GPU memory
     p.request = &o;
     p.cb.send = send_cb;
     p.user_data = &o;
@@ -527,6 +528,7 @@ bool Pub::control_pass()
             row.used = true;
             row.every = m.every;
             row.depth = m.depth;
+            row.gpu = m.gpu;
             row.id = m.session;
             row.min_interval_ns =
                 std::int64_t(std::min<std::uint64_t>(m.min_interval_ns, INT64_MAX));

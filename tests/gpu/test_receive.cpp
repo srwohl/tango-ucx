@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
 // SPDX-License-Identifier: LGPL-3.0-or-later
-#include "fixtures/pair.h"
+#include "fixtures/fault_adapter.h"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <cuda_runtime.h>
@@ -17,9 +17,6 @@ using Catch::Matchers::ContainsSubstring;
 
 namespace
 {
-// An eager frame cannot land in GPU memory, and the publisher does not yet force rendezvous for
-// a GPU session: until it does, these tests ask UCX for rendezvous at every size.
-[[maybe_unused]] const bool rendezvous = ::setenv("UCX_RNDV_THRESH", "0", 1) == 0;
 // The CUDA runtime behind a switch: Done asks CUDA, Pending and Failed answer for it.
 struct Switched final : GpuRuntime
 {
@@ -199,4 +196,19 @@ TEST_CASE("a GPU ring is capped at 4,096 frames, and a GPU that does not exist i
     CHECK(plan_subscription(offer, true, options, 256).D == 4096);
     REQUIRE(cudaGetDeviceCount(&options.gpu) == cudaSuccess);
     CHECK_THROWS_WITH(prepare(offer, true, options), ContainsSubstring("cudaSetDevice"));
+}
+
+TEST_CASE("a frame that arrives eager on a GPU subscription is refused")
+{
+    test::RawPeer peer; // plays a publisher that does not force rendezvous
+    auto pending =
+        prepare({test::small_description(), test::small_limits(), 7}, true, gpu_options());
+    auto sub = std::move(pending).start(peer.accept(pending), test::deadline(), {});
+    wire::FrameMessage f{peer.session, 0, 128, 0, 1};
+    f.record_bytes = 8;
+    std::array<std::byte, 48> header;
+    wire::encode_into(header, f);
+    peer.send(wire::Frame, header, filled(std::byte{0}));
+    CHECK(peer.progress_until([&] { return sub.outcome() == Outcome::Failed; }));
+    CHECK_THAT(sub.health().failure, ContainsSubstring("invalid frame"));
 }
