@@ -23,13 +23,13 @@ struct PubRow
     std::uint8_t row = 0;
     std::uint32_t ordinal = 0;
     ucp_ep_h ep = nullptr;
-    std::uint64_t id = 0, first_grant = 0, sent = 0, credited = 0, skipped = 0;
+    std::uint64_t id = 0, sent = 0, credited = 0, skipped = 0;
     std::uint32_t depth = 0, in_flight = 0, reserved = 0;
     std::int64_t min_interval_ns = 0, last_send_ns = 0, blocked_since_ns = 0;
     std::int64_t transfer_max_ns = 0, transfer_sum_ns = 0;
     Text<64> label, transport;
     bool used = false, ready = false, every = false, closing = false, end_due = false,
-         end_sent = false, failed = false;
+         end_sent = false;
     bool flush_started = false, flush_done = false, close_started = false, close_done = false,
          forced = false;
     wire::Reason reason = wire::FinishedReason;
@@ -81,7 +81,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     ControlTable control;
     HealthCopy<Observation> health_copy;
     std::jthread loop;
-    std::atomic<bool> finishing{false}, stopping{false};
+    std::atomic<bool> started{false}, finishing{false}, stopping{false};
     bool ended = false, quarantined = false, setup_ok = false;
     std::promise<void> setup_done;
     std::shared_ptr<Pub> self_keep;
@@ -469,12 +469,8 @@ void Pub::retire(std::uint32_t r, wire::Reason why, bool failed)
     row.ready = false;
     row.closing = true;
     row.reason = why;
-    row.failed = failed;
     row.close_started_ns = now_ns();
     row.end_due = why != wire::FinishedReason && why != wire::Closing;
-    if(failed && why != wire::Closing)
-    {
-    }
     retiring_mask |= bit;
 }
 bool Pub::control_pass()
@@ -503,6 +499,8 @@ bool Pub::control_pass()
                 status = wire::Finished;
             else if(m.every && !limits.allow_every)
                 status = wire::EveryRefused;
+            else if(m.every && started.load(std::memory_order_acquire))
+                status = wire::Started; // an every row joins before the first grant
             else if(find_row(m.session) >= 0)
                 status = wire::Malformed;
             else
@@ -545,8 +543,6 @@ bool Pub::control_pass()
             }
             // The subscriber registered its rings and handlers before Open: it is ready now.
             row.ready = true;
-            // A new every row starts at the first grant issued after its Open.
-            row.first_grant = issued;
             row.transport.n = std::uint8_t(worker->transports(row.ep, row.transport.c));
             ready_mask |= std::uint64_t{1} << r;
             if(m.every)
@@ -562,7 +558,7 @@ bool Pub::control_pass()
 }
 // The grant ring is first in, first out, so the grants still queued are the newest issued, and
 // the device never saw them. Un-issued, they use no frame index and their slots are free at once.
-// Each ready every row reserved room for each of them, since its first grant is at most `routed`.
+// Each ready every row reserved room for each of them: every rows join before the first grant.
 void Pub::unissue_grants()
 {
     std::lock_guard l(grants.m);
@@ -588,10 +584,9 @@ bool Pub::route_pass(std::int64_t now)
             break;
         s.posted.store(false, std::memory_order_relaxed);
         s.held = false;
-        auto g = routed++;
+        ++routed;
         for(std::uint32_t r = 0; r < plan.M; ++r)
-            if((every_mask & (std::uint64_t{1} << r)) && g >= rows[r].first_grant &&
-               rows[r].reserved)
+            if((every_mask & (std::uint64_t{1} << r)) && rows[r].reserved)
                 --rows[r].reserved;
         if(!s.cancel)
         {
@@ -607,10 +602,7 @@ bool Pub::route_pass(std::int64_t now)
                 if(!row.ready || row.closing)
                     continue;
                 if(every_mask & bit)
-                {
-                    if(g >= row.first_grant)
-                        to |= bit;
-                }
+                    to |= bit; // it joined before the first grant
                 else if(row.sent - row.credited < row.depth && row.in_flight == 0 &&
                         now - row.last_send_ns >= row.min_interval_ns)
                     to |= bit;
@@ -649,7 +641,7 @@ bool Pub::route_pass(std::int64_t now)
 }
 bool Pub::grant_pass()
 {
-    if(finishing.load())
+    if(finishing.load() || !started.load(std::memory_order_acquire))
         return false;
     bool work = false;
     blocked = 0;
@@ -966,6 +958,12 @@ std::optional<Slot> Publisher::acquire(Deadline d)
         return {};
     return Slot(p_, k);
 }
+// No slot is granted before this, and no every Open is accepted after it.
+void Publisher::bulk_start()
+{
+    if(p_)
+        p_->started.store(true, std::memory_order_release);
+}
 void Publisher::finish()
 {
     if(p_)
@@ -987,7 +985,8 @@ Health Publisher::health() const
              .slots_free = o.slots_free,
              .slots_held = o.slots_held,
              .quarantined_bytes = transport::quarantine().total.load(),
-             .memory_hooks = o.memory_hooks};
+             .memory_hooks = o.memory_hooks,
+             .started = p_->started.load(std::memory_order_acquire)};
     for(const auto &w : std::span(o.rows).first(o.count))
     {
         if(!w.retiring)

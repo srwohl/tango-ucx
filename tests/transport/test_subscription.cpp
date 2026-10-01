@@ -100,7 +100,6 @@ TEST_CASE("batches are cut at their size, at the ring's wrap, after max_wait and
     REQUIRE(r.open->depth == 8);
     auto sub = std::move(pending).start(transport::handle(publisher, pending.open_message()),
                                         test::deadline(), test::closer_for(publisher));
-    test::cancel_earlier_grants(publisher);
     std::uint64_t next = 0;
     // size; max_wait; the wrap at slot 8, then max_wait; End
     for(auto [publish, sizes] : {std::pair{4, std::vector{4}}, {3, {3}}, {3, {1, 2}}, {2, {2}}})
@@ -198,6 +197,7 @@ TEST_CASE("frames arriving while a subscription closes are ignored, and nothing 
 {
     Publisher publisher(test::small_description(), test::small_limits(1));
     auto sub = test::subscribe(publisher, true);
+    publisher.bulk_start();
     std::jthread device(
         [&](std::stop_token stop)
         {

@@ -5,7 +5,7 @@
 [project]
 active_phase = 2
 line_ceiling = 10000
-public_name_limit = 74
+public_name_limit = 76
 python_name_limit = 31
 
 [phases."1"]

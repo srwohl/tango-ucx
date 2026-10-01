@@ -16,6 +16,7 @@ PublisherLimits::max_sessions
 PublisherLimits::allow_every
 PublisherLimits::pressure_timeout
 Publisher
+Publisher::bulk_start
 Publisher::acquire
 Publisher::finish
 Publisher::health
@@ -79,5 +80,6 @@ Health::transfer_max_ns
 Health::transfer_mean_ns
 Health::quarantined_bytes
 Health::memory_hooks
+Health::started
 Health::transport
 Health::failure

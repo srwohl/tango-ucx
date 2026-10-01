@@ -65,8 +65,7 @@ inline transport::Offer offer_of(const Publisher &publisher)
 {
     return transport::parse_bulk_stream(transport::bulk_stream(publisher));
 }
-// Slots granted before an every row's Open remain ahead of its first grant. Ordinary tests drain
-// that prefix so their first publish exercises the row; grant-lookahead tests leave it in place.
+// The slots granted and not yet routed, once the publisher has granted any.
 inline std::uint32_t granted(const Publisher &publisher)
 {
     auto h = publisher.health();
@@ -74,12 +73,6 @@ inline std::uint32_t granted(const Publisher &publisher)
         h = publisher.health())
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     return h.slots_held;
-}
-inline void cancel_earlier_grants(Publisher &publisher)
-{
-    for(auto n = granted(publisher); n; --n)
-        if(!publisher.acquire(deadline()))
-            throw std::runtime_error("publisher did not grant a slot");
 }
 inline transport::Closer closer_for(Publisher &publisher)
 {
@@ -91,21 +84,20 @@ inline transport::Closer closer_for(Publisher &publisher)
 }
 inline Subscription subscribe(Publisher &publisher, bool every,
                               SubscriptionOptions options = small_options(),
-                              transport::Closer closer = {}, bool drain_initial_grants = true)
+                              transport::Closer closer = {})
 {
     auto pending = transport::prepare(offer_of(publisher), every, std::move(options));
     auto open = pending.open_message();
     auto reply = transport::handle(publisher, open);
     if(!closer)
         closer = closer_for(publisher);
-    auto sub = std::move(pending).start(reply, deadline(), std::move(closer));
-    if(every && drain_initial_grants)
-        cancel_earlier_grants(publisher);
-    return sub;
+    return std::move(pending).start(reply, deadline(), std::move(closer));
 }
+// The test device starts when it first publishes: subscribe every before that.
 inline void publish_one(Publisher &publisher, std::byte value = std::byte{0x5a},
                         std::uint64_t timestamp = 123)
 {
+    publisher.bulk_start();
     auto slot = publisher.acquire(deadline());
     if(!slot)
         throw std::runtime_error("publisher did not grant a slot");

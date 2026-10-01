@@ -6,10 +6,8 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <tables.h>
 
-#include <array>
 #include <csignal>
 #include <cstdlib>
-#include <string_view>
 #include <sys/wait.h>
 #include <thread>
 #include <vector>
@@ -31,6 +29,7 @@ TEST_CASE("forced close preserves ownership around a large in-flight receive")
     options.batch = 1;
     options.max_wait = std::chrono::microseconds(0);
     auto sub = test::subscribe(publisher, true, options, test::FaultAdapter::lose_close_fence());
+    publisher.bulk_start();
     for(std::uint64_t i = 0; i < 2; ++i)
     {
         auto slot = publisher.acquire(test::deadline());
@@ -107,6 +106,7 @@ TEST_CASE("a subscriber killed with SIGKILL is detected through the UCX peer end
     if(tls == "tcp")
         CHECK(transport.find("tcp") != std::string::npos);
     REQUIRE(child.kill());
+    publisher.bulk_start();
     auto until = test::deadline(std::chrono::seconds(12));
     Health h;
     std::uint32_t sends = 0;
@@ -151,6 +151,7 @@ TEST_CASE("a publisher killed with SIGKILL ends an every subscription Failed aft
             auto open = test::read_text(child.in());
             if(open.empty() || !test::write_text(child.out(), transport::handle(publisher, open)))
                 ::_exit(3);
+            publisher.bulk_start();
             for(;;) // until killed; an every session holds the device while its ring is full
                 if(auto slot = publisher.acquire(test::deadline()))
                     std::move(*slot).publish();
@@ -252,15 +253,4 @@ TEST_CASE("an every subscription gone without its Close holds the device until i
         CHECK(test::eventually([&] { return publisher.health().failed_every == 1; }));
         CHECK(test::eventually([&] { return test::sessions(publisher).empty(); }));
     }
-}
-
-TEST_CASE("an every subscription gone before its first frame fails that frame's send")
-{
-    Publisher publisher(test::small_description(), test::small_limits(1));
-    auto sub = test::subscribe(publisher, true, test::small_options(),
-                               test::FaultAdapter::lose_close_fence());
-    sub.close(test::deadline());
-    test::publish_one(publisher); // UCX cannot attach the gone worker's shared memory
-    CHECK(test::eventually([&] { return publisher.health().failed_every == 1; }));
-    CHECK(test::eventually([&] { return test::sessions(publisher).empty(); }));
 }

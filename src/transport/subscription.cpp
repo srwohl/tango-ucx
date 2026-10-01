@@ -42,6 +42,8 @@ std::string status_text(wire::Status s)
             return "publisher speaks another protocol major";
         case wire::Timeout:
             return "publisher did not answer in time";
+        case wire::Started:
+            return "publisher has started: an every subscription joins before its start";
         default:
             return "malformed or refused control message";
     }

@@ -21,9 +21,9 @@ constexpr std::string_view k_open = "tango-bulk-open", k_close = "tango-bulk-clo
                            k_sessions = "tango-bulk-sessions";
 constexpr std::array<std::string_view, 11> k_element_names{
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bytes"};
-constexpr std::array<std::string_view, 11> k_status_names{
+constexpr std::array<std::string_view, 12> k_status_names{
     "ok",       "malformed", "version",         "incarnation", "every-refused", "no-session",
-    "endpoint", "finished",  "unknown-session", "busy",        "timeout"};
+    "endpoint", "finished",  "unknown-session", "busy",        "timeout",       "started"};
 
 std::string interface(std::string_view name)
 {

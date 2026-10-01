@@ -53,20 +53,9 @@ class Device : public TANGO_BASE_CLASS
         std::move(slot).publish();
         ++next;
     }
-    void prime()
-    {
-        // The publisher can queue up to 1,024 grants before Open. Cancel that initial window so
-        // the fixture's short capture starts at its first post-Open grant.
-        for(std::uint32_t i = 0; i < 1024; ++i)
-        {
-            auto slot = bulk->acquire(std::chrono::steady_clock::now() + std::chrono::seconds(1));
-            if(!slot)
-                throw std::runtime_error("could not drain the fixture's initial grant window");
-        }
-    }
     Tango::DevLong publish(Tango::DevLong n)
     {
-        prime();
+        bulk->bulk_start();
         Tango::DevLong done = 0;
         for(; done < n; ++done)
         {
@@ -94,7 +83,7 @@ class Device : public TANGO_BASE_CLASS
     // the incarnation.
     void start(Tango::DevLong n)
     {
-        prime();
+        bulk->bulk_start();
         frames = std::jthread(
             [this, n](std::stop_token stop)
             {

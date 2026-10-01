@@ -111,7 +111,7 @@ TEST_CASE("control documents match their golden JSON and round-trip")
     CHECK(back.status == wire::Ok);
     CHECK(back.address_bytes == 2);
     CHECK(back.address[0] == std::byte{0x7c});
-    for(int s = wire::Ok; s <= wire::Timeout; ++s)
+    for(int s = wire::Ok; s <= wire::Started; ++s)
     {
         REQUIRE(wire::parse(wire::format(wire::Reply{wire::Status(s)}), back));
         CHECK(back.status == s);

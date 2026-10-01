@@ -148,6 +148,7 @@ py::dict health_dict(const Health &health)
     result["transfer_mean_ns"] = health.transfer_mean_ns;
     result["quarantined_bytes"] = health.quarantined_bytes;
     result["memory_hooks"] = health.memory_hooks;
+    result["started"] = health.started;
     result["transport"] = health.transport;
     result["failure"] = health.failure;
     return result;

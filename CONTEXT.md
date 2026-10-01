@@ -63,6 +63,12 @@ The part of a device that owns the bulk stream's source memory, grants sessions 
 publishes frames.
 _Avoid_: producer, server
 
+**Start**:
+The point at which a publisher begins to grant slots, set by the device with `bulk_start`.
+No frame is published before it. An every subscription joins before it and is refused after
+it; a latest subscription joins at any time.
+_Avoid_: arm, go
+
 **Slot**:
 One frame-sized division of a ring. The device holds a source slot exclusively from
 acquiring it until it publishes it as a frame or cancels it.
@@ -95,8 +101,8 @@ and fixed for the subscription.
 _Avoid_: flow policy, flow, ordered, lossless, lossy
 
 **Every**:
-Delivery of every frame published after the subscription starts, in order. The
-subscription applies pressure when it has no room.
+Delivery of every frame of the incarnation, in order, from frame index 0. The subscription
+joins before the start, and applies pressure when it has no room.
 _Avoid_: ordered, lossless, reliable
 
 **Latest**:

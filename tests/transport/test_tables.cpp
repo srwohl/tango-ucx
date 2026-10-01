@@ -177,7 +177,6 @@ TEST_CASE("a Credit below one already received is ignored")
     Publisher publisher(test::small_description(), test::small_limits(1));
     test::RawPeer peer;
     REQUIRE(peer.open(publisher, true, 4) == wire::Ok);
-    test::cancel_earlier_grants(publisher);
     test::publish_one(publisher);
     test::publish_one(publisher);
     REQUIRE(peer.progress_until([&] { return peer.count(wire::Frame) == 2; }));

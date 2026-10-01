@@ -70,6 +70,7 @@ struct Health
     std::uint64_t last_index = 0, transfer_max_ns = 0, transfer_mean_ns = 0;
     std::uint64_t quarantined_bytes = 0;
     bool memory_hooks = true;
+    bool started = false; // a publisher's: bulk_start was called
     std::string transport, failure;
 };
 
@@ -116,6 +117,7 @@ class Publisher
     Publisher(const Publisher &) = delete;
     Publisher &operator=(const Publisher &) = delete;
     ~Publisher();
+    void bulk_start(); // slots are granted from here on; every subscriptions join before it
     std::optional<Slot> acquire(Deadline);
     void finish();
     Health health() const;

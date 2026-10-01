@@ -46,7 +46,6 @@ TEST_CASE("an Open whose session id a row already holds is refused")
     REQUIRE(wire::parse(transport::handle(publisher, open), again));
     CHECK(again.status == wire::Malformed);
     auto sub = std::move(pending).start(first, test::deadline(), test::closer_for(publisher));
-    test::cancel_earlier_grants(publisher);
     test::publish_one(publisher);
     auto batch = sub.read(test::deadline());
     REQUIRE(batch);
@@ -77,28 +76,29 @@ TEST_CASE("a malformed or refused bulk command gets a status, not an exception")
     publisher.finish();
 }
 
-TEST_CASE("a mid-stream every row gets consecutive frames from grants issued after its Open")
+TEST_CASE("no slot is granted before bulk_start, and no every Open is accepted after it")
 {
-    Publisher publisher(test::small_description(), test::small_limits(1));
-    auto granted = test::granted(publisher);
-    auto options = test::small_options();
-    options.budget = 256ull << 10;
-    auto pending = transport::prepare(test::offer_of(publisher), true, options);
-    wire::Request request;
-    REQUIRE(wire::parse(pending.open_message(), request) == wire::Ok);
-    auto depth = request.open->depth;
-    REQUIRE(depth < granted);
-    auto sub = std::move(pending).start(transport::handle(publisher, pending.open_message()),
-                                        test::deadline(), test::closer_for(publisher));
-    for(std::uint32_t i = 0; i < granted + depth; ++i)
+    Publisher publisher(test::small_description(), test::small_limits(3));
+    auto archiver = test::subscribe(publisher, true);
+    CHECK_FALSE(publisher.acquire(test::deadline(std::chrono::seconds(1))));
+    CHECK(publisher.health().slots_held == 0);
+    CHECK_FALSE(publisher.health().started); // why the device got no slot
+    publisher.bulk_start();
+    CHECK(publisher.health().started);
+    test::RawPeer late;
+    CHECK(late.open(publisher, true, 4) == wire::Started);
+    auto preview = test::subscribe(publisher, false); // latest joins a started publisher
+    for(int i = 0; i < 3; ++i)
         test::publish_one(publisher);
-    for(std::uint32_t i = 0; i < depth; ++i)
+    for(std::uint64_t i = 0; i < 3; ++i)
     {
-        auto batch = sub.read(test::deadline());
+        auto batch = archiver.read(test::deadline());
         REQUIRE(batch);
-        CHECK(batch->index(0) == granted + i);
+        CHECK(batch->index(0) == i); // from the first frame, with no grant ahead of its Open
     }
-    sub.close(test::deadline());
+    CHECK(preview.read(test::deadline()));
+    archiver.close(test::deadline());
+    preview.close(test::deadline());
 }
 
 TEST_CASE("BulkSessions lists all 64 sessions with their 64-byte labels")
@@ -131,42 +131,37 @@ TEST_CASE("BulkSessions lists all 64 sessions with their 64-byte labels")
     }
 }
 
-TEST_CASE("a new every subscription waits behind the grants issued before its Open")
+TEST_CASE("an every Open that races bulk_start is refused, or gets every frame from the first")
 {
-    Description d{Element::U8, {1 << 20}, 0, {}};
-    auto limits = test::small_limits(1);
-    limits.budget = 12ull << 20;
-    Publisher publisher(d, limits);
-    auto S = test::granted(publisher);
-    std::atomic<std::uint64_t> published{0};
-    std::jthread device( // a 10 Hz device
-        [&](std::stop_token stop)
-        {
-            for(auto tick = std::chrono::steady_clock::now(); !stop.stop_requested();
-                std::this_thread::sleep_until(tick += std::chrono::milliseconds(100)))
-                if(auto slot = publisher.acquire(tick + std::chrono::seconds(1)))
-                    std::move(*slot).publish(), ++published;
-        });
-    std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    auto before = published.load();
-    auto opened = std::chrono::steady_clock::now();
-    auto sub = test::subscribe(publisher, true, {.budget = 8ull << 20}, {}, false);
-    auto first = sub.read(test::deadline());
-    auto waited = std::chrono::steady_clock::now() - opened;
-    REQUIRE(first);
-    auto behind = first->index(0) - before;
-    INFO("S=" << S << " behind=" << behind
-              << " waited_ms=" << waited / std::chrono::milliseconds(1));
-    CHECK(behind + 2 >= S);
-    CHECK(waited >= (behind - 1) * std::chrono::milliseconds(100));
-    for(auto next = first->index(0) + 1; next < first->index(0) + 4; ++next)
+    int joined = 0;
+    for(int round = 0; round < 12; ++round)
     {
-        auto batch = sub.read(test::deadline());
-        REQUIRE(batch);
-        CHECK(batch->index(0) == next);
+        Publisher publisher(test::small_description(), test::small_limits(1));
+        auto pending = transport::prepare(test::offer_of(publisher), true, test::small_options());
+        std::jthread device( // starts and publishes at once, while the Open is on its way
+            [&]
+            {
+                std::this_thread::sleep_for(std::chrono::microseconds(40 * round));
+                for(int i = 0; i < 3; ++i)
+                    test::publish_one(publisher);
+            });
+        auto text = transport::handle(publisher, pending.open_message());
+        device.join();
+        wire::Reply reply;
+        REQUIRE(wire::parse(text, reply));
+        if(reply.status == wire::Started)
+            continue;
+        auto sub = std::move(pending).start(text, test::deadline(), test::closer_for(publisher));
+        for(std::uint64_t i = 0; i < 3; ++i)
+        {
+            auto batch = sub.read(test::deadline());
+            REQUIRE(batch);
+            CHECK(batch->index(0) == i);
+        }
+        ++joined;
     }
-    first.reset();
-    sub.close(test::deadline());
+    INFO("joined in " << joined << " of 12 rounds");
+    SUCCEED();
 }
 
 TEST_CASE("an every row without room makes the device wait, and Health names it for as long")
@@ -268,6 +263,7 @@ TEST_CASE("frames are routed in grant order, and a cancelled slot uses no frame 
 {
     Publisher publisher(test::small_description(), test::small_limits(1));
     auto sub = test::subscribe(publisher, true);
+    publisher.bulk_start();
     auto fill = [](Slot &s, int v) { std::memset(s.payload().data(), v, s.payload().size()); };
     auto a = publisher.acquire(test::deadline());
     auto b = publisher.acquire(test::deadline());

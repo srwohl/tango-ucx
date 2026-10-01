@@ -41,7 +41,8 @@ enum Status : std::uint16_t
     Finished,
     UnknownSession,
     Busy,
-    Timeout
+    Timeout,
+    Started
 };
 enum Reason : std::uint8_t
 {
