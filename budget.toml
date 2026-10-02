@@ -1,13 +1,20 @@
 # The estimates come from prototypes/final_shape/fixed_tables_v2.md, section 10.
 # Phase 1 and 2 category splits were rebalanced from measured counts; combined totals stay cumulative.
 # Phase 3 allowances were raised to the measured counts when the phase was closed (2026-10-02).
+# Phase 4 is detector-native opaque payloads (NEXT.md). Its library figures are the scoping
+# study's estimates, and the library came in under them. Its test figures were raised to the
+# measured counts where the tests went over: the packed ring's tests were not scoped.
+# The 10,000-line ceiling of the specification no longer binds (NEXT.md, "Decisions taken").
+# A packed ring's frame states its position (NEXT.md, "Header order"): the tables, wire and
+# test allowances were raised to the measured counts for it. The phase total is the sum of
+# its allowances; the measured combined count stays under the ceiling.
 # Per-file entries are allowances, not targets.
 
 [project]
-active_phase = 3
-line_ceiling = 10000
-public_name_limit = 76
-python_name_limit = 31
+active_phase = 4
+line_ceiling = 11000
+public_name_limit = 79
+python_name_limit = 32
 
 [phases."1"]
 library = 4000
@@ -23,6 +30,11 @@ total = 8546
 library = 5780
 tests = 4140
 total = 9920
+
+[phases."4"]
+library = 5912
+tests = 5114
+total = 11026
 
 [[allowance]]
 name = "publisher"
@@ -296,3 +308,108 @@ phase = 3
 kind = "tests"
 lines = 35
 patterns = ["tests/transport/fixtures/pair.h"]
+
+[[allowance]]
+name = "publisher"
+phase = 4
+kind = "library"
+lines = 70
+patterns = ["src/transport/publisher.cpp"]
+
+[[allowance]]
+name = "subscription"
+phase = 4
+kind = "library"
+lines = 150
+patterns = ["src/transport/subscription.cpp"]
+
+[[allowance]]
+name = "tables"
+phase = 4
+kind = "library"
+lines = 30
+patterns = ["src/transport/tables.h"]
+
+[[allowance]]
+name = "batch"
+phase = 4
+kind = "library"
+lines = 40
+patterns = ["src/transport/batch.cpp"]
+
+[[allowance]]
+name = "memory"
+phase = 4
+kind = "library"
+lines = 30
+patterns = ["src/transport/memory.h", "src/transport/memory.cpp"]
+
+[[allowance]]
+name = "wire"
+phase = 4
+kind = "library"
+lines = 28
+patterns = ["src/transport/wire.h", "src/transport/wire.cpp"]
+
+[[allowance]]
+name = "public_headers"
+phase = 4
+kind = "library"
+lines = 15
+patterns = ["src/transport/transport.h"]
+
+[[allowance]]
+name = "python_core"
+phase = 4
+kind = "library"
+lines = 10
+patterns = ["python/_core.cpp"]
+
+[[allowance]]
+name = "python_package"
+phase = 4
+kind = "library"
+lines = 6
+patterns = ["python/tango_ucx/*.py"]
+
+[[allowance]]
+name = "test_opaque"
+phase = 4
+kind = "tests"
+lines = 551
+patterns = ["tests/transport/test_opaque.cpp"]
+
+[[allowance]]
+name = "transport_fixtures"
+phase = 4
+kind = "tests"
+lines = 41
+patterns = ["tests/transport/fixtures/pair.h", "tests/transport/fixtures/fault_adapter.h"]
+
+[[allowance]]
+name = "test_archive"
+phase = 4
+kind = "tests"
+lines = 157
+patterns = ["tests/transport/test_archive.cpp"]
+
+[[allowance]]
+name = "tango_tests"
+phase = 4
+kind = "tests"
+lines = 38
+patterns = ["tests/tango/**"]
+
+[[allowance]]
+name = "test_wire"
+phase = 4
+kind = "tests"
+lines = 58
+patterns = ["tests/transport/test_wire.cpp"]
+
+[[allowance]]
+name = "python_tests"
+phase = 4
+kind = "tests"
+lines = 150
+patterns = ["python/tests/*.py"]
