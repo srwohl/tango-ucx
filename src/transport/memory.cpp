@@ -91,9 +91,11 @@ void reserve_pin(std::uint64_t n)
 
 Sizes sizes_of(const Description &d)
 {
-    if(d.shape.empty() || d.shape.size() > 8)
-        throw std::invalid_argument("a shape needs 1 to 8 extents");
-    auto n = element_bytes(d.element);
+    bool opaque = d.max_payload_bytes != 0;
+    if(opaque ? !d.shape.empty() : d.shape.empty() || d.shape.size() > 8)
+        throw std::invalid_argument(opaque ? "an opaque stream has no shape"
+                                           : "a shape needs 1 to 8 extents");
+    auto n = opaque ? d.max_payload_bytes : element_bytes(d.element);
     for(auto e : d.shape)
     {
         if(!e)
@@ -105,7 +107,13 @@ Sizes sizes_of(const Description &d)
     if(d.field_bytes > 1024)
         throw std::invalid_argument("application fields over 1,024 bytes");
     auto padded = std::uint32_t(align(d.field_bytes, 8));
-    return {n, d.field_bytes, padded, std::uint32_t(16 + padded), std::uint32_t(40 + padded)};
+    // An opaque frame's header has its position in the packed ring: 8 bytes more.
+    return {n,
+            d.field_bytes,
+            padded,
+            std::uint32_t(16 + padded),
+            std::uint32_t((opaque ? 48 : 40) + padded),
+            opaque};
 }
 
 PublisherPlan plan_publisher(const Description &d, const PublisherLimits &l, std::uint32_t request,
@@ -153,6 +161,8 @@ SubscriptionPlan plan_subscription(const Offer &o, bool every, const Subscriptio
     if(options.gpu >= 0 && !registered_gpu)
         throw std::invalid_argument("GPU receive needs a GPU runtime: link tango-ucx-cuda");
     p.gpu = options.gpu >= 0;
+    if(p.gpu && p.sizes.opaque)
+        throw std::invalid_argument("a GPU subscription cannot receive an opaque stream");
     if(!(options.max_rate >= 0) || (every && options.max_rate > 0))
         throw std::invalid_argument("max_rate must be 0 or more, and applies to latest only");
     p.batch = options.batch;
@@ -162,16 +172,35 @@ SubscriptionPlan plan_subscription(const Offer &o, bool every, const Subscriptio
     auto fixed = add({k_sub_fixed, mul(3, p.op_stride), k_region_charge});
     auto fits = options.budget > fixed ? (options.budget - fixed) / per : 0;
     auto depth = std::min<std::uint64_t>(fits, p.gpu ? k_max_gpu_depth : k_max_depth);
-    depth -= depth % p.batch;
-    if(depth < 2ull * p.batch)
-        throw std::invalid_argument(std::format(
-            "budget {} holds {} frames of {} bytes; two batches of {} need {} bytes",
-            options.budget, fits, per, p.batch, add({fixed, mul(2ull * p.batch, per)})));
+    if(p.sizes.opaque)
+    {
+        // A packed ring: the budget less the tables. They are sized for frames of 1/256 of the
+        // maximum, and take at most an eighth of the budget.
+        per = add({per - p.sizes.frame_bytes, 2 * sizeof(std::uint64_t)});
+        auto room = options.budget > fixed ? options.budget - fixed : 0;
+        depth = std::min({room / add({per, p.sizes.frame_bytes / 256, 1}), room / mul(8, per),
+                          std::uint64_t{k_max_depth}});
+        depth -= depth % p.batch;
+        p.payload_bytes = room - depth * per;
+        if(depth < 2ull * p.batch || p.payload_bytes < mul(3, p.sizes.frame_bytes))
+            throw std::invalid_argument(std::format(
+                "budget {} holds a ring of {} bytes and {} frames; it needs three frames of {} "
+                "bytes and two batches of {}",
+                options.budget, p.payload_bytes, depth, p.sizes.frame_bytes, p.batch));
+    }
+    else
+    {
+        depth -= depth % p.batch;
+        if(depth < 2ull * p.batch)
+            throw std::invalid_argument(std::format(
+                "budget {} holds {} frames of {} bytes; two batches of {} need {} bytes",
+                options.budget, fits, per, p.batch, add({fixed, mul(2ull * p.batch, per)})));
+        p.payload_bytes = mul(depth, p.sizes.frame_bytes);
+    }
     p.D = std::uint32_t(depth);
-    p.payload_bytes = mul(p.D, p.sizes.frame_bytes);
     p.records_bytes = mul(p.D, p.sizes.record_stride);
     p.recv_ops_bytes = mul(p.D, p.op_stride);
-    p.charge = add({fixed, mul(p.D, per)});
+    p.charge = add({fixed, mul(p.D, per), p.sizes.opaque ? p.payload_bytes : 0});
     return p;
 }
 

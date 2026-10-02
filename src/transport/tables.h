@@ -196,6 +196,26 @@ inline std::uint64_t random64()
     return gen();
 }
 
+// A packed ring: an opaque stream's frames, each placed after the one before it. Positions count
+// every byte since the session began, with the bytes skipped at the ring's end. A frame never
+// straddles the end: it starts at the front. The publisher places each frame and states its
+// position in the Frame header; the subscriber checks it against the frames it holds (Sub::fits)
+// and takes nothing from the order in which headers arrive, which UCX does not promise.
+inline std::uint64_t place(std::uint64_t end, std::uint64_t bytes, std::uint64_t ring)
+{
+    return end % ring + bytes > ring ? end + ring - end % ring : end;
+}
+// The longest run of frames not yet arrived that a subscriber looks across for a neighbour.
+inline constexpr std::uint64_t k_max_gap = 1024;
+// Room for one more grant: the most a frame may have, for it and for each grant outstanding.
+// The frames a ring holds wrap at most once, and a wrap skips less than one frame, so one more
+// covers it. `used` runs from the end of the last credited frame to the end of the last sent.
+inline bool ring_room(std::uint64_t used, std::uint64_t grants, std::uint64_t max,
+                      std::uint64_t ring)
+{
+    return used + (grants + 2) * max - 1 <= ring;
+}
+
 struct ControlEntry
 {
     enum State : std::uint8_t
@@ -307,6 +327,7 @@ struct Rings
     std::shared_ptr<void> storage; // host bytes, or a GPU allocation with the rows' events
     std::byte *payload = nullptr;
     std::vector<std::byte> records;
+    std::vector<std::uint64_t> placements; // an opaque stream's frames: position, length
     std::vector<BatchRow> batches;
     IndexRing released;
     std::vector<std::uint64_t> busy, landed, returned, event_wait;
@@ -317,6 +338,12 @@ struct Rings
     std::byte *record(std::uint32_t k)
     {
         return records.data() + std::uint64_t(k) * plan.sizes.record_stride;
+    }
+    // Frame k is not directly after frame k - 1: it starts at the front of a packed ring.
+    bool wraps(std::uint32_t k) const
+    {
+        return plan.sizes.opaque &&
+               placements[2 * k] != placements[2 * k - 2] + placements[2 * k - 1];
     }
 };
 struct Sub final : Owner
@@ -336,7 +363,7 @@ struct Sub final : Owner
     std::uint32_t req = 0;
     std::array<std::byte, 4096> own_address{};
     std::uint16_t own_address_bytes = 0;
-    std::array<std::byte, 16> credit_header{};
+    std::array<std::byte, 24> credit_header{};
     IndexRing queue;
     std::atomic<bool> stop{false}, close{false};
     bool ready = false, failed = false, quarantined = false, fenced = false, gap = false;
@@ -344,6 +371,8 @@ struct Sub final : Owner
     bool has_end = false;
     std::uint64_t assembled = 0, credited = 0, credit_sent = 0, frames = 0, skipped = 0,
                   last_index = UINT64_MAX;
+    // A packed ring: one past the highest sequence arrived, and where the last credited frame ends.
+    std::uint64_t arrived = 0, freed = 0;
     std::uint32_t receiving = 0, quiet_turns = 0;
     std::int64_t first_landed_ns = 0, last_landed_ns = 0, end_at_ns = 0;
     std::array<char, 256> failure{};
@@ -376,6 +405,7 @@ struct Sub final : Owner
     void on_ctrl(SubOpMeta *, ucs_status_t);
     void fail(std::string_view);
     void landed(std::uint32_t);
+    bool fits(std::uint64_t, std::uint64_t, std::uint64_t) const;
     bool assemble(std::int64_t);
     void deliver(std::uint32_t, std::uint32_t);
     void decide(std::int64_t);

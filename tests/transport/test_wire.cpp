@@ -84,7 +84,7 @@ void sweep(const Bytes &good, const Round &round)
 TEST_CASE("control documents match their golden JSON and round-trip")
 {
     auto open = wire::format(golden_open());
-    CHECK(open == R"({"interface":"tango-ucx-open/3.0","session":7340032917504811,)"
+    CHECK(open == R"({"interface":"tango-ucx-open/3.1","session":7340032917504811,)"
                   R"("incarnation":12648430,"depth":256,"batch":16,"min_interval_ns":0,)"
                   R"("delivery":"every","gpu":false,"label":"archiver","address":"0a3fff"})");
     wire::Request r;
@@ -93,7 +93,7 @@ TEST_CASE("control documents match their golden JSON and round-trip")
     CHECK(wire::format(*r.open) == open);
 
     auto close = wire::format(wire::CloseMessage{42});
-    CHECK(close == R"({"interface":"tango-ucx-close/3.0","session":42})");
+    CHECK(close == R"({"interface":"tango-ucx-close/3.1","session":42})");
     REQUIRE(wire::parse(close, r) == wire::Ok);
     CHECK_FALSE(r.open);
     CHECK(r.close.session == 42);
@@ -103,9 +103,9 @@ TEST_CASE("control documents match their golden JSON and round-trip")
     accepted.address[0] = std::byte{0x7c};
     accepted.address[1] = std::byte{0x01};
     CHECK(wire::format(accepted) ==
-          R"({"interface":"tango-ucx-reply/3.0","status":"ok","address":"7c01"})");
+          R"({"interface":"tango-ucx-reply/3.1","status":"ok","address":"7c01"})");
     CHECK(wire::format(wire::Reply{wire::EveryRefused}) ==
-          R"({"interface":"tango-ucx-reply/3.0","status":"every-refused"})");
+          R"({"interface":"tango-ucx-reply/3.1","status":"every-refused"})");
     wire::Reply back;
     REQUIRE(wire::parse(wire::format(accepted), back));
     CHECK(back.status == wire::Ok);
@@ -121,14 +121,15 @@ TEST_CASE("control documents match their golden JSON and round-trip")
 TEST_CASE("readers accept a newer minor and unknown keys, and refuse another major")
 {
     auto open = wire::format(golden_open());
-    CHECK(status_of(replace(open, "open/3.0", "open/3.7")) == wire::Ok);
+    CHECK(status_of(replace(open, "open/3.1", "open/3.7")) == wire::Ok);
+    CHECK(status_of(replace(open, "open/3.1", "open/3.0")) == wire::Ok);
     CHECK(status_of(replace(open, R"("gpu":false)", R"("gpu":false,"later":{"x":[1,2]})")) ==
           wire::Ok);
-    CHECK(status_of(replace(open, "open/3.0", "open/4.0")) == wire::Version);
-    CHECK(status_of(replace(open, "open/3.0", "open/2.9")) == wire::Version);
+    CHECK(status_of(replace(open, "open/3.1", "open/4.0")) == wire::Version);
+    CHECK(status_of(replace(open, "open/3.1", "open/2.9")) == wire::Version);
     wire::Reply reply;
     CHECK_FALSE(wire::parse(R"({"interface":"tango-ucx-reply/4.0","status":"ok"})", reply));
-    REQUIRE(wire::parse(R"({"interface":"tango-ucx-reply/3.1","status":"busy","hint":1})", reply));
+    REQUIRE(wire::parse(R"({"interface":"tango-ucx-reply/3.9","status":"busy","hint":1})", reply));
     CHECK(reply.status == wire::Busy);
 }
 
@@ -142,8 +143,8 @@ TEST_CASE("malformed control documents are refused")
                            std::string("[]"),
                            std::string("null"),
                            std::string(R"({"session":1})"),
-                           replace(open, "open/3.0", "open/3"),
-                           replace(open, "open/3.0", "open/x.0"),
+                           replace(open, "open/3.1", "open/3"),
+                           replace(open, "open/3.1", "open/x.0"),
                            replace(open, "tango-ucx-open", "tango-ucx-other"),
                            replace(open, "7340032917504811", "0"),
                            replace(open, "7340032917504811", "-1"),
@@ -163,20 +164,20 @@ TEST_CASE("malformed control documents are refused")
                            wire::format(wire::CloseMessage{0})})
         CHECK(status_of(bad) == wire::Malformed);
     wire::Reply reply;
-    CHECK_FALSE(wire::parse(R"({"interface":"tango-ucx-reply/3.0","status":"fine"})", reply));
+    CHECK_FALSE(wire::parse(R"({"interface":"tango-ucx-reply/3.1","status":"fine"})", reply));
     CHECK_FALSE(
-        wire::parse(R"({"interface":"tango-ucx-reply/3.0","status":"ok","address":"7"})", reply));
-    CHECK_FALSE(wire::parse(R"({"interface":"tango-ucx-open/3.0","status":"ok"})", reply));
+        wire::parse(R"({"interface":"tango-ucx-reply/3.1","status":"ok","address":"7"})", reply));
+    CHECK_FALSE(wire::parse(R"({"interface":"tango-ucx-open/3.1","status":"ok"})", reply));
 }
 
 TEST_CASE("the UcxStream document matches its golden JSON and refuses what it cannot describe")
 {
     wire::StreamMessage m{12648430, {Element::U16, {2048, 1024}, 16, "[('t','<f8')]"}, true, 8};
     auto doc = wire::format(m);
-    CHECK(doc == R"({"interface":"tango-ucx-stream/3.0","incarnation":12648430,"element":"u16",)"
+    CHECK(doc == R"({"interface":"tango-ucx-stream/3.1","incarnation":12648430,"element":"u16",)"
                  R"("shape":[2048,1024],"field_bytes":16,"field_dtype":"[('t','<f8')]",)"
                  R"("allow_every":true,"max_sessions":8})");
-    auto offer = transport::parse_ucx_stream(replace(doc, "3.0", "3.2"));
+    auto offer = transport::parse_ucx_stream(replace(doc, "3.1", "3.2"));
     CHECK(offer.incarnation == 12648430);
     CHECK(offer.description.element == Element::U16);
     CHECK(offer.description.shape == std::vector<std::uint64_t>{2048, 1024});
@@ -188,8 +189,8 @@ TEST_CASE("the UcxStream document matches its golden JSON and refuses what it ca
         wire::StreamMessage back;
         return wire::parse(d, back);
     };
-    CHECK(status(replace(doc, "3.0", "4.0")) == wire::Version);
-    CHECK_THROWS(transport::parse_ucx_stream(replace(doc, "3.0", "4.0")));
+    CHECK(status(replace(doc, "3.1", "4.0")) == wire::Version);
+    CHECK_THROWS(transport::parse_ucx_stream(replace(doc, "3.1", "4.0")));
     for(auto key :
         {"incarnation", "element", "field_bytes", "field_dtype", "allow_every", "max_sessions"})
         CHECK(status(without(doc, key)) == wire::Malformed);
@@ -207,15 +208,43 @@ TEST_CASE("the UcxStream document matches its golden JSON and refuses what it ca
         CHECK(status(replace(doc, from, to)) == wire::Malformed);
 }
 
+// A 3.0 subscriber needs a shape, so it refuses an opaque stream before it sends an Open.
+TEST_CASE("an opaque stream's UcxStream has a maximum and no shape, and its Open asks for a ring")
+{
+    wire::StreamMessage m{12648430, {Element::Bytes, {}, 8, "<u8", 9ull << 20}, true, 8};
+    auto doc = wire::format(m);
+    CHECK(doc == R"({"interface":"tango-ucx-stream/3.1","incarnation":12648430,"element":"bytes",)"
+                 R"("max_payload_bytes":9437184,"field_bytes":8,"field_dtype":"<u8",)"
+                 R"("allow_every":true,"max_sessions":8})");
+    auto offer = transport::parse_ucx_stream(doc);
+    CHECK((offer.description.max_payload_bytes == 9ull << 20 && offer.description.shape.empty()));
+    wire::StreamMessage back;
+    for(auto [from, to] : std::initializer_list<std::pair<const char *, const char *>>{
+            {"9437184", "0"},
+            {"9437184", "2147483649"},
+            {"9437184", "[9437184]"},
+            {R"("field_bytes")", R"("shape":[4],"field_bytes")"}})
+        CHECK(wire::parse(replace(doc, from, to), back) == wire::Malformed);
+    auto open = golden_open();
+    open.ring_bytes = 264241152;
+    auto text = wire::format(open);
+    CHECK(text.ends_with(R"("address":"0a3fff","ring_bytes":264241152})"));
+    wire::Request r;
+    REQUIRE(wire::parse(text, r) == wire::Ok);
+    CHECK(r.open->ring_bytes == 264241152);
+    CHECK(status_of(replace(text, "264241152", "0")) == wire::Malformed);
+    CHECK(status_of(replace(text, "264241152", "\"1\"")) == wire::Malformed);
+}
+
 TEST_CASE("the UcxSessions document matches its golden JSON and is never capped")
 {
     wire::SessionsMessage m{12648430, {}};
     CHECK(wire::format(m) ==
-          R"({"interface":"tango-ucx-sessions/3.0","incarnation":12648430,"sessions":[]})");
+          R"({"interface":"tango-ucx-sessions/3.1","incarnation":12648430,"sessions":[]})");
     m.sessions = {{1, "archiver", true, false, 256, 250, 6, 0, 12, "sysv/memory"},
                   {2, "a\"b", false, true, 8, 8, 0, 3, 0, ""}};
     CHECK(wire::format(m) ==
-          R"({"interface":"tango-ucx-sessions/3.0","incarnation":12648430,"sessions":[)"
+          R"({"interface":"tango-ucx-sessions/3.1","incarnation":12648430,"sessions":[)"
           R"({"ordinal":1,"label":"archiver","delivery":"every","state":"ready","depth":256,)"
           R"("room":250,"sent":6,"skipped":0,"transfer_max_us":12,"transport":"sysv/memory"},)"
           R"({"ordinal":2,"label":"a\"b","delivery":"latest","state":"retiring","depth":8,)"
@@ -245,7 +274,7 @@ TEST_CASE("data-plane structs match their golden bytes")
     CHECK(bytes(wire::encode(wire::SessionMessage{0x0102030405060708})) ==
           Bytes{std::byte{8}, std::byte{7}, std::byte{6}, std::byte{5}, std::byte{4}, std::byte{3},
                 std::byte{2}, std::byte{1}});
-    CHECK(bytes(wire::encode(wire::CreditMessage{1, 0x200})) == u64s({1, 0x200}));
+    CHECK(bytes(wire::encode(wire::CreditMessage{1, 0x200, 0x300})) == u64s({1, 0x200, 0x300}));
     auto end = u64s({1, 2, 3, 0});
     end[24] = std::byte{wire::Evicted};
     CHECK(bytes(wire::encode(wire::EndMessage{1, 2, 3, wire::Evicted})) == end);
@@ -257,6 +286,17 @@ TEST_CASE("data-plane structs match their golden bytes")
     REQUIRE(wire::encode_into(out, f) == 48);
     CHECK(out == frame);
     CHECK(wire::encode_into({out.data(), 47}, f) == 0);
+    f.packed = true; // a packed ring's frame: its position, before the record
+    f.position = 6;
+    Bytes packed(56);
+    REQUIRE(wire::encode_into(packed, f) == 56);
+    CHECK(packed == u64s({1, 2, 3, 4, 5, 6, 0x2121212121212121}));
+    CHECK(wire::encode_into({packed.data(), 55}, f) == 0);
+    wire::FrameMessage back;
+    REQUIRE(wire::decode(packed, 8, back));
+    CHECK((back.packed && back.position == 6 && back.record[7] == std::byte{0x21}));
+    REQUIRE(wire::decode(frame, 8, back));
+    CHECK((!back.packed && back.position == 0));
 }
 
 TEST_CASE("data-plane structs refuse every other length and re-encode every accepted bit flip")
@@ -271,8 +311,17 @@ TEST_CASE("data-plane structs refuse every other length and re-encode every acce
           [](std::span<const std::byte> b) -> std::optional<Bytes>
           {
               wire::CreditMessage m;
-              return wire::decode(b, m) ? std::optional(bytes(wire::encode(m))) : std::nullopt;
+              if(!wire::decode(b, m))
+                  return std::nullopt;
+              auto out = bytes(wire::encode(m));
+              out.resize(b.size());
+              return out;
           });
+    wire::CreditMessage ring; // a packed ring's Credit has 8 bytes more, and no other length
+    auto credit = u64s({7, 9, 11, 13});
+    for(std::size_t n = 17; n <= credit.size(); ++n)
+        CHECK(wire::decode({credit.data(), n}, ring) == (n == 24));
+    CHECK((ring.credit == 9 && ring.bytes == 11));
     sweep(bytes(wire::encode(wire::EndMessage{7, 9, 11, wire::Protocol})),
           [](std::span<const std::byte> b) -> std::optional<Bytes>
           {
@@ -285,6 +334,15 @@ TEST_CASE("data-plane structs refuse every other length and re-encode every acce
               wire::FrameMessage m;
               Bytes out(48);
               if(!wire::decode(b, 8, m) || wire::encode_into(out, m) != 48)
+                  return std::nullopt;
+              return out;
+          });
+    sweep(u64s({1, 2, 3, 4, 5, 6, 0x2121212121212121}),
+          [](std::span<const std::byte> b) -> std::optional<Bytes>
+          {
+              wire::FrameMessage m;
+              Bytes out(56);
+              if(!wire::decode(b, 8, m) || !m.packed || wire::encode_into(out, m) != 56)
                   return std::nullopt;
               return out;
           });

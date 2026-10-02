@@ -43,6 +43,7 @@ struct Description
     std::vector<std::uint64_t> shape;
     std::uint32_t field_bytes = 0;
     std::string field_dtype;
+    std::uint64_t max_payload_bytes = 0; // nonzero, with an empty shape: an opaque stream
 };
 struct PublisherLimits
 {
@@ -103,6 +104,8 @@ class Slot
     std::span<std::byte> payload();
     std::span<std::byte> fields();
     void publish(std::optional<std::uint64_t> timestamp_ns = {}) &&;
+    // An opaque frame of 1 to max_payload_bytes bytes; a refused length leaves the slot held.
+    void publish_bytes(std::size_t bytes, std::optional<std::uint64_t> timestamp_ns = {}) &&;
 
   private:
     friend class Publisher;
@@ -153,7 +156,8 @@ class Batch
     ~Batch();
     std::size_t frames() const;
     std::uint64_t index(std::size_t frame) const;
-    const void *payload() const;
+    std::span<const std::byte> payload(std::size_t frame) const; // one frame's, in host memory
+    const void *payload() const; // the packed array; an opaque batch has none
     const void *records() const;
     bool gpu() const;
     Batch copy() const;
@@ -170,6 +174,7 @@ class Batch
     std::size_t frames_ = 0, frame_bytes_ = 0, record_stride_ = 0;
     const std::byte *payload_ = nullptr;
     const std::byte *records_ = nullptr;
+    const std::uint64_t *placements_ = nullptr; // an opaque batch: each frame's position, length
 };
 // Destroy it after the last kernel that reads the batch is queued on its stream.
 class GpuView

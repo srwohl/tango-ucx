@@ -93,6 +93,7 @@ TEST_CASE("a GPU subscription receives frames into GPU memory, and a copy is hos
     REQUIRE(batch);
     REQUIRE(batch->frames() == 2);
     CHECK(batch->gpu());
+    CHECK_THROWS_AS(batch->payload(0), std::logic_error); // a span is host bytes; it has none
     cudaPointerAttributes where{};
     REQUIRE(cudaPointerGetAttributes(&where, batch->payload()) == cudaSuccess);
     CHECK(where.type == cudaMemoryTypeDevice);
@@ -211,4 +212,13 @@ TEST_CASE("a frame that arrives eager on a GPU subscription is refused")
     peer.send(wire::Frame, header, filled(std::byte{0}));
     CHECK(peer.progress_until([&] { return sub.outcome() == Outcome::Failed; }));
     CHECK_THAT(sub.health().failure, ContainsSubstring("invalid frame"));
+}
+
+TEST_CASE("a GPU subscription to an opaque stream is refused when it is planned")
+{
+    auto pinned = pinned_bytes();
+    CHECK_THROWS_WITH(
+        prepare({test::opaque_description(), test::small_limits(), 7}, true, gpu_options()),
+        ContainsSubstring("cannot receive an opaque stream"));
+    CHECK(pinned_bytes() == pinned);
 }

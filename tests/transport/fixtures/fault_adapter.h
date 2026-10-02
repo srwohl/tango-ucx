@@ -77,12 +77,14 @@ struct RawPeer
         ep = worker.endpoint({address, n}, this, [](void *, ucp_ep_h, ucs_status_t) {});
     }
     // Opens a session on a real publisher, as a subscription with this worker's address would.
-    wire::Status open(Publisher &publisher, bool every, std::uint32_t depth)
+    wire::Status open(Publisher &publisher, bool every, std::uint32_t depth,
+                      std::uint64_t ring_bytes = 0)
     {
         wire::OpenMessage m{};
         m.session = session;
         m.incarnation = offer_of(publisher).incarnation;
         m.depth = depth;
+        m.ring_bytes = ring_bytes;
         m.batch = 1;
         m.every = every;
         m.address_bytes = std::uint16_t(worker.address().size());

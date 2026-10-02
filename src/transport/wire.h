@@ -14,7 +14,7 @@
 namespace TangoUcx::wire
 {
 inline constexpr std::uint8_t k_major = 3;
-inline constexpr std::uint8_t k_minor = 0;
+inline constexpr std::uint8_t k_minor = 1; // 3.1: opaque streams and their packed rings
 inline constexpr std::size_t k_max_document = 16 * 1024;
 inline constexpr std::size_t k_max_address = 4096;
 inline constexpr std::size_t k_max_label = 64;
@@ -57,7 +57,7 @@ struct OpenMessage
 {
     std::uint64_t session = 0, incarnation = 0;
     std::uint32_t depth = 0, batch = 0;
-    std::uint64_t min_interval_ns = 0;
+    std::uint64_t min_interval_ns = 0, ring_bytes = 0; // ring_bytes: an opaque stream's packed ring
     bool every = false, gpu = false;
     std::array<char, k_max_label> label{};
     std::uint8_t label_bytes = 0;
@@ -123,10 +123,16 @@ struct FrameMessage
     std::uint64_t session = 0, sequence = 0, payload_bytes = 0, index = 0, timestamp_ns = 0;
     std::array<std::byte, 1024> record{};
     std::uint16_t record_bytes = 0;
+    // A packed ring's frame states where it is placed, counted from the session's first byte:
+    // 8 bytes more, before the record. Its subscriber takes nothing from the order of arrival.
+    bool packed = false;
+    std::uint64_t position = 0;
 };
+// `bytes` is where the last credited frame ends in a packed ring, counted from the session's
+// first byte; an array stream's Credit is the first 16 bytes.
 struct CreditMessage
 {
-    std::uint64_t session = 0, credit = 0;
+    std::uint64_t session = 0, credit = 0, bytes = 0;
 };
 struct EndMessage
 {
@@ -138,7 +144,7 @@ std::array<std::byte, 8> encode(const SessionMessage &);
 bool decode(std::span<const std::byte>, SessionMessage &);
 std::size_t encode_into(std::span<std::byte>, const FrameMessage &);
 bool decode(std::span<const std::byte>, std::size_t record_bytes, FrameMessage &);
-std::array<std::byte, 16> encode(const CreditMessage &);
+std::array<std::byte, 24> encode(const CreditMessage &);
 bool decode(std::span<const std::byte>, CreditMessage &);
 std::array<std::byte, 32> encode(const EndMessage &);
 bool decode(std::span<const std::byte>, EndMessage &);

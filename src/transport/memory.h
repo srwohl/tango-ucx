@@ -16,6 +16,7 @@ struct Sizes
 {
     std::uint64_t frame_bytes = 0;
     std::uint32_t field_bytes = 0, padded_fields = 0, record_stride = 0, header_bytes = 0;
+    bool opaque = false; // frame_bytes is then the most a frame may have
 };
 struct PublisherPlan
 {

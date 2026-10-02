@@ -136,7 +136,8 @@ Status parse_open(const json &j, OpenMessage &m)
         bool_key(j, "gpu", m.gpu) && string_key(j, "label", k_max_label, label) &&
         string_key(j, "address", 2 * k_max_address, address) &&
         unhex(address, m.address, m.address_bytes) && m.address_bytes;
-    if(!ok)
+    if(!ok || (j.contains("ring_bytes") &&
+               !(unsigned_key(j, "ring_bytes", max64, m.ring_bytes) && m.ring_bytes)))
         return Malformed;
     m.depth = std::uint32_t(depth);
     m.batch = std::uint32_t(batch);
@@ -153,16 +154,19 @@ std::string_view status_name(Status s)
 }
 std::string format(const OpenMessage &m)
 {
-    return dump({{"interface", interface(k_open)},
-                 {"session", m.session},
-                 {"incarnation", m.incarnation},
-                 {"depth", m.depth},
-                 {"batch", m.batch},
-                 {"min_interval_ns", m.min_interval_ns},
-                 {"delivery", m.every ? "every" : "latest"},
-                 {"gpu", m.gpu},
-                 {"label", std::string(m.label.data(), m.label_bytes)},
-                 {"address", hex({m.address.data(), m.address_bytes})}});
+    json j = {{"interface", interface(k_open)},
+              {"session", m.session},
+              {"incarnation", m.incarnation},
+              {"depth", m.depth},
+              {"batch", m.batch},
+              {"min_interval_ns", m.min_interval_ns},
+              {"delivery", m.every ? "every" : "latest"},
+              {"gpu", m.gpu},
+              {"label", std::string(m.label.data(), m.label_bytes)},
+              {"address", hex({m.address.data(), m.address_bytes})}};
+    if(m.ring_bytes)
+        j["ring_bytes"] = m.ring_bytes;
+    return dump(j);
 }
 std::string format(const CloseMessage &m)
 {
@@ -178,14 +182,19 @@ std::string format(const Reply &r)
 std::string format(const StreamMessage &m)
 {
     const auto &d = m.description;
-    return dump({{"interface", interface(k_stream)},
-                 {"incarnation", m.incarnation},
-                 {"element", k_element_names.at(std::size_t(d.element))},
-                 {"shape", d.shape},
-                 {"field_bytes", d.field_bytes},
-                 {"field_dtype", d.field_dtype},
-                 {"allow_every", m.allow_every},
-                 {"max_sessions", m.max_sessions}});
+    json j = {{"interface", interface(k_stream)},
+              {"incarnation", m.incarnation},
+              {"element", k_element_names.at(std::size_t(d.element))}};
+    // An opaque stream has no shape, so a 3.0 subscriber, which needs one, refuses it before Open.
+    if(d.max_payload_bytes)
+        j["max_payload_bytes"] = d.max_payload_bytes;
+    else
+        j["shape"] = d.shape;
+    j.update({{"field_bytes", d.field_bytes},
+              {"field_dtype", d.field_dtype},
+              {"allow_every", m.allow_every},
+              {"max_sessions", m.max_sessions}});
+    return dump(j);
 }
 std::string format(const SessionsMessage &m)
 {
@@ -214,18 +223,23 @@ Status parse(std::string_view doc, StreamMessage &m)
     m = {};
     std::uint64_t field_bytes = 0, sessions = 0;
     auto shape = j.find("shape");
+    bool opaque = j.contains("max_payload_bytes");
     bool ok =
         name == k_stream &&
         unsigned_key(j, "incarnation", std::numeric_limits<std::uint64_t>::max(), m.incarnation) &&
         string_key(j, "element", 8, element) && unsigned_key(j, "field_bytes", 1024, field_bytes) &&
         string_key(j, "field_dtype", k_max_document, dtype) &&
         bool_key(j, "allow_every", m.allow_every) &&
-        unsigned_key(j, "max_sessions", 64, sessions) && sessions && shape != j.end() &&
-        shape->is_array() && !shape->empty() && shape->size() <= 8;
+        unsigned_key(j, "max_sessions", 64, sessions) && sessions &&
+        (opaque ? shape == j.end() &&
+                      unsigned_key(j, "max_payload_bytes", 1ull << 31,
+                                   m.description.max_payload_bytes) &&
+                      m.description.max_payload_bytes
+                : shape != j.end() && shape->is_array() && !shape->empty() && shape->size() <= 8);
     auto e = std::find(k_element_names.begin(), k_element_names.end(), element);
     if(!ok || e == k_element_names.end())
         return Malformed;
-    for(const auto &extent : *shape)
+    for(const auto &extent : opaque ? json::array() : *shape)
     {
         if(!extent.is_number_unsigned() || extent.get<std::uint64_t>() == 0)
             return Malformed;
@@ -299,7 +313,8 @@ bool decode(std::span<const std::byte> b, SessionMessage &m)
 }
 std::size_t encode_into(std::span<std::byte> b, const FrameMessage &m)
 {
-    auto n = 40 + std::size_t(m.record_bytes);
+    std::size_t fixed = m.packed ? 48 : 40;
+    auto n = fixed + m.record_bytes;
     if(m.record_bytes > m.record.size() || b.size() < n)
         return 0;
     put64(b.data(), m.session);
@@ -307,34 +322,41 @@ std::size_t encode_into(std::span<std::byte> b, const FrameMessage &m)
     put64(b.data() + 16, m.payload_bytes);
     put64(b.data() + 24, m.index);
     put64(b.data() + 32, m.timestamp_ns);
-    std::memcpy(b.data() + 40, m.record.data(), m.record_bytes);
+    if(m.packed)
+        put64(b.data() + 40, m.position);
+    std::memcpy(b.data() + fixed, m.record.data(), m.record_bytes);
     return n;
 }
+// The length says which frame it is: a packed ring's has its position, 8 bytes more.
 bool decode(std::span<const std::byte> b, std::size_t record_bytes, FrameMessage &m)
 {
-    if(record_bytes > m.record.size() || b.size() != 40 + record_bytes)
+    if(record_bytes > m.record.size() ||
+       (b.size() != 40 + record_bytes && b.size() != 48 + record_bytes))
         return false;
     m.session = get64(b.data());
     m.sequence = get64(b.data() + 8);
     m.payload_bytes = get64(b.data() + 16);
     m.index = get64(b.data() + 24);
     m.timestamp_ns = get64(b.data() + 32);
+    m.packed = b.size() == 48 + record_bytes;
+    m.position = m.packed ? get64(b.data() + 40) : 0;
     m.record_bytes = std::uint16_t(record_bytes);
-    std::memcpy(m.record.data(), b.data() + 40, record_bytes);
+    std::memcpy(m.record.data(), b.data() + b.size() - record_bytes, record_bytes);
     return true;
 }
-std::array<std::byte, 16> encode(const CreditMessage &m)
+std::array<std::byte, 24> encode(const CreditMessage &m)
 {
-    std::array<std::byte, 16> b{};
+    std::array<std::byte, 24> b{};
     put64(b.data(), m.session);
     put64(b.data() + 8, m.credit);
+    put64(b.data() + 16, m.bytes);
     return b;
 }
 bool decode(std::span<const std::byte> b, CreditMessage &m)
 {
-    if(b.size() != 16)
+    if(b.size() != 16 && b.size() != 24)
         return false;
-    m = {get64(b.data()), get64(b.data() + 8)};
+    m = {get64(b.data()), get64(b.data() + 8), b.size() == 24 ? get64(b.data() + 16) : 0};
     return true;
 }
 std::array<std::byte, 32> encode(const EndMessage &m)

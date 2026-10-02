@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <format>
 #include <stdexcept>
 #include <utility>
 
@@ -14,7 +15,7 @@ struct SourceSlot
 {
     std::atomic<bool> posted{false};
     bool cancel = false, held = false;
-    std::uint64_t timestamp = 0;
+    std::uint64_t timestamp = 0, bytes = 0;
     std::uint32_t sends = 0;
 };
 struct PubRow
@@ -24,6 +25,8 @@ struct PubRow
     std::uint32_t ordinal = 0;
     ucp_ep_h ep = nullptr;
     std::uint64_t id = 0, sent = 0, credited = 0, skipped = 0;
+    // An opaque stream's packed ring, and where its last sent and last credited frames end.
+    std::uint64_t ring = 0, sent_bytes = 0, credited_bytes = 0;
     std::uint32_t depth = 0, in_flight = 0, reserved = 0;
     std::int64_t min_interval_ns = 0, last_send_ns = 0, blocked_since_ns = 0;
     std::int64_t transfer_max_ns = 0, transfer_sum_ns = 0;
@@ -91,7 +94,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     void run();
     void setup();
     void shutdown();
-    void publish_slot(std::uint32_t, std::optional<std::uint64_t>);
+    void publish_slot(std::uint32_t, std::optional<std::uint64_t>, std::optional<std::size_t>);
     void cancel_slot(std::uint32_t);
     std::span<std::byte> payload(std::uint32_t);
     std::span<std::byte> fields(std::uint32_t);
@@ -100,6 +103,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::byte *header(OpMeta *, bool control = false);
     std::uint64_t id_for(std::uint32_t) const;
     int find_row(std::uint64_t) const;
+    bool has_room(const PubRow &) const;
     bool control_pass();
     void unissue_grants();
     bool route_pass(std::int64_t);
@@ -154,10 +158,13 @@ ucs_status_t on_credit(void *arg, const void *h, size_t n, void *, size_t,
     auto &row = p->rows[r];
     if(!row.ready || row.closing)
         return UCS_OK;
-    if(m.credit > row.sent)
+    if(m.credit > row.sent || m.bytes > row.sent_bytes)
         p->retire(r, wire::Protocol, true);
-    else
-        row.credited = std::max(row.credited, m.credit); // a Credit overtaken by a later one
+    else // a Credit may be overtaken by a later one
+    {
+        row.credited = std::max(row.credited, m.credit);
+        row.credited_bytes = std::max(row.credited_bytes, m.bytes);
+    }
     return UCS_OK;
 }
 } // namespace
@@ -165,6 +172,8 @@ ucs_status_t on_credit(void *arg, const void *h, size_t n, void *, size_t,
 Pub::Pub(Description d, PublisherLimits l) : description(std::move(d)), limits(l)
 {
     incarnation = (random64() >> 8) | 1;
+    if(description.max_payload_bytes)
+        description.element = Element::Bytes;
 }
 Pub::~Pub()
 {
@@ -278,6 +287,13 @@ int Pub::find_row(std::uint64_t id) const
             return int(r);
     return -1;
 }
+// Room for one more grant: a row of the receive tables and, in a packed ring, the bytes.
+bool Pub::has_room(const PubRow &row) const
+{
+    return row.sent + row.reserved - row.credited < row.depth &&
+           (!row.ring || ring_room(row.sent_bytes - row.credited_bytes, row.reserved,
+                                   plan.sizes.frame_bytes, row.ring));
+}
 OpMeta *Pub::send_op(std::uint32_t k, std::uint32_t r)
 {
     auto *b = ops.data() + (std::uint64_t(k) * plan.M + r) * plan.op_stride;
@@ -306,11 +322,20 @@ std::span<std::byte> Pub::fields(std::uint32_t k)
     return {records.data() + std::uint64_t(k) * plan.sizes.record_stride + 16,
             plan.sizes.field_bytes};
 }
-void Pub::publish_slot(std::uint32_t k, std::optional<std::uint64_t> timestamp)
+// An opaque frame names its length; an array frame has the one its shape gives.
+void Pub::publish_slot(std::uint32_t k, std::optional<std::uint64_t> timestamp,
+                       std::optional<std::size_t> bytes)
 {
     if(k >= plan.S)
         return;
+    if(bytes.has_value() != plan.sizes.opaque)
+        throw std::logic_error(plan.sizes.opaque ? "an opaque stream publishes with publish_bytes"
+                                                 : "publish_bytes needs an opaque stream");
+    if(bytes && (!*bytes || *bytes > plan.sizes.frame_bytes))
+        throw std::invalid_argument(std::format("a frame of {} bytes; an opaque frame has 1 to {}",
+                                                *bytes, plan.sizes.frame_bytes));
     auto &s = slots[k];
+    s.bytes = bytes.value_or(plan.sizes.frame_bytes);
     s.timestamp = timestamp.value_or(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                          std::chrono::system_clock::now().time_since_epoch())
                                          .count());
@@ -369,7 +394,9 @@ void Pub::send_frame(std::uint32_t k, std::uint32_t r, std::int64_t now)
     wire::FrameMessage f{};
     f.session = row.id;
     f.sequence = row.sent;
-    f.payload_bytes = plan.sizes.frame_bytes;
+    f.payload_bytes = slots[k].bytes;
+    f.packed = row.ring != 0; // the publisher places the frame, and says where
+    f.position = f.packed ? place(row.sent_bytes, slots[k].bytes, row.ring) : 0;
     f.index = wire::get64(rec);
     f.timestamp_ns = wire::get64(rec + 8);
     f.record_bytes = plan.sizes.padded_fields;
@@ -384,6 +411,8 @@ void Pub::send_frame(std::uint32_t k, std::uint32_t r, std::int64_t now)
     o.in_flight = true;
     row.last_send_ns = now;
     ++row.sent;
+    if(row.ring)
+        row.sent_bytes = f.position + slots[k].bytes;
     ++row.in_flight;
     ++slots[k].sends;
     ucp_request_param_t p{};
@@ -396,9 +425,9 @@ void Pub::send_frame(std::uint32_t k, std::uint32_t r, std::int64_t now)
     p.user_data = &o;
     p.memh = source.memh();
     p.memory_type = UCS_MEMORY_TYPE_HOST;
-    auto *q = ucp_am_send_nbx(row.ep, wire::Frame, header(&o), hn,
-                              source.at(std::uint64_t(k) * plan.sizes.frame_bytes),
-                              plan.sizes.frame_bytes, &p);
+    auto *q =
+        ucp_am_send_nbx(row.ep, wire::Frame, header(&o), hn,
+                        source.at(std::uint64_t(k) * plan.sizes.frame_bytes), slots[k].bytes, &p);
     if(!UCS_PTR_IS_PTR(q))
         on_send(&o, UCS_PTR_STATUS(q));
 }
@@ -502,8 +531,9 @@ bool Pub::control_pass()
                 status = wire::EveryRefused;
             else if(m.every && started.load(std::memory_order_acquire))
                 status = wire::Started; // an every row joins before the first grant
-            else if(find_row(m.session) >= 0)
-                status = wire::Malformed;
+            else if(find_row(m.session) >= 0 ||
+                    (plan.sizes.opaque && m.ring_bytes < 2 * plan.sizes.frame_bytes))
+                status = wire::Malformed; // a packed ring holds a frame and its wrap at least
             else
             {
                 for(std::uint32_t i = 0; i < plan.M; ++i)
@@ -528,6 +558,7 @@ bool Pub::control_pass()
             row.used = true;
             row.every = m.every;
             row.depth = m.depth;
+            row.ring = plan.sizes.opaque ? m.ring_bytes : 0;
             row.gpu = m.gpu;
             row.id = m.session;
             row.min_interval_ns =
@@ -606,7 +637,10 @@ bool Pub::route_pass(std::int64_t now)
                 if(every_mask & bit)
                     to |= bit; // it joined before the first grant
                 else if(row.sent - row.credited < row.depth && row.in_flight == 0 &&
-                        now - row.last_send_ns >= row.min_interval_ns)
+                        now - row.last_send_ns >= row.min_interval_ns &&
+                        (!row.ring ||
+                         place(row.sent_bytes, s.bytes, row.ring) + s.bytes - row.credited_bytes <=
+                             row.ring))
                     to |= bit;
             }
             for(std::uint32_t r = 0; r < plan.M; ++r)
@@ -666,8 +700,7 @@ bool Pub::grant_pass()
         for(std::uint32_t r = 0; r < plan.M; ++r)
             if((ready_mask & every_mask) & (std::uint64_t{1} << r))
             {
-                auto &row = rows[r];
-                if(row.sent + row.reserved - row.credited >= row.depth)
+                if(!has_room(rows[r]))
                 {
                     room = false;
                     blocked = r + 1;
@@ -797,8 +830,7 @@ void Pub::timer_pass(std::int64_t now)
     for(std::uint32_t r = 0; r < plan.M; ++r)
     {
         auto &row = rows[r];
-        bool blocking = waiting && (ready_mask & every_mask) >> r & 1 &&
-                        row.sent + row.reserved - row.credited >= row.depth;
+        bool blocking = waiting && (ready_mask & every_mask) >> r & 1 && !has_room(row);
         if(!blocking)
             row.blocked_since_ns = 0;
         else if(!row.blocked_since_ns)
@@ -821,20 +853,22 @@ void Pub::publish_health()
         o.slots_held += slots[k].held;
     }
     o.memory_hooks = context->memory_hooks();
+    // The frames a row can still be granted: rows of its tables and, in a packed ring, bytes.
+    auto room = [&](const PubRow &w) -> std::uint64_t
+    {
+        auto frames = w.depth - std::min<std::uint64_t>(w.depth, w.sent - w.credited);
+        if(!w.ring)
+            return frames;
+        auto fit = (w.ring - (w.sent_bytes - w.credited_bytes) + 1) / plan.sizes.frame_bytes;
+        return std::min(frames, fit ? fit - 1 : 0);
+    };
     for(const auto &w : rows)
         if(w.used)
             o.rows[o.count++] = {
-                w.ordinal,
-                w.depth,
-                std::uint32_t(w.depth - std::min<std::uint64_t>(w.depth, w.sent - w.credited)),
-                w.every,
-                w.closing,
-                w.sent,
-                w.skipped,
-                w.transfer_max_ns,
-                w.sent ? w.transfer_sum_ns / std::int64_t(w.sent) : 0,
-                w.label,
-                w.transport};
+                w.ordinal, w.depth,           std::uint32_t(room(w)),
+                w.every,   w.closing,         w.sent,
+                w.skipped, w.transfer_max_ns, w.sent ? w.transfer_sum_ns / std::int64_t(w.sent) : 0,
+                w.label,   w.transport};
     health_copy.write(o);
 }
 void Pub::quarantine_owner()
@@ -929,7 +963,15 @@ void Slot::publish(std::optional<std::uint64_t> t) &&
     if(!active_)
         throw std::logic_error("slot already published");
     if(auto p = state_.lock())
-        p->publish_slot(index_, t);
+        p->publish_slot(index_, t, {});
+    active_ = false;
+}
+void Slot::publish_bytes(std::size_t bytes, std::optional<std::uint64_t> t) &&
+{
+    if(!active_)
+        throw std::logic_error("slot already published");
+    if(auto p = state_.lock())
+        p->publish_slot(index_, t, bytes);
     active_ = false;
 }
 Publisher::Publisher(Description d, PublisherLimits l)

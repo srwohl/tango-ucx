@@ -85,21 +85,41 @@ ucs_status_t on_frame(void *arg, const void *h, size_t hn, void *data, size_t n,
         return UCS_OK;
     auto rndv = (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV) != 0;
     wire::FrameMessage f;
-    if(!wire::decode({static_cast<const std::byte *>(h), hn}, s->plan.sizes.padded_fields, f) ||
-       f.session != s->session || f.payload_bytes != s->plan.sizes.frame_bytes ||
-       n != s->plan.sizes.frame_bytes || f.sequence < s->credited || (s->plan.gpu && !rndv) ||
-       f.sequence >= s->credited + s->plan.D ||
-       s->rings->bit_test(s->rings->busy, f.sequence % s->plan.D))
+    const auto &sizes = s->plan.sizes;
+    bool valid = wire::decode({static_cast<const std::byte *>(h), hn}, sizes.padded_fields, f) &&
+                 f.session == s->session && f.payload_bytes == n && f.sequence >= s->credited &&
+                 !(s->plan.gpu && !rndv) && f.sequence < s->credited + s->plan.D &&
+                 !s->rings->bit_test(s->rings->busy, f.sequence % s->plan.D);
+    auto k = std::uint32_t(f.sequence % s->plan.D);
+    auto at = std::uint64_t(k) * sizes.frame_bytes;
+    if(valid && sizes.opaque)
+    {
+        // A packed ring: the frame is where its publisher states, within the bytes Credit
+        // returned, whole before the ring's end, and on no frame held.
+        auto ring = s->plan.payload_bytes;
+        at = f.position;
+        valid = f.packed && n && n <= sizes.frame_bytes && at >= s->freed &&
+                at - s->freed <= ring - n && at % ring + n <= ring && s->fits(f.sequence, at, n);
+    }
+    else
+        valid = valid && !f.packed && n == sizes.frame_bytes;
+    if(!valid)
     {
         s->fail("the publisher sent an invalid frame");
         return rndv ? UCS_ERR_REJECTED : UCS_OK;
     }
-    auto k = std::uint32_t(f.sequence % s->plan.D);
     s->rings->bit_set(s->rings->busy, k);
+    if(sizes.opaque)
+    {
+        s->arrived = std::max(s->arrived, f.sequence + 1);
+        s->rings->placements[2 * k] = at;
+        s->rings->placements[2 * k + 1] = n;
+        at %= s->plan.payload_bytes;
+    }
     auto *r = s->rings->record(k);
     wire::put64(r, f.index);
     wire::put64(r + 8, f.timestamp_ns);
-    std::memcpy(r + 16, f.record.data(), s->plan.sizes.padded_fields);
+    std::memcpy(r + 16, f.record.data(), sizes.padded_fields);
     if(!rndv)
     {
         if(!data)
@@ -107,7 +127,7 @@ ucs_status_t on_frame(void *arg, const void *h, size_t hn, void *data, size_t n,
             s->fail("an eager frame had no payload");
             return UCS_OK;
         }
-        std::memcpy(s->rings->payload + std::uint64_t(k) * s->plan.sizes.frame_bytes, data, n);
+        std::memcpy(s->rings->payload + at, data, n);
         s->landed(k);
         return UCS_OK;
     }
@@ -128,9 +148,7 @@ ucs_status_t on_frame(void *arg, const void *h, size_t hn, void *data, size_t n,
     p.user_data = o;
     p.memh = s->receive.memh();
     p.memory_type = s->plan.gpu ? UCS_MEMORY_TYPE_CUDA : UCS_MEMORY_TYPE_HOST;
-    auto *q = ucp_am_recv_data_nbx(s->worker->get(), data,
-                                   s->rings->payload + std::uint64_t(k) * s->plan.sizes.frame_bytes,
-                                   n, &p);
+    auto *q = ucp_am_recv_data_nbx(s->worker->get(), data, s->rings->payload + at, n, &p);
     if(!UCS_PTR_IS_PTR(q))
     {
         s->on_recv(o, UCS_PTR_STATUS(q));
@@ -192,6 +210,8 @@ void Sub::setup()
     rings->plan = plan;
     rings->records.resize(plan.records_bytes);
     rings->batches = std::vector<BatchRow>(plan.D);
+    if(plan.sizes.opaque)
+        rings->placements.assign(2ull * plan.D, 0);
     if(plan.gpu)
     {
         auto ring = std::make_shared<GpuRing>();
@@ -351,7 +371,7 @@ void Sub::send_credit(std::uint64_t credit)
     auto *o = ctrl_op(0);
     if(!ep || o->in_flight)
         return;
-    credit_header = wire::encode(wire::CreditMessage{session, credit});
+    credit_header = wire::encode(wire::CreditMessage{session, credit, freed});
     o->kind = 0;
     o->in_flight = true;
     ucp_request_param_t p{};
@@ -360,8 +380,8 @@ void Sub::send_credit(std::uint64_t credit)
     p.request = o;
     p.cb.send = send_cb;
     p.user_data = o;
-    auto *q = ucp_am_send_nbx(ep, wire::Credit, credit_header.data(), credit_header.size(), nullptr,
-                              0, &p);
+    auto *q = ucp_am_send_nbx(ep, wire::Credit, credit_header.data(), plan.sizes.opaque ? 24 : 16,
+                              nullptr, 0, &p);
     if(!UCS_PTR_IS_PTR(q))
         on_ctrl(o, UCS_PTR_STATUS(q));
 }
@@ -418,6 +438,32 @@ void Sub::landed(std::uint32_t k)
     if(!first_landed_ns)
         first_landed_ns = last_landed_ns;
 }
+// A packed ring's frame of sequence q, at the position its header states. It lies after every
+// frame of a lower sequence that has arrived and before every one of a higher, leaving a byte at
+// least for each frame between them that has not; next to a neighbour it is exactly where place()
+// puts it. So no two frames share a byte, whatever order their headers arrive in.
+bool Sub::fits(std::uint64_t q, std::uint64_t at, std::uint64_t n) const
+{
+    const auto &p = rings->placements;
+    auto arrived_at = [&](std::uint64_t s) { return rings->bit_test(rings->busy, s % plan.D); };
+    auto low = q; // the lowest sequence of the run not arrived that ends below q
+    while(low > credited && !arrived_at(low - 1))
+        if(q - --low > k_max_gap)
+            return false;
+    auto end =
+        low == credited ? freed : p[2 * ((low - 1) % plan.D)] + p[2 * ((low - 1) % plan.D) + 1];
+    if(low == q ? at != place(end, n, plan.payload_bytes) : at < end + (q - low))
+        return false;
+    auto high = q + 1; // the next sequence above q that has arrived
+    while(high < arrived && !arrived_at(high))
+        if(++high - q > k_max_gap)
+            return false;
+    if(high >= arrived)
+        return true;
+    auto next = p[2 * (high % plan.D)], bytes = p[2 * (high % plan.D) + 1];
+    return high == q + 1 ? next == place(at + n, bytes, plan.payload_bytes)
+                         : at + n + (high - q - 1) <= next;
+}
 bool Sub::assemble(std::int64_t now)
 {
     bool work = false;
@@ -429,12 +475,17 @@ bool Sub::assemble(std::int64_t now)
         auto k = std::uint32_t(assembled % plan.D);
         auto cap = std::min<std::uint64_t>({plan.batch, plan.D - k, bound - assembled});
         std::uint32_t n = 0;
-        while(n < cap && rings->bit_test(rings->landed, k + n))
+        // A batch is one run of bytes: it ends where the next frame starts at the ring's front.
+        while(n < cap && rings->bit_test(rings->landed, k + n) && !(n && rings->wraps(k + n)))
             ++n;
         if(!n)
             break;
-        if(n < cap && first_landed_ns && now - first_landed_ns < std::int64_t(plan.max_wait_ns) &&
-           !failed && !has_end)
+        // The next frame has arrived, and wraps: a row busy beyond the ring's depth is an old
+        // frame's, not yet credited.
+        bool cut = n < cap && assembled + n < credited + plan.D &&
+                   rings->bit_test(rings->busy, k + n) && rings->wraps(k + n);
+        if(n < cap && !cut && first_landed_ns &&
+           now - first_landed_ns < std::int64_t(plan.max_wait_ns) && !failed && !has_end)
             break;
         deliver(k, n);
         work = true;
@@ -555,6 +606,8 @@ void Sub::credit_pass()
     {
         rings->bit_clear(rings->returned, c % plan.D);
         rings->bit_clear(rings->busy, c % plan.D);
+        if(plan.sizes.opaque)
+            freed = rings->placements[2 * (c % plan.D)] + rings->placements[2 * (c % plan.D) + 1];
         ++c;
     }
     credited = c;
@@ -745,6 +798,7 @@ std::string PendingSubscription::open_message() const
     if(s.options.max_rate > 0)
         m.min_interval_ns = std::uint64_t(std::min(1e9 / s.options.max_rate, 9.2e18));
     m.gpu = s.plan.gpu;
+    m.ring_bytes = s.plan.sizes.opaque ? s.plan.payload_bytes : 0;
     m.label_bytes = std::uint8_t(s.options.label.size());
     std::memcpy(m.label.data(), s.options.label.data(), m.label_bytes);
     m.address_bytes = s.own_address_bytes;

@@ -10,6 +10,7 @@ Description::element
 Description::shape
 Description::field_bytes
 Description::field_dtype
+Description::max_payload_bytes
 PublisherLimits
 PublisherLimits::budget
 PublisherLimits::max_sessions
@@ -25,6 +26,7 @@ Slot
 Slot::payload
 Slot::fields
 Slot::publish
+Slot::publish_bytes
 Health
 install_ucx_commands
 install_ucx_attributes

@@ -16,6 +16,7 @@ add_ucx_test(test_publisher transport/test_publisher.cpp ucx)
 add_ucx_test(test_subscription transport/test_subscription.cpp ucx)
 add_ucx_test(test_failure transport/test_failure.cpp ucx)
 add_ucx_test(test_tables transport/test_tables.cpp ucx)
+add_ucx_test(test_opaque transport/test_opaque.cpp ucx)
 
 add_executable(fixture_device tango/fixture_device.cpp)
 target_link_libraries(fixture_device PRIVATE tango-ucx)

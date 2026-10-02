@@ -107,4 +107,43 @@ inline void publish_one(Publisher &publisher, std::byte value = std::byte{0x5a},
     std::fill(fields.begin(), fields.end(), std::byte{0x21});
     std::move(*slot).publish(timestamp);
 }
+inline Description opaque_description(std::uint64_t max_payload_bytes = 64 << 10)
+{
+    Description d{Element::Bytes, {}, 8, "<u8"};
+    d.max_payload_bytes = max_payload_bytes;
+    return d;
+}
+// Byte i of the opaque frame a seed makes; no two seeds or lengths give the same frame.
+inline std::byte opaque_byte(std::uint64_t seed, std::size_t i)
+{
+    return std::byte(((seed + 1) * 0x9e3779b97f4a7c15ull + i * 0x100000001b3ull) >> 29);
+}
+// An opaque frame of `bytes` bytes made from `seed`, which is also its field and its timestamp.
+// False when the publisher granted no slot by the deadline.
+inline bool publish_opaque(Publisher &publisher, std::size_t bytes, std::uint64_t seed,
+                           Deadline by = deadline())
+{
+    publisher.ucx_start();
+    auto slot = publisher.acquire(by);
+    if(!slot)
+        return false;
+    auto payload = slot->payload();
+    for(std::size_t i = 0; i < bytes && i < payload.size(); ++i)
+        payload[i] = opaque_byte(seed, i);
+    std::memcpy(slot->fields().data(), &seed, sizeof(seed));
+    std::move(*slot).publish_bytes(bytes, seed);
+    return true;
+}
+// Frame `i` of the batch is the opaque frame of `bytes` bytes that `seed` makes, with its record.
+inline bool is_opaque_frame(const Batch &batch, std::size_t i, std::size_t bytes,
+                            std::uint64_t seed)
+{
+    auto frame = batch.payload(i);
+    auto *record = static_cast<const std::byte *>(batch.records()) + i * 24;
+    bool same = frame.size() == bytes && wire::get64(record + 8) == seed &&
+                wire::get64(record + 16) == seed;
+    for(std::size_t b = 0; same && b < bytes; ++b)
+        same = frame[b] == opaque_byte(seed, b);
+    return same;
+}
 } // namespace TangoUcx::test
