@@ -4,6 +4,7 @@
 
 #include <tango/tango.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -18,6 +19,7 @@ using namespace TangoUcx;
 
 // Publishes frames of 4,096 bytes, each filled with its frame index's low byte, and the index
 // as its one application field. The UCX commands are installed as StreamOpen and StreamClose.
+// Opaque makes an opaque incarnation, whose frames and application fields PublishBytes is given.
 class Device : public TANGO_BASE_CLASS
 {
   public:
@@ -35,7 +37,7 @@ class Device : public TANGO_BASE_CLASS
         limits.budget = 16ull << 20;
         limits.max_sessions = sessions;
         limits.allow_every = true;
-        publisher.emplace(Description{Element::U8, {4096}, 8, "<u8"}, limits);
+        publisher.emplace(description, limits);
         next = 0;
         attach_publisher(*this, *publisher);
         set_state(Tango::ON);
@@ -95,6 +97,36 @@ class Device : public TANGO_BASE_CLASS
                 publisher->finish();
             });
     }
+    // Ends this incarnation and makes an opaque one: the most a frame may have and the size of
+    // the application fields, then their dtype.
+    void opaque(const Tango::DevVarLongStringArray &a)
+    {
+        description = {Element::Bytes, {}, std::uint32_t(a.lvalue[1]), std::string(a.svalue[0])};
+        description.max_payload_bytes = std::uint64_t(a.lvalue[0]);
+        prepare(Tango::DevLong(sessions));
+    }
+    // Publishes one opaque frame: its application fields, then its payload.
+    void publish_bytes(const Tango::DevVarCharArray &a)
+    {
+        publisher->ucx_start();
+        auto slot = publisher->acquire(std::chrono::steady_clock::now() + std::chrono::seconds(1));
+        if(!slot || a.length() < slot->fields().size())
+            Tango::Except::throw_exception("Refused", "no slot, or no fields", "fixture_device");
+        auto fields = slot->fields();
+        auto bytes = a.length() - fields.size();
+        std::memcpy(fields.data(), a.get_buffer(), fields.size());
+        std::memcpy(slot->payload().data(), a.get_buffer() + fields.size(),
+                    std::min(bytes, slot->payload().size()));
+        try
+        {
+            std::move(*slot).publish_bytes(bytes);
+        }
+        catch(const std::exception &e) // the slot is still held: destroyed here, it is cancelled
+        {
+            Tango::Except::throw_exception("Refused", e.what(), "fixture_device");
+        }
+    }
+    Description description{Element::U8, {4096}, 8, "<u8"};
     std::optional<Publisher> publisher;
     std::uint64_t next = 0;
     std::uint32_t sessions = 2;
@@ -149,6 +181,22 @@ class DeviceClass : public Tango::DeviceClass
                                                Tango::DevLong n = 0;
                                                c.extract(in, n);
                                                d.start(n);
+                                               return c.insert();
+                                           }));
+        command_list.push_back(new Command("Opaque", Tango::DEVVAR_LONGSTRINGARRAY, Tango::DEV_VOID,
+                                           [](Command &c, Device &d, const CORBA::Any &in)
+                                           {
+                                               const Tango::DevVarLongStringArray *a = nullptr;
+                                               c.extract(in, a);
+                                               d.opaque(*a);
+                                               return c.insert();
+                                           }));
+        command_list.push_back(new Command("PublishBytes", Tango::DEVVAR_CHARARRAY, Tango::DEV_VOID,
+                                           [](Command &c, Device &d, const CORBA::Any &in)
+                                           {
+                                               const Tango::DevVarCharArray *a = nullptr;
+                                               c.extract(in, a);
+                                               d.publish_bytes(*a);
                                                return c.insert();
                                            }));
         install_ucx_commands(command_list, "Stream");
