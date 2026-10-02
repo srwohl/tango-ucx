@@ -223,6 +223,9 @@ class Batch:
         array.setflags(write=False)
         return array
 
+    def payload(self, frame):
+        return self._native.payload(frame)
+
     @property
     def records(self):
         records = self._native.records

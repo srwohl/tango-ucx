@@ -129,6 +129,7 @@ py::dict description_dict(const Description &description)
     result["shape"] = std::move(shape);
     result["field_bytes"] = description.field_bytes;
     result["field_dtype"] = description.field_dtype;
+    result["max_payload_bytes"] = description.max_payload_bytes; // nonzero: an opaque stream
     return result;
 }
 
@@ -360,6 +361,8 @@ class PythonBatch
     {
         if(batch_.gpu()) // its payload is GPU memory: NumPy would read a device pointer
             throw py::value_error("a GPU batch has no host payload array");
+        if(description_.max_payload_bytes)
+            throw py::value_error("an opaque batch has no array: read each frame");
         const auto dtype = payload_dtype(description_.element);
         std::vector<py::ssize_t> shape;
         shape.reserve(description_.shape.size() + 1);
@@ -379,6 +382,20 @@ class PythonBatch
 
         py::array result(dtype, shape, strides, const_cast<void *>(batch_.payload()),
                          py::cast(self));
+        result.attr("setflags")(py::arg("write") = false);
+        return result;
+    }
+
+    // One frame's payload, as it is in the receive ring.
+    py::array payload(const std::shared_ptr<PythonBatch> &self, std::size_t frame) const
+    {
+        if(batch_.gpu())
+            throw py::value_error("a GPU batch's frames are in GPU memory");
+        if(frame >= batch_.frames())
+            throw py::index_error("batch frame");
+        const auto bytes = batch_.payload(frame);
+        py::array result(py::dtype::of<std::uint8_t>(), {checked_ssize(bytes.size())}, {1},
+                         const_cast<std::byte *>(bytes.data()), py::cast(self));
         result.attr("setflags")(py::arg("write") = false);
         return result;
     }
@@ -750,6 +767,9 @@ PYBIND11_MODULE(_core, module)
         .def_property_readonly("frames", &PythonBatch::frames)
         .def_property_readonly("gpu", &PythonBatch::gpu)
         .def("index", &PythonBatch::index, py::arg("frame"))
+        .def(
+            "payload", [](const std::shared_ptr<PythonBatch> &batch, std::size_t frame)
+            { return batch->payload(batch, frame); }, py::arg("frame"))
         .def("copy", &PythonBatch::copy)
         .def(
             "gpu_view",
