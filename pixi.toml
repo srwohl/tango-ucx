@@ -48,5 +48,10 @@ test-python = { cmd = "PYTHONPATH=build/python TANGO_UCX_FIXTURE_DEVICE=build/te
 _configure-asan = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build-asan -DBUILD_TESTING=ON -DTANGO_UCX_SANITIZERS=address,undefined" }
 _build-asan = { cmd = "cmake --build build-asan", depends-on = ["_configure-asan"] }
 test-asan = { cmd = "ctest --test-dir build-asan --output-on-failure", depends-on = ["_build-asan"] }
+_configure-tsan = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build-tsan -DBUILD_TESTING=ON -DTANGO_UCX_SANITIZERS=thread" }
+_build-tsan = { cmd = "cmake --build build-tsan", depends-on = ["_configure-tsan"] }
+# The fork tests start threads in the child, and TSan's process_vm_readv interceptor faults in
+# UCX's CMA reachability probe, so CMA is left out. Python is not run: it is not instrumented.
+test-tsan = { cmd = "ctest --test-dir build-tsan -L 'unit|ucx|tango' --output-on-failure", depends-on = ["_build-tsan"], env = { TSAN_OPTIONS = "die_after_fork=0 second_deadlock_stack=1", UCX_TLS = "^cma" } }
 check = "python tools/check.py"
 count = "python tools/count.py"

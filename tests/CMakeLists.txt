@@ -27,8 +27,17 @@ add_dependencies(test_tango fixture_device)
 catch_discover_tests(test_tango PROPERTIES LABELS tango)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+# An uninstrumented python loads _core, so the ASan runtime is preloaded. CPython's own
+# allocations at exit would drown a leak report, so leaks are checked in the C++ tests only.
+set(python_sanitizer_env "")
+if(TANGO_UCX_SANITIZERS MATCHES "address")
+    execute_process(COMMAND "${CMAKE_CXX_COMPILER}" -print-file-name=libasan.so
+        OUTPUT_VARIABLE asan_runtime OUTPUT_STRIP_TRAILING_WHITESPACE)
+    file(REAL_PATH "${asan_runtime}" asan_runtime)
+    set(python_sanitizer_env "LD_PRELOAD=${asan_runtime}" "ASAN_OPTIONS=detect_leaks=0")
+endif()
 add_test(NAME test_python
-    COMMAND "${CMAKE_COMMAND}" -E env
+    COMMAND "${CMAKE_COMMAND}" -E env ${python_sanitizer_env}
         "PYTHONPATH=${CMAKE_BINARY_DIR}/python"
         "TANGO_UCX_FIXTURE_DEVICE=$<TARGET_FILE:fixture_device>"
         "${Python3_EXECUTABLE}" -m pytest "${PROJECT_SOURCE_DIR}/python/tests")

@@ -77,7 +77,7 @@ def main() -> int:
     parser.add_argument(
         "--phase",
         type=int,
-        choices=(1, 2, 3),
+        choices=(1, 2, 3, 4),
         help="phase to count (defaults to project.active_phase in budget.toml)",
     )
     args = parser.parse_args()

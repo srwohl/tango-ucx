@@ -254,3 +254,14 @@ TEST_CASE("an every subscription gone without its Close holds the device until i
         CHECK(test::eventually([&] { return test::sessions(publisher).empty(); }));
     }
 }
+
+TEST_CASE("an every subscription gone before its first frame fails that frame's send")
+{
+    Publisher publisher(test::small_description(), test::small_limits(1));
+    auto sub = test::subscribe(publisher, true, test::small_options(),
+                               test::FaultAdapter::lose_close_fence());
+    sub.close(test::deadline());
+    test::publish_one(publisher); // UCX cannot attach the gone worker's shared memory
+    CHECK(test::eventually([&] { return publisher.health().failed_every == 1; }));
+    CHECK(test::eventually([&] { return test::sessions(publisher).empty(); }));
+}
