@@ -1,9 +1,10 @@
 # The estimates come from prototypes/final_shape/fixed_tables_v2.md, section 10.
 # Phase 1 and 2 category splits were rebalanced from measured counts; combined totals stay cumulative.
+# Phase 3 allowances were raised to the measured counts when the phase was closed (2026-10-02).
 # Per-file entries are allowances, not targets.
 
 [project]
-active_phase = 2
+active_phase = 3
 line_ceiling = 10000
 public_name_limit = 76
 python_name_limit = 31
@@ -20,8 +21,8 @@ total = 8546
 
 [phases."3"]
 library = 5780
-tests = 3852
-total = 9632
+tests = 4140
+total = 9920
 
 [[allowance]]
 name = "publisher"
@@ -232,3 +233,66 @@ phase = 3
 kind = "tests"
 lines = 372
 patterns = ["tests/gpu/**"]
+
+[[allowance]]
+name = "public_headers"
+phase = 3
+kind = "library"
+lines = 5
+patterns = ["src/transport/transport.h"]
+
+[[allowance]]
+name = "publisher"
+phase = 3
+kind = "library"
+lines = 1
+patterns = ["src/transport/publisher.cpp"]
+
+[[allowance]]
+name = "tables"
+phase = 3
+kind = "library"
+lines = 14
+patterns = ["src/transport/tables.h"]
+
+[[allowance]]
+name = "wire"
+phase = 3
+kind = "library"
+lines = 1
+patterns = ["src/transport/wire.h", "src/transport/wire.cpp"]
+
+[[allowance]]
+name = "python_package"
+phase = 3
+kind = "library"
+lines = 24
+patterns = ["python/tango_ucx/*.py"]
+
+[[allowance]]
+name = "python_tests"
+phase = 3
+kind = "tests"
+lines = 248
+patterns = ["python/tests/*.py"]
+
+[[allowance]]
+name = "test_failure"
+phase = 3
+kind = "tests"
+lines = 36
+patterns = ["tests/transport/test_failure.cpp"]
+
+[[allowance]]
+name = "test_tables"
+phase = 3
+kind = "tests"
+lines = 14
+patterns = ["tests/transport/test_tables.cpp"]
+
+[[allowance]]
+name = "transport_fixtures"
+phase = 3
+kind = "tests"
+lines = 35
+patterns = ["tests/transport/fixtures/pair.h"]
