@@ -23,6 +23,7 @@ pytest = ">=8"
 numpy = "*"
 dlpack = "*"
 nlohmann_json = ">=3.12"
+bitshuffle = ">=0.5.2,<0.6"
 
 [feature.gpu.dependencies]
 cuda-version = "12.9.*"
