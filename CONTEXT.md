@@ -22,6 +22,12 @@ One published payload together with its record. Interpreting a frame never needs
 round trip.
 _Avoid_: image, sample
 
+**Opaque stream**:
+A UCX stream whose payloads are bytes the library carries unchanged and does not interpret,
+such as a detector's compressed frames. Each frame has its own length, up to a maximum.
+Every other UCX stream is an array stream: all its frames have the one size its shape gives.
+_Avoid_: raw stream, compressed stream, variable stream, blob stream
+
 **Record**:
 The fixed-size metadata published with one frame: its frame index, its acquisition
 timestamp and its application fields.
@@ -39,7 +45,7 @@ _Avoid_: frame number, frame id, event counter
 
 **Description**:
 What every frame of an incarnation is: element type, shape, and the size and dtype of the
-application fields.
+application fields. An opaque stream's has no shape, and the most bytes a frame may have.
 _Avoid_: geometry, layout, schema, array terms
 
 **Incarnation**:
@@ -49,7 +55,8 @@ _Avoid_: epoch, generation, acquisition
 
 **Batch**:
 One or more frames of one subscription, delivered together. Their payloads form one packed
-array and their records form another.
+array and their records form another. An opaque batch's payloads are one run of bytes, each
+frame directly after the one before it, and it has no array.
 _Avoid_: chunk, frame list
 
 **Batch size**:
@@ -71,7 +78,8 @@ _Avoid_: arm, go
 
 **Slot**:
 One frame-sized division of a ring. The device holds a source slot exclusively from
-acquiring it until it publishes it as a frame or cancels it.
+acquiring it until it publishes it as a frame or cancels it. An opaque stream's source slot
+has the size of the largest frame, and the device says each frame's length when it publishes.
 _Avoid_: slot handle, publication, cell
 
 **Pressure**:
@@ -140,8 +148,16 @@ depth is derived from it, never asked for.
 _Avoid_: pinned budget, quota, memory limit
 
 **Ring depth**:
-The number of slots in a ring.
+The number of slots in a ring. For a packed ring, the most frames it can hold.
 _Avoid_: credit window, queue depth
+
+**Packed ring**:
+The receive ring of a subscription to an opaque stream. It has no slots: each frame is
+placed directly after the one before it, and one that would cross the ring's end starts at
+its front. Its size in bytes is what is left of the budget after the tables. The publisher
+places each frame and states its position with the frame; the subscriber checks the position
+and takes nothing from the order in which frames arrive.
+_Avoid_: byte ring, variable ring, heap
 
 **Borrow**:
 How every batch is delivered: its views refer to the receive ring directly, so holding
@@ -165,7 +181,7 @@ _Avoid_: unpin, return
 
 **Credit**:
 A subscriber's permission for the publisher to reuse receive slots, given once those slots
-are released. It is cumulative.
+are released. It is cumulative. In a packed ring it counts bytes as well as frames.
 _Avoid_: ack, token, permit
 
 **Quarantine**:
