@@ -1,8 +1,8 @@
-# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
 [workspace]
-name = "tango-bulk2"
+name = "tango-ucx"
 channels = ["conda-forge"]
 platforms = ["linux-64"]
 requires-pixi = ">=0.55"
@@ -32,7 +32,7 @@ cupy = ">=14"
 
 # The gpu environment resolves its own compiler and packages, so it builds in its own tree.
 [feature.gpu.tasks]
-_configure-gpu = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build-gpu -DBUILD_TESTING=ON -DTANGO_BULK_CUDA=ON" }
+_configure-gpu = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build-gpu -DBUILD_TESTING=ON -DTANGO_UCX_CUDA=ON" }
 build-gpu = { cmd = "cmake --build build-gpu", depends-on = ["_configure-gpu"] }
 test-gpu = { cmd = "ctest --test-dir build-gpu -L gpu --no-tests=error --output-on-failure", depends-on = ["build-gpu"] }
 
@@ -44,8 +44,8 @@ gpu = ["default", "gpu"]
 configure = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build -DBUILD_TESTING=ON" }
 build = { cmd = "cmake --build build", depends-on = ["configure"] }
 test = { cmd = "ctest --test-dir build -L 'unit|ucx|tango|python' --output-on-failure", depends-on = ["build"] }
-test-python = { cmd = "PYTHONPATH=build/python TANGO_BULK_FIXTURE_DEVICE=build/tests/fixture_device pytest python/tests", depends-on = ["build"] }
-_configure-asan = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build-asan -DBUILD_TESTING=ON -DTANGO_BULK_SANITIZERS=address,undefined" }
+test-python = { cmd = "PYTHONPATH=build/python TANGO_UCX_FIXTURE_DEVICE=build/tests/fixture_device pytest python/tests", depends-on = ["build"] }
+_configure-asan = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build-asan -DBUILD_TESTING=ON -DTANGO_UCX_SANITIZERS=address,undefined" }
 _build-asan = { cmd = "cmake --build build-asan", depends-on = ["_configure-asan"] }
 test-asan = { cmd = "ctest --test-dir build-asan --output-on-failure", depends-on = ["_build-asan"] }
 check = "python tools/check.py"

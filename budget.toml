@@ -59,11 +59,11 @@ lines = 366
 patterns = ["src/transport/memory.h", "src/transport/memory.cpp"]
 
 [[allowance]]
-name = "ucx"
+name = "ucp"
 phase = 1
 kind = "library"
 lines = 242
-patterns = ["src/transport/ucx.h", "src/transport/ucx.cpp"]
+patterns = ["src/transport/ucp.h", "src/transport/ucp.cpp"]
 
 [[allowance]]
 name = "wire"
@@ -77,7 +77,7 @@ name = "public_headers"
 phase = 1
 kind = "library"
 lines = 264
-patterns = ["include/tango-bulk/bulk.h", "include/tango-bulk/tango.h", "src/transport/transport.h"]
+patterns = ["include/tango-ucx/ucx.h", "include/tango-ucx/tango.h", "src/transport/transport.h"]
 
 [[allowance]]
 name = "tango_device"
@@ -122,11 +122,11 @@ lines = 295
 patterns = ["tests/transport/fixtures/pair.h", "tests/transport/fixtures/fault_adapter.h", "tests/transport/fixtures/fork.h"]
 
 [[allowance]]
-name = "test_ucx"
+name = "test_ucp"
 phase = 1
 kind = "tests"
 lines = 208
-patterns = ["tests/transport/test_ucx.cpp"]
+patterns = ["tests/transport/test_ucp.cpp"]
 
 [[allowance]]
 name = "test_publisher"
@@ -168,7 +168,7 @@ name = "python_package"
 phase = 2
 kind = "library"
 lines = 407
-patterns = ["python/tango_bulk/*.py"]
+patterns = ["python/tango_ucx/*.py"]
 
 [[allowance]]
 name = "python_tests"
@@ -199,11 +199,11 @@ lines = 24
 patterns = ["src/transport/memory.h", "src/transport/memory.cpp"]
 
 [[allowance]]
-name = "ucx"
+name = "ucp"
 phase = 3
 kind = "library"
 lines = 25
-patterns = ["src/transport/ucx.h", "src/transport/ucx.cpp"]
+patterns = ["src/transport/ucp.h", "src/transport/ucp.cpp"]
 
 [[allowance]]
 name = "public_headers"

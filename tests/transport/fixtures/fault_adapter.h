@@ -1,14 +1,14 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
 #include "pair.h"
-#include <ucx.h>
+#include <ucp.h>
 
 #include <algorithm>
 #include <vector>
 
-namespace TangoBulk::test
+namespace TangoUcx::test
 {
 struct FaultAdapter
 {
@@ -22,8 +22,8 @@ struct FaultAdapter
 // real peer never would.
 struct RawPeer
 {
-    transport::ucx::Context context;
-    transport::ucx::Worker worker{context};
+    transport::ucp::Context context;
+    transport::ucp::Worker worker{context};
     ucp_ep_h ep = nullptr;
     std::uint64_t session = 0x5e55107;
     std::vector<std::pair<wire::Type, std::vector<std::byte>>> got; // headers, in arrival order
@@ -109,4 +109,4 @@ struct RawPeer
         return wire::format(reply);
     }
 };
-} // namespace TangoBulk::test
+} // namespace TangoUcx::test

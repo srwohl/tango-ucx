@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "tables.h"
 
@@ -7,7 +7,7 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace TangoBulk::transport
+namespace TangoUcx::transport
 {
 namespace
 {
@@ -184,8 +184,8 @@ void Sub::start_loop()
 }
 void Sub::setup()
 {
-    context = std::make_unique<ucx::Context>();
-    worker = std::make_unique<ucx::Worker>(*context);
+    context = std::make_unique<ucp::Context>();
+    worker = std::make_unique<ucp::Worker>(*context);
     req = context->request_bytes();
     plan = plan_subscription(offer, every, options, req);
     rings = std::make_shared<Rings>();
@@ -479,14 +479,14 @@ void Sub::decide(std::int64_t now)
             fail(end.reason == wire::Evicted    ? "evicted: the publisher ended the session"
                  : end.reason == wire::Protocol ? "the publisher ended the session: protocol"
                                                 : "the publisher closed");
-            outcome.store(int(TangoBulk::Outcome::Failed));
+            outcome.store(int(TangoUcx::Outcome::Failed));
             queue.signal();
             return;
         }
         if(assembled == end.sequences)
         {
             bool complete = !every || end.sequences == 0 || !gap;
-            outcome.store(int(complete ? TangoBulk::Outcome::End : TangoBulk::Outcome::Failed));
+            outcome.store(int(complete ? TangoUcx::Outcome::End : TangoUcx::Outcome::Failed));
             queue.signal();
             return;
         }
@@ -494,14 +494,14 @@ void Sub::decide(std::int64_t now)
         if(drained && quiet_turns > 64 && now - last > k_end_grace_ns)
         {
             fail("a sequence below End never arrived");
-            outcome.store(int(TangoBulk::Outcome::Failed));
+            outcome.store(int(TangoUcx::Outcome::Failed));
             queue.signal();
             return;
         }
     }
     if(failed && drained)
     {
-        outcome.store(int(TangoBulk::Outcome::Failed));
+        outcome.store(int(TangoUcx::Outcome::Failed));
         queue.signal();
     }
 }
@@ -589,7 +589,7 @@ void Sub::finish_close()
     {
         if(!outcome.load())
         {
-            outcome = int(TangoBulk::Outcome::Cancelled);
+            outcome = int(TangoUcx::Outcome::Cancelled);
             queue.signal();
         }
         return;
@@ -666,7 +666,7 @@ void Sub::finish_close()
     queue.clear();
     if(!outcome.load())
     {
-        outcome = int(TangoBulk::Outcome::Cancelled);
+        outcome = int(TangoUcx::Outcome::Cancelled);
         queue.signal();
     }
     if(receiving || ep || ctrl_op(0)->in_flight || ctrl_op(1)->in_flight || ctrl_op(2)->in_flight)
@@ -785,9 +785,9 @@ PendingSubscription prepare(const Offer &o, bool every, SubscriptionOptions opti
     ready.get();
     return PendingSubscription(std::make_unique<PendingSubscription::Impl>(std::move(s)));
 }
-} // namespace TangoBulk::transport
+} // namespace TangoUcx::transport
 
-namespace TangoBulk
+namespace TangoUcx
 {
 Subscription::Subscription(std::unique_ptr<transport::Sub> s) : s_(std::move(s)) {}
 Subscription::Subscription(Subscription &&) noexcept = default;
@@ -859,4 +859,4 @@ Health Subscription::health() const
     h.quarantined_bytes = transport::quarantine().total.load();
     return h;
 }
-} // namespace TangoBulk
+} // namespace TangoUcx

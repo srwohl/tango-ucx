@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
 @PACKAGE_INIT@
@@ -8,5 +8,5 @@ find_dependency(Threads REQUIRED)
 find_dependency(ucx 1.21 CONFIG REQUIRED)
 find_dependency(nlohmann_json 3.12 CONFIG REQUIRED)
 find_dependency(Tango CONFIG REQUIRED)
-include("${CMAKE_CURRENT_LIST_DIR}/tango-bulk-targets.cmake")
-check_required_components(tango-bulk)
+include("${CMAKE_CURRENT_LIST_DIR}/tango-ucx-targets.cmake")
+check_required_components(tango-ucx)

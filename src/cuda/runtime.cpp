@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "transport.h"
 
@@ -9,7 +9,7 @@
 #include <memory>
 #include <stdexcept>
 
-namespace TangoBulk::transport
+namespace TangoUcx::transport
 {
 namespace
 {
@@ -121,4 +121,4 @@ class CudaRuntime final : public GpuRuntime
 CudaRuntime runtime;
 [[maybe_unused]] const bool registered = (register_gpu_runtime(runtime), true);
 } // namespace
-} // namespace TangoBulk::transport
+} // namespace TangoUcx::transport

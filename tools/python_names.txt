@@ -1,4 +1,4 @@
-# Public names of the tango_bulk package, as tools/check.py reads them: __all__, keyword
+# Public names of the tango_ucx package, as tools/check.py reads them: __all__, keyword
 # arguments, and public methods, properties and attributes. Python's own protocol methods are
 # not names. A name missing here, or listed here and not public, fails.
 

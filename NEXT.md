@@ -12,19 +12,19 @@ main way: the receive ring is packed, where section 11.1 keeps every slot at the
 
 A detector may deliver frames that are already compressed, with a different length for each
 frame. The library must carry those bytes unchanged, with each frame's record, and must not
-treat the payload as a dense array. Today every frame of a bulk stream has one fixed size,
+treat the payload as a dense array. Today every frame of a UCX stream has one fixed size,
 taken from the Description's element and shape.
 
 ## Before starting: close out phase 3
 
-1. Commit the work in the tree: `bulk_start` and `Health::started`, the `max_wait` unit fix
+1. Commit the work in the tree: `ucx_start` and `Health::started`, the `max_wait` unit fix
    in the Python binding, and Python GPU receive.
 2. Make `pixi run count` pass: `budget.toml` still says `active_phase = 2`, the GPU test files
    have no allowance, and several per-file allowances are exceeded.
 3. Restore the test "an every subscription gone before its first frame fails that frame's
    send" in `tests/transport/test_failure.cpp`, or record why it was removed. It passes on the
    current code.
-4. Bring the specification up to date: `bulk_start` and the `started` status replace
+4. Bring the specification up to date: `ucx_start` and the `started` status replace
    `first_grant`; there are 76 C++ names; a GPU view exports DLPack 1.0 only.
 5. Run the ASan build once on the current code.
 
@@ -86,7 +86,7 @@ still holds. It needs the Credit simulation and the failure tests the existing r
    packed ring is designed in detail.
 2. **Wire version.** Section 11.1 asks for a new major version, which refuses every
    subscriber of the old version, on array streams too. A minor version that leaves `shape`
-   out of the BulkStream document for an opaque stream is also safe: an old subscriber is
+   out of the UcxStream document for an opaque stream is also safe: an old subscriber is
    refused before Open. Which one depends on whether subscribers of version 3 are deployed.
 3. **A frame over the maximum.** What the device should do with it is a detector question.
 4. **DECTRIS evidence.** A frame generated in the test with a `bitshuffle` package proves the
@@ -100,7 +100,7 @@ still holds. It needs the Credit simulation and the failure tests the existing r
 
 1. **Unequal lengths with slots at the maximum size**, host memory, C++ only:
    `max_payload_bytes`, `publish_bytes`, the length in `send_frame` and `on_frame`,
-   `Batch::frame`, the BulkStream keys. One test publishes frames of 1 byte, an eager size, a
+   `Batch::frame`, the UcxStream keys. One test publishes frames of 1 byte, an eager size, a
    rendezvous size and the maximum, and compares every byte and record. Estimated at 80
    library lines. **Count here** and compare with the estimate before going on.
 2. **The header-order test** of open question 1.
@@ -108,7 +108,7 @@ still holds. It needs the Credit simulation and the failure tests the existing r
    wrap rule. Tests: a held batch while frames of other lengths arrive, pressure, a latest
    subscription skipping, End, close with a held batch, a publisher that sends more bytes than
    were credited.
-4. **Wire**: the version decision, the golden BulkStream document, the refusals.
+4. **Wire**: the version decision, the golden UcxStream document, the refusals.
 5. **Python**: `Batch.frame`, the refusal of `array`, the description key.
 6. **The DECTRIS check**, in Python.
 7. **Archive batches**: an example that writes batches of 10 and 100 frames as one byte blob

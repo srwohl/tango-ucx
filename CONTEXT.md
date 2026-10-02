@@ -1,4 +1,4 @@
-# tango-bulk
+# tango-ucx
 
 A bulk data plane for Tango devices. Tango carries discovery and control. UCX carries
 frames and reports a peer that dies, so the publisher can reclaim everything a dead
@@ -13,9 +13,9 @@ This is the clean-slate vocabulary; it becomes the root `CONTEXT.md` of the new 
 A Tango device. Never a GPU.
 _Avoid_: device (for a GPU), device memory, device server (for the device itself)
 
-**Bulk stream**:
+**UCX stream**:
 The high-rate data a device publishes alongside its attributes, one per device.
-_Avoid_: stream (alone), channel, feed, topic
+_Avoid_: bulk stream, stream (alone), channel, feed, topic
 
 **Frame**:
 One published payload together with its record. Interpreting a frame never needs a Tango
@@ -59,12 +59,12 @@ _Avoid_: chunk size
 ### Publishing
 
 **Publisher**:
-The part of a device that owns the bulk stream's source memory, grants sessions and
+The part of a device that owns the UCX stream's source memory, grants sessions and
 publishes frames.
 _Avoid_: producer, server
 
 **Start**:
-The point at which a publisher begins to grant slots, set by the device with `bulk_start`.
+The point at which a publisher begins to grant slots, set by the device with `ucx_start`.
 No frame is published before it. An every subscription joins before it and is refused after
 it; a latest subscription joins at any time.
 _Avoid_: arm, go
@@ -87,11 +87,11 @@ _Avoid_: drop, loss, discard
 ### Subscribing
 
 **Subscriber**:
-A process that receives a bulk stream.
+A process that receives a UCX stream.
 _Avoid_: client, consumer, sink
 
 **Subscription**:
-What a subscriber holds to receive one bulk stream: one session, its receive ring, and the
+What a subscriber holds to receive one UCX stream: one session, its receive ring, and the
 batches delivered from it. It ends when its session ends.
 _Avoid_: stream (alone), reader, attachment, connection
 
@@ -220,11 +220,11 @@ _Avoid_: device view, DLPack view
 
 ### Tango
 
-**Bulk commands**:
-The Open and Close Tango commands of a device with a bulk stream. A subscriber finds
+**UCX commands**:
+The Open and Close Tango commands of a device with a UCX stream. A subscriber finds
 them by their markers, whatever the device names them.
 _Avoid_: coordination channel, control channel, RPC
 
 **Marker**:
-The `tango-bulk/<major>` tag in a bulk command's type description.
+The `tango-ucx/<major>` tag in a UCX command's type description.
 _Avoid_: signature, magic

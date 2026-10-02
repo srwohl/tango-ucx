@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
 import gc
@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-import tango_bulk
+import tango_ucx
 from test_nodb import server  # noqa: F401
 
 cupy = pytest.importorskip("cupy")
@@ -21,7 +21,7 @@ def subscription(server):
     """
     import tango
 
-    with tango_bulk.every(server[1], batch=4, max_wait=0.5, memory="cuda:0") as subscription:
+    with tango_ucx.every(server[1], batch=4, max_wait=0.5, memory="cuda:0") as subscription:
         assert tango.DeviceProxy(server[1]).command_inout("Publish", 8) == 8
         yield subscription
 

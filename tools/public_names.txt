@@ -1,4 +1,4 @@
-# Public C++ names in include/tango-bulk/, as tools/check.py reads them: types and free
+# Public C++ names in include/tango-ucx/, as tools/check.py reads them: types and free
 # functions bare, members as Type::name. Special members, operators and enumerators are not
 # names. A name declared there and missing here, or listed here and not declared, fails.
 
@@ -16,7 +16,7 @@ PublisherLimits::max_sessions
 PublisherLimits::allow_every
 PublisherLimits::pressure_timeout
 Publisher
-Publisher::bulk_start
+Publisher::ucx_start
 Publisher::acquire
 Publisher::finish
 Publisher::health
@@ -26,8 +26,8 @@ Slot::payload
 Slot::fields
 Slot::publish
 Health
-install_bulk_commands
-install_bulk_attributes
+install_ucx_commands
+install_ucx_attributes
 attach_publisher
 detach_publisher
 

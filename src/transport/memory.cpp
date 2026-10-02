@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "memory.h"
 #include "transport.h"
@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <sys/resource.h>
 
-namespace TangoBulk::transport
+namespace TangoUcx::transport
 {
 namespace
 {
@@ -151,7 +151,7 @@ SubscriptionPlan plan_subscription(const Offer &o, bool every, const Subscriptio
     if(options.label.size() > 64)
         throw std::invalid_argument("label exceeds 64 bytes");
     if(options.gpu >= 0 && !registered_gpu)
-        throw std::invalid_argument("GPU receive needs a GPU runtime: link tango-bulk-cuda");
+        throw std::invalid_argument("GPU receive needs a GPU runtime: link tango-ucx-cuda");
     p.gpu = options.gpu >= 0;
     if(!(options.max_rate >= 0) || (every && options.max_rate > 0))
         throw std::invalid_argument("max_rate must be 0 or more, and applies to latest only");
@@ -295,4 +295,4 @@ GpuRuntime *gpu_runtime() noexcept
 {
     return registered_gpu;
 }
-} // namespace TangoBulk::transport
+} // namespace TangoUcx::transport

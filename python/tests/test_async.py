@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
 import asyncio
@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from tango_bulk._async import AsyncSubscription
+from tango_ucx._async import AsyncSubscription
 
 
 class FakeBatch:
@@ -112,7 +112,7 @@ def test_async_iteration_stops_after_cancelled_outcome():
 
 
 def test_async_iteration_raises_failed_with_failure_and_last_index():
-    from tango_bulk import Failed
+    from tango_ucx import Failed
 
     sub = FakeSubscription()
     sub.push_outcome("failed")

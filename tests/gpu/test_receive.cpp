@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "fixtures/fault_adapter.h"
 #include <catch2/catch_test_macros.hpp>
@@ -10,8 +10,8 @@
 #include <cstdlib>
 #include <vector>
 
-using namespace TangoBulk;
-using namespace TangoBulk::transport;
+using namespace TangoUcx;
+using namespace TangoUcx::transport;
 using namespace std::chrono_literals;
 using Catch::Matchers::ContainsSubstring;
 

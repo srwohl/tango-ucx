@@ -1,8 +1,8 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include <catch2/catch_test_macros.hpp>
 #include <ucm/api/ucm.h>
-#include <ucx.h>
+#include <ucp.h>
 
 #include <algorithm>
 #include <array>
@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-using namespace TangoBulk::transport;
+using namespace TangoUcx::transport;
 
 namespace
 {
@@ -63,11 +63,11 @@ void started(Op &o, ucs_status_ptr_t q)
 struct Pair
 {
     bool set; // an environment variable for the context, removed once the context has read it
-    ucx::Context context;
+    ucp::Context context;
     std::array<Record, 4> out, in;
     ucs_status_t refuse = UCS_OK;
     int eager = 0, rndv = 0, a_arg = 0, b_arg = 0;
-    ucx::Worker a{context}, b{context};
+    ucp::Worker a{context}, b{context};
     ucp_ep_h ab = a.endpoint(b.address(), &a_arg, on_error);
     ucp_ep_h ba = b.endpoint(a.address(), &b_arg, on_error);
     explicit Pair(const char *name = nullptr) : set(name && ::setenv(name, "tcp", 1) == 0)
@@ -163,7 +163,7 @@ TEST_CASE("a refused rendezvous reaches the sender's completion, not the endpoin
 TEST_CASE("a force close completes a pending receive; a clean remote close fires no PEER error")
 {
     {
-        Pair pair("TANGO_BULK_UCX_TLS"); // over TCP, rendezvous data moves only as the sender runs
+        Pair pair("TANGO_UCX_UCX_TLS"); // over TCP, rendezvous data moves only as the sender runs
         std::vector<std::byte> big(4 << 20);
         pair.send(0, big, UCP_AM_SEND_FLAG_RNDV);
         REQUIRE(pair.until([&] { return pair.rndv == 1; }));
@@ -181,7 +181,7 @@ TEST_CASE("a force close completes a pending receive; a clean remote close fires
         CHECK(peer_errors[0].second != UCS_OK);
     }
     // A clean close leaves the remote worker alive, and its endpoint keeps working.
-    for(auto *tls : {static_cast<const char *>(nullptr), "TANGO_BULK_UCX_TLS"})
+    for(auto *tls : {static_cast<const char *>(nullptr), "TANGO_UCX_UCX_TLS"})
     {
         Pair pair(tls);
         pair.close(pair.ab);
@@ -190,7 +190,7 @@ TEST_CASE("a force close completes a pending receive; a clean remote close fires
     }
 }
 
-TEST_CASE("UCX applies TANGO_BULK_UCX_* and plain UCX_* settings, and reports its memory hooks")
+TEST_CASE("UCX applies TANGO_UCX_UCX_* and plain UCX_* settings, and reports its memory hooks")
 {
     auto transports = [](const char *name)
     {
@@ -200,9 +200,9 @@ TEST_CASE("UCX applies TANGO_BULK_UCX_* and plain UCX_* settings, and reports it
     };
     std::regex tcp_only("tcp/[^,]+(,tcp/[^,]+)*");
     CHECK_FALSE(std::regex_match(transports(nullptr), tcp_only)); // shared memory on one host
-    CHECK(std::regex_match(transports("TANGO_BULK_UCX_TLS"), tcp_only));
+    CHECK(std::regex_match(transports("TANGO_UCX_UCX_TLS"), tcp_only));
     CHECK(std::regex_match(transports("UCX_TLS"), tcp_only));
-    ucx::Context context;
+    ucp::Context context;
     CHECK(context.memory_hooks() == (ucm_test_events(UCM_EVENT_VM_UNMAPPED) == UCS_OK));
-    CHECK(ucx::Worker(context).max_am_header() >= 1064);
+    CHECK(ucp::Worker(context).max_am_header() >= 1064);
 }

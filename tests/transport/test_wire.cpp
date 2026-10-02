@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include <catch2/catch_test_macros.hpp>
 #include <transport.h>
@@ -12,7 +12,7 @@
 #include <utility>
 #include <vector>
 
-using namespace TangoBulk;
+using namespace TangoUcx;
 
 namespace
 {
@@ -84,7 +84,7 @@ void sweep(const Bytes &good, const Round &round)
 TEST_CASE("control documents match their golden JSON and round-trip")
 {
     auto open = wire::format(golden_open());
-    CHECK(open == R"({"interface":"tango-bulk-open/3.0","session":7340032917504811,)"
+    CHECK(open == R"({"interface":"tango-ucx-open/3.0","session":7340032917504811,)"
                   R"("incarnation":12648430,"depth":256,"batch":16,"min_interval_ns":0,)"
                   R"("delivery":"every","gpu":false,"label":"archiver","address":"0a3fff"})");
     wire::Request r;
@@ -93,7 +93,7 @@ TEST_CASE("control documents match their golden JSON and round-trip")
     CHECK(wire::format(*r.open) == open);
 
     auto close = wire::format(wire::CloseMessage{42});
-    CHECK(close == R"({"interface":"tango-bulk-close/3.0","session":42})");
+    CHECK(close == R"({"interface":"tango-ucx-close/3.0","session":42})");
     REQUIRE(wire::parse(close, r) == wire::Ok);
     CHECK_FALSE(r.open);
     CHECK(r.close.session == 42);
@@ -103,9 +103,9 @@ TEST_CASE("control documents match their golden JSON and round-trip")
     accepted.address[0] = std::byte{0x7c};
     accepted.address[1] = std::byte{0x01};
     CHECK(wire::format(accepted) ==
-          R"({"interface":"tango-bulk-reply/3.0","status":"ok","address":"7c01"})");
+          R"({"interface":"tango-ucx-reply/3.0","status":"ok","address":"7c01"})");
     CHECK(wire::format(wire::Reply{wire::EveryRefused}) ==
-          R"({"interface":"tango-bulk-reply/3.0","status":"every-refused"})");
+          R"({"interface":"tango-ucx-reply/3.0","status":"every-refused"})");
     wire::Reply back;
     REQUIRE(wire::parse(wire::format(accepted), back));
     CHECK(back.status == wire::Ok);
@@ -127,8 +127,8 @@ TEST_CASE("readers accept a newer minor and unknown keys, and refuse another maj
     CHECK(status_of(replace(open, "open/3.0", "open/4.0")) == wire::Version);
     CHECK(status_of(replace(open, "open/3.0", "open/2.9")) == wire::Version);
     wire::Reply reply;
-    CHECK_FALSE(wire::parse(R"({"interface":"tango-bulk-reply/4.0","status":"ok"})", reply));
-    REQUIRE(wire::parse(R"({"interface":"tango-bulk-reply/3.1","status":"busy","hint":1})", reply));
+    CHECK_FALSE(wire::parse(R"({"interface":"tango-ucx-reply/4.0","status":"ok"})", reply));
+    REQUIRE(wire::parse(R"({"interface":"tango-ucx-reply/3.1","status":"busy","hint":1})", reply));
     CHECK(reply.status == wire::Busy);
 }
 
@@ -144,7 +144,7 @@ TEST_CASE("malformed control documents are refused")
                            std::string(R"({"session":1})"),
                            replace(open, "open/3.0", "open/3"),
                            replace(open, "open/3.0", "open/x.0"),
-                           replace(open, "tango-bulk-open", "tango-bulk-other"),
+                           replace(open, "tango-ucx-open", "tango-ucx-other"),
                            replace(open, "7340032917504811", "0"),
                            replace(open, "7340032917504811", "-1"),
                            replace(open, "7340032917504811", "1.5"),
@@ -163,20 +163,20 @@ TEST_CASE("malformed control documents are refused")
                            wire::format(wire::CloseMessage{0})})
         CHECK(status_of(bad) == wire::Malformed);
     wire::Reply reply;
-    CHECK_FALSE(wire::parse(R"({"interface":"tango-bulk-reply/3.0","status":"fine"})", reply));
+    CHECK_FALSE(wire::parse(R"({"interface":"tango-ucx-reply/3.0","status":"fine"})", reply));
     CHECK_FALSE(
-        wire::parse(R"({"interface":"tango-bulk-reply/3.0","status":"ok","address":"7"})", reply));
-    CHECK_FALSE(wire::parse(R"({"interface":"tango-bulk-open/3.0","status":"ok"})", reply));
+        wire::parse(R"({"interface":"tango-ucx-reply/3.0","status":"ok","address":"7"})", reply));
+    CHECK_FALSE(wire::parse(R"({"interface":"tango-ucx-open/3.0","status":"ok"})", reply));
 }
 
-TEST_CASE("the BulkStream document matches its golden JSON and refuses what it cannot describe")
+TEST_CASE("the UcxStream document matches its golden JSON and refuses what it cannot describe")
 {
     wire::StreamMessage m{12648430, {Element::U16, {2048, 1024}, 16, "[('t','<f8')]"}, true, 8};
     auto doc = wire::format(m);
-    CHECK(doc == R"({"interface":"tango-bulk-stream/3.0","incarnation":12648430,"element":"u16",)"
+    CHECK(doc == R"({"interface":"tango-ucx-stream/3.0","incarnation":12648430,"element":"u16",)"
                  R"("shape":[2048,1024],"field_bytes":16,"field_dtype":"[('t','<f8')]",)"
                  R"("allow_every":true,"max_sessions":8})");
-    auto offer = transport::parse_bulk_stream(replace(doc, "3.0", "3.2"));
+    auto offer = transport::parse_ucx_stream(replace(doc, "3.0", "3.2"));
     CHECK(offer.incarnation == 12648430);
     CHECK(offer.description.element == Element::U16);
     CHECK(offer.description.shape == std::vector<std::uint64_t>{2048, 1024});
@@ -189,7 +189,7 @@ TEST_CASE("the BulkStream document matches its golden JSON and refuses what it c
         return wire::parse(d, back);
     };
     CHECK(status(replace(doc, "3.0", "4.0")) == wire::Version);
-    CHECK_THROWS(transport::parse_bulk_stream(replace(doc, "3.0", "4.0")));
+    CHECK_THROWS(transport::parse_ucx_stream(replace(doc, "3.0", "4.0")));
     for(auto key :
         {"incarnation", "element", "field_bytes", "field_dtype", "allow_every", "max_sessions"})
         CHECK(status(without(doc, key)) == wire::Malformed);
@@ -203,19 +203,19 @@ TEST_CASE("the BulkStream document matches its golden JSON and refuses what it c
             {R"("field_bytes":16)", R"("field_bytes":1025)"},
             {R"("max_sessions":8)", R"("max_sessions":0)"},
             {R"("max_sessions":8)", R"("max_sessions":65)"},
-            {"tango-bulk-stream", "tango-bulk-open"}})
+            {"tango-ucx-stream", "tango-ucx-open"}})
         CHECK(status(replace(doc, from, to)) == wire::Malformed);
 }
 
-TEST_CASE("the BulkSessions document matches its golden JSON and is never capped")
+TEST_CASE("the UcxSessions document matches its golden JSON and is never capped")
 {
     wire::SessionsMessage m{12648430, {}};
     CHECK(wire::format(m) ==
-          R"({"interface":"tango-bulk-sessions/3.0","incarnation":12648430,"sessions":[]})");
+          R"({"interface":"tango-ucx-sessions/3.0","incarnation":12648430,"sessions":[]})");
     m.sessions = {{1, "archiver", true, false, 256, 250, 6, 0, 12, "sysv/memory"},
                   {2, "a\"b", false, true, 8, 8, 0, 3, 0, ""}};
     CHECK(wire::format(m) ==
-          R"({"interface":"tango-bulk-sessions/3.0","incarnation":12648430,"sessions":[)"
+          R"({"interface":"tango-ucx-sessions/3.0","incarnation":12648430,"sessions":[)"
           R"({"ordinal":1,"label":"archiver","delivery":"every","state":"ready","depth":256,)"
           R"("room":250,"sent":6,"skipped":0,"transfer_max_us":12,"transport":"sysv/memory"},)"
           R"({"ordinal":2,"label":"a\"b","delivery":"latest","state":"retiring","depth":8,)"
@@ -230,13 +230,13 @@ TEST_CASE("the BulkSessions document matches its golden JSON and is never capped
     CHECK(back["sessions"][63]["label"] == std::string(64, 'l'));
 }
 
-TEST_CASE("a bulk command marker names its major version")
+TEST_CASE("a UCX command marker names its major version")
 {
     CHECK(transport::marker_major(wire::k_open_marker) == wire::k_major);
     CHECK(transport::marker_major(wire::k_close_marker) == wire::k_major);
-    CHECK(transport::marker_major("tango-bulk/12 open") == 12);
-    for(auto other : {"tango-bulk/3 renew", "tango-bulk/x open", "tango-bulk/3", "tango-bulk/ open",
-                      "tango-bulk/300 open", "DevString", ""})
+    CHECK(transport::marker_major("tango-ucx/12 open") == 12);
+    for(auto other : {"tango-ucx/3 renew", "tango-ucx/x open", "tango-ucx/3", "tango-ucx/ open",
+                      "tango-ucx/300 open", "DevString", ""})
         CHECK(transport::marker_major(other) == -1);
 }
 

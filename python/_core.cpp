@@ -1,9 +1,9 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 #include "transport.h"
 
-#include <tango-bulk/bulk.h>
+#include <tango-ucx/ucx.h>
 
 #include <dlpack/dlpack.h>
 #include <pybind11/numpy.h>
@@ -22,7 +22,7 @@
 #include <vector>
 
 namespace py = pybind11;
-using namespace TangoBulk;
+using namespace TangoUcx;
 
 namespace
 {
@@ -698,13 +698,13 @@ class PythonPendingSubscription
     int gpu_;
 };
 
-std::shared_ptr<PythonPendingSubscription> prepare(py::handle bulk_stream_json, py::handle every,
+std::shared_ptr<PythonPendingSubscription> prepare(py::handle ucx_stream_json, py::handle every,
                                                    py::handle budget, py::handle batch,
                                                    py::handle max_wait_seconds, py::handle max_rate,
                                                    py::handle allow_gpu_over_tcp, py::handle label,
                                                    int gpu)
 {
-    const auto document = require_string(bulk_stream_json, "bulk_stream_json");
+    const auto document = require_string(ucx_stream_json, "ucx_stream_json");
     const bool delivery_every = require_bool(every, "every");
     SubscriptionOptions options;
     options.budget = require_unsigned(budget, "budget");
@@ -727,7 +727,7 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle bulk_stream_json, 
     options.label = require_string(label, "label");
     options.gpu = gpu;
 
-    auto offer = transport::parse_bulk_stream(document);
+    auto offer = transport::parse_ucx_stream(document);
     std::optional<transport::PendingSubscription> pending;
     {
         py::gil_scoped_release release;
@@ -740,7 +740,7 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle bulk_stream_json, 
 
 PYBIND11_MODULE(_core, module)
 {
-    module.doc() = "Native host transport bridge for tango_bulk.";
+    module.doc() = "Native host transport bridge for tango_ucx.";
 
     py::class_<PythonBatch, std::shared_ptr<PythonBatch>>(module, "Batch")
         .def_property_readonly("array", [](const std::shared_ptr<PythonBatch> &batch)
@@ -777,8 +777,7 @@ PYBIND11_MODULE(_core, module)
         .def("start", &PythonPendingSubscription::start, py::arg("open_reply"), py::arg("closer"),
              py::arg("timeout_seconds"));
 
-    module.def("prepare", &prepare, py::arg("bulk_stream_json"), py::arg("every"),
-               py::arg("budget"), py::arg("batch"), py::arg("max_wait_seconds"),
-               py::arg("max_rate"), py::arg("allow_gpu_over_tcp"), py::arg("label"),
-               py::arg("gpu") = -1);
+    module.def("prepare", &prepare, py::arg("ucx_stream_json"), py::arg("every"), py::arg("budget"),
+               py::arg("batch"), py::arg("max_wait_seconds"), py::arg("max_rate"),
+               py::arg("allow_gpu_over_tcp"), py::arg("label"), py::arg("gpu") = -1);
 }

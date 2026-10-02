@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
@@ -12,7 +12,7 @@
 #include <string_view>
 #include <vector>
 
-namespace TangoBulk
+namespace TangoUcx
 {
 
 using Deadline = std::chrono::steady_clock::time_point;
@@ -70,7 +70,7 @@ struct Health
     std::uint64_t last_index = 0, transfer_max_ns = 0, transfer_mean_ns = 0;
     std::uint64_t quarantined_bytes = 0;
     bool memory_hooks = true;
-    bool started = false; // a publisher's: bulk_start was called
+    bool started = false; // a publisher's: ucx_start was called
     std::string transport, failure;
 };
 
@@ -85,8 +85,8 @@ struct Rings;
 struct Sub;
 class PendingSubscription;
 std::string handle(Publisher &, std::string_view);
-std::string bulk_stream(const Publisher &);
-std::string bulk_sessions(const Publisher &);
+std::string ucx_stream(const Publisher &);
+std::string ucx_sessions(const Publisher &);
 // A GPU batch's one hold: when its last copy ends, the batch's event is recorded on the stream.
 std::shared_ptr<void> begin_gpu_view(const Batch &, GpuStream);
 } // namespace transport
@@ -121,7 +121,7 @@ class Publisher
     Publisher(const Publisher &) = delete;
     Publisher &operator=(const Publisher &) = delete;
     ~Publisher();
-    void bulk_start(); // slots are granted from here on; every subscriptions join before it
+    void ucx_start(); // slots are granted from here on; every subscriptions join before it
     std::optional<Slot> acquire(Deadline);
     void finish();
     Health health() const;
@@ -131,8 +131,8 @@ class Publisher
     friend class Slot;
     friend struct transport::Sub;
     friend std::string transport::handle(Publisher &, std::string_view);
-    friend std::string transport::bulk_stream(const Publisher &);
-    friend std::string transport::bulk_sessions(const Publisher &);
+    friend std::string transport::ucx_stream(const Publisher &);
+    friend std::string transport::ucx_sessions(const Publisher &);
     std::shared_ptr<transport::Pub> p_;
 };
 
@@ -207,4 +207,4 @@ class Subscription
     std::unique_ptr<transport::Sub> s_;
 };
 
-} // namespace TangoBulk
+} // namespace TangoUcx

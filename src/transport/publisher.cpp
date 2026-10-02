@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "tables.h"
 
@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace TangoBulk::transport
+namespace TangoUcx::transport
 {
 struct SourceSlot
 {
@@ -66,8 +66,8 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     PublisherLimits limits;
     std::uint64_t incarnation = 0;
     PublisherPlan plan;
-    std::unique_ptr<ucx::Context> context;
-    std::unique_ptr<ucx::Worker> worker;
+    std::unique_ptr<ucp::Context> context;
+    std::unique_ptr<ucp::Worker> worker;
     Region source;
     std::vector<std::byte> records, ops, control_ops;
     std::unique_ptr<SourceSlot[]> slots;
@@ -187,8 +187,8 @@ void Pub::start()
 }
 void Pub::setup()
 {
-    context = std::make_unique<ucx::Context>();
-    worker = std::make_unique<ucx::Worker>(*context);
+    context = std::make_unique<ucp::Context>();
+    worker = std::make_unique<ucp::Worker>(*context);
     req = context->request_bytes();
     plan = plan_publisher(description, limits, req, worker->max_am_header());
     source = Region::allocate(context->get(), plan.source_bytes);
@@ -881,9 +881,9 @@ void Pub::shutdown()
     if(context)
         context->destroy();
 }
-} // namespace TangoBulk::transport
+} // namespace TangoUcx::transport
 
-namespace TangoBulk
+namespace TangoUcx
 {
 Slot::Slot(std::weak_ptr<transport::Pub> p, std::uint32_t i)
     : state_(std::move(p)), index_(i), active_(true)
@@ -961,7 +961,7 @@ std::optional<Slot> Publisher::acquire(Deadline d)
     return Slot(p_, k);
 }
 // No slot is granted before this, and no every Open is accepted after it.
-void Publisher::bulk_start()
+void Publisher::ucx_start()
 {
     if(p_)
         p_->started.store(true, std::memory_order_release);
@@ -1006,9 +1006,9 @@ const Description &Publisher::description() const
         throw std::logic_error("moved publisher");
     return p_->description;
 }
-} // namespace TangoBulk
+} // namespace TangoUcx
 
-namespace TangoBulk::transport
+namespace TangoUcx::transport
 {
 std::string handle(Publisher &p, std::string_view document)
 {
@@ -1019,7 +1019,7 @@ std::string handle(Publisher &p, std::string_view document)
     return wire::format(
         p.p_->control.call(request, std::chrono::steady_clock::now() + std::chrono::seconds(3)));
 }
-std::string bulk_stream(const Publisher &p)
+std::string ucx_stream(const Publisher &p)
 {
     if(!p.p_)
         throw std::logic_error("moved publisher");
@@ -1027,7 +1027,7 @@ std::string bulk_stream(const Publisher &p)
                                             p.p_->limits.allow_every, p.p_->limits.max_sessions});
 }
 // Formatted on the calling thread, from the loop's fixed Health copy.
-std::string bulk_sessions(const Publisher &p)
+std::string ucx_sessions(const Publisher &p)
 {
     if(!p.p_)
         throw std::logic_error("moved publisher");
@@ -1039,4 +1039,4 @@ std::string bulk_sessions(const Publisher &p)
                               std::string(w.transport.view())});
     return wire::format(m);
 }
-} // namespace TangoBulk::transport
+} // namespace TangoUcx::transport

@@ -1,6 +1,6 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
-#include <tango-bulk/tango.h>
+#include <tango-ucx/tango.h>
 #include <transport.h>
 #include <wire.h>
 
@@ -14,7 +14,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace TangoBulk
+namespace TangoUcx
 {
 namespace
 {
@@ -35,15 +35,15 @@ template <class F> auto with_publisher(Tango::DeviceImpl *device, F f)
     std::shared_lock l(r.m);
     auto it = r.publishers.find(device);
     if(it == r.publishers.end())
-        Tango::Except::throw_exception(
-            "BulkUnavailable", "no bulk publisher is attached to this device", "tango-bulk");
+        Tango::Except::throw_exception("UcxUnavailable",
+                                       "no UCX publisher is attached to this device", "tango-ucx");
     try
     {
         return f(*it->second);
     }
     catch(const std::exception &e)
     {
-        Tango::Except::throw_exception("BulkFailed", e.what(), "tango-bulk");
+        Tango::Except::throw_exception("UcxFailed", e.what(), "tango-ucx");
     }
 }
 
@@ -60,16 +60,16 @@ std::string command_reply(Tango::DeviceImpl *device, std::string_view document)
     }
     catch(const std::exception &e)
     {
-        Tango::Except::throw_exception("BulkFailed", e.what(), "tango-bulk");
+        Tango::Except::throw_exception("UcxFailed", e.what(), "tango-ucx");
     }
 }
 
-class BulkCommand : public Tango::Command
+class UcxCommand : public Tango::Command
 {
   public:
-    BulkCommand(const std::string &name, const char *marker)
+    UcxCommand(const std::string &name, const char *marker)
         : Tango::Command(name, Tango::DEV_STRING, Tango::DEV_STRING, marker,
-                         "a tango-bulk-reply JSON document", Tango::OPERATOR)
+                         "a tango-ucx-reply JSON document", Tango::OPERATOR)
     {
     }
     CORBA::Any *execute(Tango::DeviceImpl *device, const CORBA::Any &in) override
@@ -129,7 +129,7 @@ std::string lower(std::string s)
 }
 } // namespace
 
-void install_bulk_commands(std::vector<Tango::Command *> &list, std::string_view prefix)
+void install_ucx_commands(std::vector<Tango::Command *> &list, std::string_view prefix)
 {
     std::string open = std::string(prefix) + "Open", close = std::string(prefix) + "Close";
     for(auto *command : list)
@@ -137,31 +137,31 @@ void install_bulk_commands(std::vector<Tango::Command *> &list, std::string_view
                        lower(command->get_name()) == lower(close)))
             throw std::invalid_argument("the device already has a command named " +
                                         command->get_name());
-    list.push_back(new BulkCommand(open, wire::k_open_marker));
-    list.push_back(new BulkCommand(close, wire::k_close_marker));
+    list.push_back(new UcxCommand(open, wire::k_open_marker));
+    list.push_back(new UcxCommand(close, wire::k_close_marker));
 }
-void install_bulk_attributes(std::vector<Tango::Attr *> &list)
+void install_ucx_attributes(std::vector<Tango::Attr *> &list)
 {
     using U64 = Tango::DevULong64;
     using U32 = Tango::DevULong;
-    add(list, new DocumentAttr("BulkStream", transport::bulk_stream),
-        "The bulk stream: a tango-bulk-stream JSON document");
-    add(list, new DocumentAttr("BulkSessions", transport::bulk_sessions),
-        "The sessions, sampled with Health: a tango-bulk-sessions JSON document");
+    add(list, new DocumentAttr("UcxStream", transport::ucx_stream),
+        "The UCX stream: a tango-ucx-stream JSON document");
+    add(list, new DocumentAttr("UcxSessions", transport::ucx_sessions),
+        "The sessions, sampled with Health: a tango-ucx-sessions JSON document");
     add(list,
-        new HealthAttr<U64>("BulkPublished", Tango::DEV_ULONG64,
+        new HealthAttr<U64>("UcxPublished", Tango::DEV_ULONG64,
                             [](const Health &h) { return U64(h.frames); }),
         "Frames published in this incarnation");
     add(list,
-        new HealthAttr<U64>("BulkSkipped", Tango::DEV_ULONG64,
+        new HealthAttr<U64>("UcxSkipped", Tango::DEV_ULONG64,
                             [](const Health &h) { return U64(h.skipped); }),
         "Frames latest sessions skipped");
     add(list,
-        new HealthAttr<U32>("BulkPressure", Tango::DEV_ULONG,
+        new HealthAttr<U32>("UcxPressure", Tango::DEV_ULONG,
                             [](const Health &h) { return U32(h.pressure_from); }),
-        "The BulkSessions ordinal of the every session the device waits for; 0: none");
+        "The UcxSessions ordinal of the every session the device waits for; 0: none");
     add(list,
-        new HealthAttr<U32>("BulkFailedEvery", Tango::DEV_ULONG,
+        new HealthAttr<U32>("UcxFailedEvery", Tango::DEV_ULONG,
                             [](const Health &h) { return U32(h.failed_every); }),
         "Every sessions that ended without the subscriber closing them");
 }
@@ -175,4 +175,4 @@ void detach_publisher(Tango::DeviceImpl &device)
     std::unique_lock l(registry().m);
     registry().publishers.erase(&device);
 }
-} // namespace TangoBulk
+} // namespace TangoUcx

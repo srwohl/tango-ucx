@@ -39,7 +39,7 @@ def read_inventory(path: Path) -> tuple[list[str], list[str]]:
 
 
 def cpp_declared_names(text: str) -> set[str]:
-    """Names the installed headers declare in namespace TangoBulk: types and free functions
+    """Names the installed headers declare in namespace TangoUcx: types and free functions
     bare, public data members and member functions as Type::name. Special members, operators,
     enumerators and nested namespaces are not names. Relies on clang-format's brace style."""
     text = re.sub(r"//[^\n]*|/\*.*?\*/", " ", text, flags=re.DOTALL)
@@ -57,7 +57,7 @@ def cpp_declared_names(text: str) -> set[str]:
         head = " ".join(statement.split())
         statement = ""
         inside = [name for kind, name in scopes if kind == "namespace"]
-        in_api = inside == ["TangoBulk"]
+        in_api = inside == ["TangoUcx"]
         owner = scopes[-1] if scopes else ("", "")
         if char == "{":
             match = re.match(r"(namespace|enum class|struct|class)\s+(\w+)", head)
@@ -168,7 +168,7 @@ def glossary_terms() -> tuple[set[tuple[str, ...]], list[tuple[tuple[str, ...], 
 
 
 def public_header_text() -> str:
-    paths = sorted((ROOT / "include/tango-bulk").rglob("*"))
+    paths = sorted((ROOT / "include/tango-ucx").rglob("*"))
     return "\n".join(
         path.read_text(encoding="utf-8")
         for path in paths
@@ -242,7 +242,7 @@ def main() -> int:
 
     limits = budget["project"]
     cpp = cpp_declared_names(public_header_text())
-    python = python_declared_names(ROOT / "python/tango_bulk")
+    python = python_declared_names(ROOT / "python/tango_ucx")
     errors = check_names("C++", "tools/public_names.txt", cpp, limits["public_name_limit"])
     errors += check_names(
         "Python", "tools/python_names.txt", python, limits["python_name_limit"]

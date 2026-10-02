@@ -1,6 +1,6 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
-#include <tango-bulk/tango.h>
+#include <tango-ucx/tango.h>
 #include <transport.h>
 #include <wire.h>
 
@@ -11,7 +11,7 @@
 #include <memory>
 #include <stdexcept>
 
-namespace TangoBulk
+namespace TangoUcx
 {
 namespace
 {
@@ -19,7 +19,7 @@ struct Commands
 {
     std::string open, close;
 };
-// The bulk commands, whatever the device named them.
+// The UCX commands, whatever the device named them.
 Commands discover(Tango::DeviceProxy &proxy)
 {
     std::unique_ptr<Tango::CommandInfoList> list(proxy.command_list_query());
@@ -41,14 +41,14 @@ Commands discover(Tango::DeviceProxy &proxy)
         if(!name)
             continue;
         if(!name->empty())
-            throw std::runtime_error(proxy.dev_name() + " has two sets of bulk commands");
+            throw std::runtime_error(proxy.dev_name() + " has two sets of UCX commands");
         *name = c.cmd_name;
     }
     if(found.open.empty() || found.close.empty())
         throw std::runtime_error(
-            other < 0 ? proxy.dev_name() + " has no bulk commands"
-                      : proxy.dev_name() + " speaks tango-bulk/" + std::to_string(other) +
-                            "; this library speaks tango-bulk/" + std::to_string(wire::k_major));
+            other < 0 ? proxy.dev_name() + " has no UCX commands"
+                      : proxy.dev_name() + " speaks tango-ucx/" + std::to_string(other) +
+                            "; this library speaks tango-ucx/" + std::to_string(wire::k_major));
     return found;
 }
 std::string command(Tango::DeviceProxy &proxy, const std::string &name, std::string_view document)
@@ -63,9 +63,9 @@ Subscription subscribe(Tango::DeviceProxy &proxy, bool every, SubscriptionOption
 {
     auto names = discover(proxy);
     std::string stream;
-    proxy.read_attribute("BulkStream") >> stream;
+    proxy.read_attribute("UcxStream") >> stream;
     auto pending =
-        transport::prepare(transport::parse_bulk_stream(stream), every, std::move(options));
+        transport::prepare(transport::parse_ucx_stream(stream), every, std::move(options));
     auto reply = command(proxy, names.open, pending.open_message());
     // Close uses its own copy of the proxy: it may run after the caller's proxy is gone, and it
     // sets the timeout from the close deadline without touching the caller's.
@@ -91,4 +91,4 @@ Subscription latest(Tango::DeviceProxy &proxy, SubscriptionOptions options)
 {
     return subscribe(proxy, false, std::move(options));
 }
-} // namespace TangoBulk
+} // namespace TangoUcx

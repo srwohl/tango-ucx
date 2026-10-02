@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
 import asyncio
@@ -14,7 +14,7 @@ import time
 import numpy as np
 import pytest
 
-import tango_bulk
+import tango_ucx
 
 
 def _free_loopback_port():
@@ -53,9 +53,9 @@ def _stop_server(pid):
 
 
 def _start_fixture_device():
-    executable = os.environ.get("TANGO_BULK_FIXTURE_DEVICE")
+    executable = os.environ.get("TANGO_UCX_FIXTURE_DEVICE")
     if executable is None:
-        pytest.skip("TANGO_BULK_FIXTURE_DEVICE is not set")
+        pytest.skip("TANGO_UCX_FIXTURE_DEVICE is not set")
 
     port = _free_loopback_port()
     read_fd, write_fd = os.pipe()
@@ -64,7 +64,7 @@ def _start_fixture_device():
         "test",
         "-nodb",
         "-dlist",
-        "test/bulk/1",
+        "test/ucx/1",
         "-ORBendPoint",
         f"giop:tcp:127.0.0.1:{port}",
     ]
@@ -107,7 +107,7 @@ def _start_fixture_device():
     finally:
         os.close(read_fd)
 
-    return pid, f"127.0.0.1:{port}/test/bulk/1#dbase=no"
+    return pid, f"127.0.0.1:{port}/test/ucx/1#dbase=no"
 
 
 HEALTH_KEYS = {
@@ -145,7 +145,7 @@ def test_nodb_subscription_exposes_readonly_views_that_outlive_close(server):
     import tango
 
     proxy = tango.DeviceProxy(server[1])
-    subscription = tango_bulk.every(proxy, batch=4, max_wait=0.5)
+    subscription = tango_ucx.every(proxy, batch=4, max_wait=0.5)
     assert proxy.command_inout("Publish", 4) == 4
 
     expected = np.arange(4, dtype=np.uint8)
@@ -196,7 +196,7 @@ def test_nodb_subscription_exposes_readonly_views_that_outlive_close(server):
 def test_nodb_every_iterates_each_frame_in_order_then_stops_at_end(server):
     import tango
 
-    with tango_bulk.every(server[1], batch=8, max_wait=0.05) as subscription:
+    with tango_ucx.every(server[1], batch=8, max_wait=0.05) as subscription:
         tango.DeviceProxy(server[1]).command_inout("Start", 100)
         assert _indices(subscription) == list(range(100))
         assert subscription.outcome == "end"
@@ -212,7 +212,7 @@ def test_nodb_every_iterates_each_frame_in_order_then_stops_at_end(server):
 def test_nodb_latest_delivers_increasing_frames_then_stops_at_end(server):
     import tango
 
-    with tango_bulk.latest(server[1]) as subscription:
+    with tango_ucx.latest(server[1]) as subscription:
         tango.DeviceProxy(server[1]).command_inout("Start", 2000)
         indices = _indices(subscription)
         assert indices and indices == sorted(set(indices)) and indices[-1] < 2000
@@ -223,7 +223,7 @@ def test_nodb_latest_delivers_increasing_frames_then_stops_at_end(server):
 def test_nodb_async_iteration_waits_on_the_fd_and_wakes_for_frames_and_end(server):
     import tango
 
-    subscription = tango_bulk.every(server[1], batch=4, max_wait=0.05)
+    subscription = tango_ucx.every(server[1], batch=4, max_wait=0.05)
     calls = 0
     read = subscription.read
 
@@ -255,7 +255,7 @@ def test_nodb_iteration_raises_failed_when_the_device_server_dies(server):
     import tango
 
     pid, device_name = server
-    subscription = tango_bulk.every(device_name)
+    subscription = tango_ucx.every(device_name)
     tango.DeviceProxy(device_name).command_inout("Start", 1_000_000_000)
     indices = []
     killed = False
@@ -271,7 +271,7 @@ def test_nodb_iteration_raises_failed_when_the_device_server_dies(server):
             killed = True
 
     assert indices == list(range(len(indices)))
-    with pytest.raises(tango_bulk.Failed) as failed:
+    with pytest.raises(tango_ucx.Failed) as failed:
         next(iter(subscription))
     assert failed.value.last_index == indices[-1]
     assert str(failed.value) == subscription.health()["failure"] != ""

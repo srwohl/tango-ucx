@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "fixtures/fault_adapter.h"
 #include <catch2/catch_test_macros.hpp>
@@ -6,7 +6,7 @@
 
 #include <atomic>
 
-using namespace TangoBulk;
+using namespace TangoUcx;
 using namespace std::chrono_literals;
 
 namespace
@@ -58,7 +58,7 @@ TEST_CASE("a held batch keeps its host storage alive after close")
 
 TEST_CASE("End is a bound and does not complete before an earlier frame lands")
 {
-    using namespace TangoBulk::transport;
+    using namespace TangoUcx::transport;
     Description d = test::small_description();
     PublisherLimits limits = test::small_limits();
     Offer offer{d, limits, 1};
@@ -79,7 +79,7 @@ TEST_CASE("End is a bound and does not complete before an earlier frame lands")
     sub->rings->returned.assign(1, 0);
     sub->queue.reserve(2);
     sub->has_end = true;
-    sub->end = {1, 1, 1, TangoBulk::wire::FinishedReason};
+    sub->end = {1, 1, 1, TangoUcx::wire::FinishedReason};
     sub->end_at_ns = 1'000'000'000LL;
     sub->decide(2'000'000'000LL);
     CHECK(sub->outcome.load() == 0);
@@ -197,7 +197,7 @@ TEST_CASE("frames arriving while a subscription closes are ignored, and nothing 
 {
     Publisher publisher(test::small_description(), test::small_limits(1));
     auto sub = test::subscribe(publisher, true);
-    publisher.bulk_start();
+    publisher.ucx_start();
     std::jthread device(
         [&](std::stop_token stop)
         {

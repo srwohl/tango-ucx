@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
 import json
@@ -8,13 +8,13 @@ import types
 import numpy as np
 import pytest
 
-import tango_bulk
-import tango_bulk.subscription as subscription_module
+import tango_ucx
+import tango_ucx.subscription as subscription_module
 
 
-STREAM = json.dumps({"interface": "tango-bulk-stream/3.0", "incarnation": 12})
-OPEN_REPLY = json.dumps({"interface": "tango-bulk-reply/3.0", "status": "ok"})
-CLOSE_REPLY = json.dumps({"interface": "tango-bulk-reply/3.0", "status": "ok"})
+STREAM = json.dumps({"interface": "tango-ucx-stream/3.0", "incarnation": 12})
+OPEN_REPLY = json.dumps({"interface": "tango-ucx-reply/3.0", "status": "ok"})
+CLOSE_REPLY = json.dumps({"interface": "tango-ucx-reply/3.0", "status": "ok"})
 
 
 class Command:
@@ -38,8 +38,8 @@ class Proxy:
         self.calls.append(("command_list_query", kwargs))
         return [
             Command("Unrelated"),
-            Command("OpenTransfer", "tango-bulk/3 open"),
-            Command("CloseTransfer", "tango-bulk/3 close"),
+            Command("OpenTransfer", "tango-ucx/3 open"),
+            Command("CloseTransfer", "tango-ucx/3 close"),
         ]
 
     def read_attribute(self, name, **kwargs):
@@ -142,33 +142,33 @@ def install_tango(monkeypatch, proxy=None):
 
 def install_core(monkeypatch, proxy):
     core = Core(proxy)
-    monkeypatch.setitem(sys.modules, "tango_bulk._core", core)
+    monkeypatch.setitem(sys.modules, "tango_ucx._core", core)
     return core
 
 
 @pytest.mark.parametrize("budget", [0, "0B", True, "12MB"])
 def test_budget_must_be_positive_and_use_supported_units(budget):
     with pytest.raises(ValueError, match="budget"):
-        tango_bulk.every("sys/test/1", budget=budget)
+        tango_ucx.every("sys/test/1", budget=budget)
 
 
 @pytest.mark.parametrize("memory", ["cuda", "cuda:", "cuda:-1", "cuda:01", "gpu:0", 0, None])
 def test_memory_must_be_host_or_a_numbered_cuda_gpu(memory):
     with pytest.raises(ValueError, match="memory must be 'host' or 'cuda:N'"):
-        tango_bulk.every("sys/test/1", memory=memory)
+        tango_ucx.every("sys/test/1", memory=memory)
 
 
 @pytest.mark.parametrize("option", ["max_wait", "max_rate"])
 def test_time_options_reject_booleans(option):
     with pytest.raises(ValueError, match=f"{option} must be a non-negative number"):
-        tango_bulk.latest("sys/test/1", **{option: True})
+        tango_ucx.latest("sys/test/1", **{option: True})
 
 
 def test_latest_discovers_marked_commands_and_keeps_the_passed_proxy(monkeypatch):
     proxy, synchronous, futures, _ = install_tango(monkeypatch)
     core = install_core(monkeypatch, proxy)
 
-    sub = tango_bulk.latest(
+    sub = tango_ucx.latest(
         proxy,
         budget="2MiB",
         batch=3,
@@ -202,7 +202,7 @@ def test_device_name_constructs_one_proxy_and_every_uses_default_latest_rate(mon
     proxy, _, _, created = install_tango(monkeypatch)
     core = install_core(monkeypatch, proxy)
 
-    tango_bulk.every("sys/test/1")
+    tango_ucx.every("sys/test/1")
 
     assert created == ["sys/test/1"]
     assert core.calls == [(STREAM, True, 256 * 1024**2, 1, 0.01, 0.0, False, "")]
@@ -212,7 +212,7 @@ def test_device_name_constructs_one_proxy_and_every_uses_default_latest_rate(mon
 def test_subscription_is_a_context_manager_and_forwards_read_timeout(monkeypatch):
     proxy, _, _, _ = install_tango(monkeypatch)
     core = install_core(monkeypatch, proxy)
-    sub = tango_bulk.every(proxy)
+    sub = tango_ucx.every(proxy)
 
     assert sub.read(timeout=0.125) is None
     with sub:
@@ -228,7 +228,7 @@ def test_batches_expose_read_only_views_and_copy_to_independent_arrays(monkeypat
     records = np.array([(7, 9001)], dtype=[("index", "<u8"), ("timestamp", "<u8")])
     core.pending.sub.deliveries.append(NativeBatch(payload, records))
 
-    batch = tango_bulk.every(proxy).read()
+    batch = tango_ucx.every(proxy).read()
     assert batch.frames == 1
     assert batch.gpu is False
     assert batch.array.shape == (1, 2, 3)
@@ -253,9 +253,9 @@ def test_iteration_raises_failed_after_delivered_batches(monkeypatch):
     core.pending.sub.outcome = "failed"
     core.pending.sub.health_sample = {"last_index": 22, "failure": "publisher died"}
 
-    iterator = iter(tango_bulk.every(proxy))
+    iterator = iter(tango_ucx.every(proxy))
     assert next(iterator).array.item() == 11
-    with pytest.raises(tango_bulk.Failed, match="publisher died") as failure:
+    with pytest.raises(tango_ucx.Failed, match="publisher died") as failure:
         next(iterator)
     assert failure.value.last_index == 22
 
@@ -266,13 +266,13 @@ def test_iteration_stops_at_end(monkeypatch):
     core.pending.sub.outcome = "end"
 
     with pytest.raises(StopIteration):
-        next(iter(tango_bulk.every(proxy)))
+        next(iter(tango_ucx.every(proxy)))
 
 
 def test_close_timeout_leaves_the_native_fence_unproved(monkeypatch):
     proxy, _, _, _ = install_tango(monkeypatch)
     core = install_core(monkeypatch, proxy)
-    sub = tango_bulk.every(proxy)
+    sub = tango_ucx.every(proxy)
     proxy.close_error = TimeoutError("close timed out")
 
     sub.close(timeout=0.001)

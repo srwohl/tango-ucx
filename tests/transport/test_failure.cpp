@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "fixtures/fault_adapter.h"
 #include "fixtures/fork.h"
@@ -12,7 +12,7 @@
 #include <thread>
 #include <vector>
 
-using namespace TangoBulk;
+using namespace TangoUcx;
 
 TEST_CASE("forced close preserves ownership around a large in-flight receive")
 {
@@ -29,7 +29,7 @@ TEST_CASE("forced close preserves ownership around a large in-flight receive")
     options.batch = 1;
     options.max_wait = std::chrono::microseconds(0);
     auto sub = test::subscribe(publisher, true, options, test::FaultAdapter::lose_close_fence());
-    publisher.bulk_start();
+    publisher.ucx_start();
     for(std::uint64_t i = 0; i < 2; ++i)
     {
         auto slot = publisher.acquire(test::deadline());
@@ -56,7 +56,7 @@ namespace
 std::string peer_transport()
 {
     auto tls = GENERATE(as<std::string>{}, "all", "tcp");
-    ::setenv("TANGO_BULK_UCX_TLS", tls.c_str(), 1);
+    ::setenv("TANGO_UCX_UCX_TLS", tls.c_str(), 1);
     return tls;
 }
 } // namespace
@@ -106,7 +106,7 @@ TEST_CASE("a subscriber killed with SIGKILL is detected through the UCX peer end
     if(tls == "tcp")
         CHECK(transport.find("tcp") != std::string::npos);
     REQUIRE(child.kill());
-    publisher.bulk_start();
+    publisher.ucx_start();
     auto until = test::deadline(std::chrono::seconds(12));
     Health h;
     std::uint32_t sends = 0;
@@ -151,7 +151,7 @@ TEST_CASE("a publisher killed with SIGKILL ends an every subscription Failed aft
             auto open = test::read_text(child.in());
             if(open.empty() || !test::write_text(child.out(), transport::handle(publisher, open)))
                 ::_exit(3);
-            publisher.bulk_start();
+            publisher.ucx_start();
             for(;;) // until killed; an every session holds the device while its ring is full
                 if(auto slot = publisher.acquire(test::deadline()))
                     std::move(*slot).publish();
@@ -207,7 +207,7 @@ TEST_CASE("a latest subscription gone without its Close keeps its session row, w
                                test::FaultAdapter::lose_close_fence());
     test::publish_one(publisher);
     REQUIRE(sub.read(test::deadline()));
-    sub.close(test::deadline()); // no BulkClose: forced close, worker and context destroyed
+    sub.close(test::deadline()); // no UcxClose: forced close, worker and context destroyed
     REQUIRE(test::eventually([&] { return test::first_row(publisher, "depth") != ~0ull; }));
     for(auto n = 2 * test::first_row(publisher, "depth"); n; --n)
         test::publish_one(publisher); // a latest row never holds the device

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "fixtures/fault_adapter.h"
 #include <catch2/catch_test_macros.hpp>
@@ -7,7 +7,7 @@
 #include <format>
 #include <thread>
 
-using namespace TangoBulk;
+using namespace TangoUcx;
 
 TEST_CASE("every and latest subscriptions observe the same published frame")
 {
@@ -61,29 +61,28 @@ TEST_CASE("an Open whose session id a row already holds is refused")
     publisher.finish();
 }
 
-TEST_CASE("a malformed or refused bulk command gets a status, not an exception")
+TEST_CASE("a malformed or refused UCX command gets a status, not an exception")
 {
     Publisher publisher(test::small_description(), test::small_limits());
     wire::Reply reply;
     REQUIRE(wire::parse(transport::handle(publisher, "not json"), reply));
     CHECK(reply.status == wire::Malformed);
     REQUIRE(wire::parse(
-        transport::handle(publisher, R"({"interface":"tango-bulk-close/4.0","session":1})"),
-        reply));
+        transport::handle(publisher, R"({"interface":"tango-ucx-close/4.0","session":1})"), reply));
     CHECK(reply.status == wire::Version);
     REQUIRE(wire::parse(transport::handle(publisher, wire::format(wire::CloseMessage{99})), reply));
     CHECK(reply.status == wire::UnknownSession);
     publisher.finish();
 }
 
-TEST_CASE("no slot is granted before bulk_start, and no every Open is accepted after it")
+TEST_CASE("no slot is granted before ucx_start, and no every Open is accepted after it")
 {
     Publisher publisher(test::small_description(), test::small_limits(3));
     auto archiver = test::subscribe(publisher, true);
     CHECK_FALSE(publisher.acquire(test::deadline(std::chrono::seconds(1))));
     CHECK(publisher.health().slots_held == 0);
     CHECK_FALSE(publisher.health().started); // why the device got no slot
-    publisher.bulk_start();
+    publisher.ucx_start();
     CHECK(publisher.health().started);
     test::RawPeer late;
     CHECK(late.open(publisher, true, 4) == wire::Started);
@@ -101,7 +100,7 @@ TEST_CASE("no slot is granted before bulk_start, and no every Open is accepted a
     preview.close(test::deadline());
 }
 
-TEST_CASE("BulkSessions lists all 64 sessions with their 64-byte labels")
+TEST_CASE("UcxSessions lists all 64 sessions with their 64-byte labels")
 {
     test::RawPeer peer; // one worker behind every session
     Publisher publisher(test::small_description(), test::small_limits(64));
@@ -131,7 +130,7 @@ TEST_CASE("BulkSessions lists all 64 sessions with their 64-byte labels")
     }
 }
 
-TEST_CASE("an every Open that races bulk_start is refused, or gets every frame from the first")
+TEST_CASE("an every Open that races ucx_start is refused, or gets every frame from the first")
 {
     int joined = 0;
     for(int round = 0; round < 12; ++round)
@@ -174,7 +173,7 @@ TEST_CASE("an every row without room makes the device wait, and Health names it 
     CHECK_FALSE(publisher.acquire(test::deadline(std::chrono::seconds(2))));
     auto h = publisher.health();
     CHECK(test::eventually([&] { return (h = publisher.health()).pressure; }));
-    CHECK(h.pressure_from == 1); // the row's BulkSessions ordinal
+    CHECK(h.pressure_from == 1); // the row's UcxSessions ordinal
     CHECK(h.slots_free > 0);     // the device waits for room, not for memory
     CHECK(h.failed_every == 0);
     auto row = test::sessions(publisher).at(0);
@@ -263,7 +262,7 @@ TEST_CASE("frames are routed in grant order, and a cancelled slot uses no frame 
 {
     Publisher publisher(test::small_description(), test::small_limits(1));
     auto sub = test::subscribe(publisher, true);
-    publisher.bulk_start();
+    publisher.ucx_start();
     auto fill = [](Slot &s, int v) { std::memset(s.payload().data(), v, s.payload().size()); };
     auto a = publisher.acquire(test::deadline());
     auto b = publisher.acquire(test::deadline());
@@ -310,7 +309,7 @@ TEST_CASE("refused Opens get every-refused, incarnation, no-session and finished
     CHECK(status([](auto &m) { m.session += 2; }) == wire::Finished);
 }
 
-TEST_CASE("Ready reaches the subscriber at Open, and BulkClose is answered once the row is free")
+TEST_CASE("Ready reaches the subscriber at Open, and UcxClose is answered once the row is free")
 {
     Publisher publisher(test::small_description(), test::small_limits(1));
     {

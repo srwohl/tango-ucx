@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "tables.h"
 
@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <utility>
 
-namespace TangoBulk
+namespace TangoUcx
 {
 struct Batch::Copy
 {
@@ -137,4 +137,4 @@ std::size_t GpuView::frames() const
 {
     return batch_.frames();
 }
-} // namespace TangoBulk
+} // namespace TangoUcx

@@ -1,16 +1,16 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
-#include <tango-bulk/bulk.h>
+#include <tango-ucx/ucx.h>
 
 #include <functional>
 #include <string>
 #include <string_view>
 
-namespace TangoBulk::transport
+namespace TangoUcx::transport
 {
-// Sends a Close document through the bulk command; true when the reply's status is ok.
+// Sends a Close document through the UCX command; true when the reply's status is ok.
 using Closer = std::function<bool(std::string_view, Deadline)>;
 
 struct Offer
@@ -20,15 +20,15 @@ struct Offer
     std::uint64_t incarnation = 0;
 };
 
-// A bulk command's JSON document in, its reply document out; parsed on the calling thread.
+// A UCX command's JSON document in, its reply document out; parsed on the calling thread.
 std::string handle(Publisher &, std::string_view document);
-std::string bulk_stream(const Publisher &);
-// The BulkSessions document: the sessions of the last Health sample.
-std::string bulk_sessions(const Publisher &);
-// "tango-bulk/3 open" -> 3; -1 when the description is not a bulk command marker.
+std::string ucx_stream(const Publisher &);
+// The UcxSessions document: the sessions of the last Health sample.
+std::string ucx_sessions(const Publisher &);
+// "tango-ucx/3 open" -> 3; -1 when the description is not a UCX command marker.
 int marker_major(std::string_view type_description);
 // Throws when the document is malformed or of another major version.
-Offer parse_bulk_stream(std::string_view document);
+Offer parse_ucx_stream(std::string_view document);
 
 class PendingSubscription
 {
@@ -66,7 +66,7 @@ struct Allocation
     std::size_t bytes = 0;
     int gpu = -1;
 };
-// What the transport needs of a GPU; tango-bulk-cuda implements it and registers itself.
+// What the transport needs of a GPU; tango-ucx-cuda implements it and registers itself.
 struct GpuRuntime
 {
     virtual Allocation allocate(int gpu, std::size_t bytes) = 0;
@@ -81,4 +81,4 @@ struct GpuRuntime
 };
 void register_gpu_runtime(GpuRuntime &);
 
-} // namespace TangoBulk::transport
+} // namespace TangoUcx::transport

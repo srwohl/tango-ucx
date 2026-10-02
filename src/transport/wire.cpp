@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "wire.h"
 #include "transport.h"
@@ -11,14 +11,14 @@
 #include <limits>
 #include <stdexcept>
 
-namespace TangoBulk::wire
+namespace TangoUcx::wire
 {
 namespace
 {
 using json = nlohmann::ordered_json;
-constexpr std::string_view k_open = "tango-bulk-open", k_close = "tango-bulk-close",
-                           k_reply = "tango-bulk-reply", k_stream = "tango-bulk-stream",
-                           k_sessions = "tango-bulk-sessions";
+constexpr std::string_view k_open = "tango-ucx-open", k_close = "tango-ucx-close",
+                           k_reply = "tango-ucx-reply", k_stream = "tango-ucx-stream",
+                           k_sessions = "tango-ucx-sessions";
 constexpr std::array<std::string_view, 11> k_element_names{
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bytes"};
 constexpr std::array<std::string_view, 12> k_status_names{
@@ -357,13 +357,13 @@ bool decode(std::span<const std::byte> b, EndMessage &m)
          Reason(std::to_integer<unsigned>(b[24]))};
     return true;
 }
-} // namespace TangoBulk::wire
+} // namespace TangoUcx::wire
 
-namespace TangoBulk::transport
+namespace TangoUcx::transport
 {
 int marker_major(std::string_view description)
 {
-    constexpr std::string_view prefix = "tango-bulk/";
+    constexpr std::string_view prefix = "tango-ucx/";
     if(!description.starts_with(prefix))
         return -1;
     description.remove_prefix(prefix.size());
@@ -375,17 +375,17 @@ int marker_major(std::string_view description)
     auto role = description.substr(space + 1);
     return role == "open" || role == "close" ? int(major) : -1;
 }
-Offer parse_bulk_stream(std::string_view document)
+Offer parse_ucx_stream(std::string_view document)
 {
     wire::StreamMessage m;
     auto status = wire::parse(document, m);
     if(status != wire::Ok)
         throw std::runtime_error(status == wire::Version
-                                     ? "BulkStream speaks another tango-bulk major version"
-                                     : "BulkStream is not a valid tango-bulk-stream document");
+                                     ? "UcxStream speaks another tango-ucx major version"
+                                     : "UcxStream is not a valid tango-ucx-stream document");
     Offer offer{std::move(m.description), {}, m.incarnation};
     offer.limits.allow_every = m.allow_every;
     offer.limits.max_sessions = m.max_sessions;
     return offer;
 }
-} // namespace TangoBulk::transport
+} // namespace TangoUcx::transport

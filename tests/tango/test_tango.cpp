@@ -1,8 +1,8 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "tango/device_server.h"
 #include <catch2/catch_test_macros.hpp>
-#include <tango-bulk/tango.h>
+#include <tango-ucx/tango.h>
 #include <transport.h>
 #include <wire.h>
 
@@ -12,7 +12,7 @@
 #include <atomic>
 #include <thread>
 
-using namespace TangoBulk;
+using namespace TangoUcx;
 using namespace std::chrono_literals;
 
 namespace
@@ -49,13 +49,13 @@ template <class T> T attribute(Tango::DeviceProxy &p, const char *name)
 }
 std::uint64_t incarnation(Tango::DeviceProxy &p)
 {
-    return transport::parse_bulk_stream(attribute<std::string>(p, "BulkStream")).incarnation;
+    return transport::parse_ucx_stream(attribute<std::string>(p, "UcxStream")).incarnation;
 }
-// BulkSessions is sampled every 256 loop turns: read it until `done` accepts it, or the deadline.
+// UcxSessions is sampled every 256 loop turns: read it until `done` accepts it, or the deadline.
 template <class Done> bool sessions_until(Tango::DeviceProxy &p, Done done, Deadline until)
 {
     for(;; std::this_thread::sleep_for(10ms))
-        if(done(nlohmann::json::parse(attribute<std::string>(p, "BulkSessions"))))
+        if(done(nlohmann::json::parse(attribute<std::string>(p, "UcxSessions"))))
             return true;
         else if(std::chrono::steady_clock::now() > until)
             return false;
@@ -111,14 +111,14 @@ std::string status(std::string_view reply)
 }
 } // namespace
 
-TEST_CASE("a subscriber finds renamed bulk commands by their markers")
+TEST_CASE("a subscriber finds renamed UCX commands by their markers")
 {
     auto proxy = device();
     std::unique_ptr<Tango::CommandInfoList> commands(proxy.command_list_query());
     std::map<std::string, Tango::CommandInfo> by_name;
     for(const auto &c : *commands)
         by_name[c.cmd_name] = c;
-    CHECK_FALSE(by_name.contains("BulkOpen"));
+    CHECK_FALSE(by_name.contains("UcxOpen"));
     REQUIRE(by_name.contains("StreamOpen"));
     REQUIRE(by_name.contains("StreamClose"));
     for(auto [name, marker] : {std::pair{"StreamOpen", wire::k_open_marker},
@@ -163,7 +163,7 @@ TEST_CASE("every and latest subscriptions receive a device server's frames")
     newest.close(in());
 }
 
-TEST_CASE("BulkClose answers once the session row is free")
+TEST_CASE("UcxClose answers once the session row is free")
 {
     auto proxy = device(); // two session rows
     auto first = every(proxy);
@@ -179,18 +179,18 @@ TEST_CASE("BulkClose answers once the session row is free")
     second.close(in());
 }
 
-TEST_CASE("the bulk attributes describe the stream and its sessions")
+TEST_CASE("the UCX attributes describe the stream and its sessions")
 {
     auto proxy = device();
-    auto offer = transport::parse_bulk_stream(attribute<std::string>(proxy, "BulkStream"));
+    auto offer = transport::parse_ucx_stream(attribute<std::string>(proxy, "UcxStream"));
     CHECK(offer.description.element == Element::U8);
     CHECK(offer.description.shape == std::vector<std::uint64_t>{4096});
     CHECK(offer.description.field_bytes == 8);
     CHECK(offer.description.field_dtype == "<u8");
     CHECK(offer.limits.allow_every);
     CHECK(offer.limits.max_sessions == 2);
-    for(auto name : {"BulkStream", "BulkSessions", "BulkPublished", "BulkSkipped", "BulkPressure",
-                     "BulkFailedEvery"})
+    for(auto name :
+        {"UcxStream", "UcxSessions", "UcxPublished", "UcxSkipped", "UcxPressure", "UcxFailedEvery"})
         CHECK_FALSE(proxy.attribute_query(name).description.empty());
 
     auto sub = every(proxy, {.label = "archiver"});
@@ -200,19 +200,19 @@ TEST_CASE("the bulk attributes describe the stream and its sessions")
         proxy, [&](auto d)
         { return (doc = d)["sessions"].size() == 1 && doc["sessions"][0]["sent"] == 3; }, in()));
     INFO(doc.dump());
-    CHECK(doc["interface"] == "tango-bulk-sessions/3.0");
+    CHECK(doc["interface"] == "tango-ucx-sessions/3.0");
     CHECK(doc["incarnation"] == offer.incarnation);
     auto row = doc["sessions"][0];
     CHECK((row["ordinal"] == 1 && row["label"] == "archiver" && row["delivery"] == "every" &&
            row["state"] == "ready" && row["skipped"] == 0));
-    CHECK(attribute<Tango::DevULong64>(proxy, "BulkPublished") == 3);
-    CHECK(attribute<Tango::DevULong64>(proxy, "BulkSkipped") == 0);
-    CHECK(attribute<Tango::DevULong>(proxy, "BulkPressure") == 0);
-    CHECK(attribute<Tango::DevULong>(proxy, "BulkFailedEvery") == 0);
+    CHECK(attribute<Tango::DevULong64>(proxy, "UcxPublished") == 3);
+    CHECK(attribute<Tango::DevULong64>(proxy, "UcxSkipped") == 0);
+    CHECK(attribute<Tango::DevULong>(proxy, "UcxPressure") == 0);
+    CHECK(attribute<Tango::DevULong>(proxy, "UcxFailedEvery") == 0);
     sub.close(in());
 }
 
-TEST_CASE("detach_publisher waits for the bulk commands inside the publisher")
+TEST_CASE("detach_publisher waits for the UCX commands inside the publisher")
 {
     auto proxy = device();
     auto before = incarnation(proxy);
@@ -239,7 +239,7 @@ TEST_CASE("detach_publisher waits for the bulk commands inside the publisher")
             }
             catch(const Tango::DevFailed &e)
             {
-                if(std::string(e.errors[0].reason) == "BulkUnavailable")
+                if(std::string(e.errors[0].reason) == "UcxUnavailable")
                     ++unavailable;
                 else
                     ++other;
@@ -319,7 +319,7 @@ TEST_CASE("a sequencer whose archiver never joins does not start the capture")
     CHECK(sessions_until(proxy, [&](auto d) { return ready(d, now, {"fast", "steady"}); }, in()));
     CHECK_FALSE(sessions_until(
         proxy, [&](auto d) { return ready(d, now, {"fast", "steady", "slow"}); }, in(2s)));
-    CHECK(attribute<Tango::DevULong64>(proxy, "BulkPublished") == 0);
+    CHECK(attribute<Tango::DevULong64>(proxy, "UcxPublished") == 0);
     proxy.command_inout("Finish");
     for(auto *a : {&fast, &steady})
     {

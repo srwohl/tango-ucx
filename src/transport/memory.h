@@ -1,15 +1,15 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
-#include <tango-bulk/bulk.h>
+#include <tango-ucx/ucx.h>
 #include <ucp/api/ucp.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 
-namespace TangoBulk::transport
+namespace TangoUcx::transport
 {
 struct Offer;
 struct Sizes
@@ -82,4 +82,4 @@ class Region
 std::uint64_t pinned_bytes() noexcept;
 struct GpuRuntime;
 GpuRuntime *gpu_runtime() noexcept; // the registered one; null when none is linked
-} // namespace TangoBulk::transport
+} // namespace TangoUcx::transport

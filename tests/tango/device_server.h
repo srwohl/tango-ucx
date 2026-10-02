@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace TangoBulk::test
+namespace TangoUcx::test
 {
 // fixture_device as a separate -nodb device server process, one per test process, stopped by the
 // static destructor.
@@ -69,24 +69,24 @@ class DeviceServer
             // Readiness goes out on descriptor 3: Util::init() takes std::cout over.
             ::close(fds[0]);
             ::dup2(fds[1], 3);
-            std::vector<std::string> args{TANGO_BULK_FIXTURE_DEVICE,
+            std::vector<std::string> args{TANGO_UCX_FIXTURE_DEVICE,
                                           "test",
                                           "-nodb",
                                           "-dlist",
-                                          "test/bulk/1",
+                                          "test/ucx/1",
                                           "-ORBendPoint",
                                           "giop:tcp:127.0.0.1:" + std::to_string(port)};
             std::vector<char *> argv;
             for(auto &a : args)
                 argv.push_back(a.data());
             argv.push_back(nullptr);
-            ::execv(TANGO_BULK_FIXTURE_DEVICE, argv.data());
+            ::execv(TANGO_UCX_FIXTURE_DEVICE, argv.data());
             ::_exit(127);
         }
         ::close(fds[1]);
         await_ready(fds[0]);
         ::close(fds[0]);
-        device_ = "127.0.0.1:" + std::to_string(port) + "/test/bulk/1#dbase=no";
+        device_ = "127.0.0.1:" + std::to_string(port) + "/test/ucx/1#dbase=no";
     }
     ~DeviceServer()
     {
@@ -127,4 +127,4 @@ class DeviceServer
     pid_t pid_ = -1;
     std::string device_;
 };
-} // namespace TangoBulk::test
+} // namespace TangoUcx::test

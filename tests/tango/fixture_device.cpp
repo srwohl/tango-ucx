@@ -1,6 +1,6 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
-#include <tango-bulk/tango.h>
+#include <tango-ucx/tango.h>
 
 #include <tango/tango.h>
 
@@ -14,10 +14,10 @@
 
 namespace
 {
-using namespace TangoBulk;
+using namespace TangoUcx;
 
 // Publishes frames of 4,096 bytes, each filled with its frame index's low byte, and the index
-// as its one application field. The bulk commands are installed as StreamOpen and StreamClose.
+// as its one application field. The UCX commands are installed as StreamOpen and StreamClose.
 class Device : public TANGO_BASE_CLASS
 {
   public:
@@ -35,16 +35,16 @@ class Device : public TANGO_BASE_CLASS
         limits.budget = 16ull << 20;
         limits.max_sessions = sessions;
         limits.allow_every = true;
-        bulk.emplace(Description{Element::U8, {4096}, 8, "<u8"}, limits);
+        publisher.emplace(Description{Element::U8, {4096}, 8, "<u8"}, limits);
         next = 0;
-        attach_publisher(*this, *bulk);
+        attach_publisher(*this, *publisher);
         set_state(Tango::ON);
     }
     void delete_device() override
     {
         frames = {};
         detach_publisher(*this);
-        bulk.reset();
+        publisher.reset();
     }
     void publish(Slot &slot)
     {
@@ -55,11 +55,12 @@ class Device : public TANGO_BASE_CLASS
     }
     Tango::DevLong publish(Tango::DevLong n)
     {
-        bulk->bulk_start();
+        publisher->ucx_start();
         Tango::DevLong done = 0;
         for(; done < n; ++done)
         {
-            auto slot = bulk->acquire(std::chrono::steady_clock::now() + std::chrono::seconds(1));
+            auto slot =
+                publisher->acquire(std::chrono::steady_clock::now() + std::chrono::seconds(1));
             if(!slot)
                 break;
             publish(*slot);
@@ -70,10 +71,10 @@ class Device : public TANGO_BASE_CLASS
     // one get End, and five seconds to close their sessions.
     void prepare(Tango::DevLong rows)
     {
-        bulk->finish();
+        publisher->finish();
         auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-        for(auto h = bulk->health(); h.every + h.latest && std::chrono::steady_clock::now() < until;
-            h = bulk->health())
+        for(auto h = publisher->health();
+            h.every + h.latest && std::chrono::steady_clock::now() < until; h = publisher->health())
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         delete_device();
         sessions = std::uint32_t(rows);
@@ -83,18 +84,18 @@ class Device : public TANGO_BASE_CLASS
     // the incarnation.
     void start(Tango::DevLong n)
     {
-        bulk->bulk_start();
+        publisher->ucx_start();
         frames = std::jthread(
             [this, n](std::stop_token stop)
             {
                 for(Tango::DevLong i = 0; i < n && !stop.stop_requested();)
-                    if(auto slot = bulk->acquire(std::chrono::steady_clock::now() +
-                                                 std::chrono::milliseconds(100)))
+                    if(auto slot = publisher->acquire(std::chrono::steady_clock::now() +
+                                                      std::chrono::milliseconds(100)))
                         publish(*slot), ++i;
-                bulk->finish();
+                publisher->finish();
             });
     }
-    std::optional<Publisher> bulk;
+    std::optional<Publisher> publisher;
     std::uint64_t next = 0;
     std::uint32_t sessions = 2;
     std::jthread frames;
@@ -118,7 +119,7 @@ class Command : public Tango::Command
 class DeviceClass : public Tango::DeviceClass
 {
   public:
-    DeviceClass() : Tango::DeviceClass(std::string("BulkFixture")) {}
+    DeviceClass() : Tango::DeviceClass(std::string("UcxFixture")) {}
     void command_factory() override
     {
         command_list.push_back(new Command("Publish", Tango::DEV_LONG, Tango::DEV_LONG,
@@ -131,7 +132,7 @@ class DeviceClass : public Tango::DeviceClass
         command_list.push_back(new Command("Finish", Tango::DEV_VOID, Tango::DEV_VOID,
                                            [](Command &c, Device &d, const CORBA::Any &)
                                            {
-                                               d.bulk->finish();
+                                               d.publisher->finish();
                                                return c.insert();
                                            }));
         command_list.push_back(new Command("Prepare", Tango::DEV_LONG, Tango::DEV_VOID,
@@ -150,11 +151,11 @@ class DeviceClass : public Tango::DeviceClass
                                                d.start(n);
                                                return c.insert();
                                            }));
-        install_bulk_commands(command_list, "Stream");
+        install_ucx_commands(command_list, "Stream");
     }
     void attribute_factory(std::vector<Tango::Attr *> &list) override
     {
-        install_bulk_attributes(list);
+        install_ucx_attributes(list);
     }
     void device_factory(const Tango::DevVarStringArray *names) override
     {
@@ -187,7 +188,7 @@ int main(int argc, char *argv[])
             [](Tango::DeviceClass *c, const std::string &name, const std::string &description,
                Tango::DevState state, const std::string &status) -> Tango::DServer *
             { return new Server(c, name.c_str(), description.c_str(), state, status.c_str()); });
-        // Bulk commands run concurrently with Prepare, so detach_publisher's wait is exercised.
+        // UCX commands run concurrently with Prepare, so detach_publisher's wait is exercised.
         util->set_serial_model(Tango::NO_SYNC);
         util->server_init();
         (void)!::write(3, "READY\n", 6);

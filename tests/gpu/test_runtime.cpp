@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -14,8 +14,8 @@
 #include <thread>
 #include <vector>
 
-using namespace TangoBulk;
-using namespace TangoBulk::transport;
+using namespace TangoUcx;
+using namespace TangoUcx::transport;
 using Catch::Matchers::ContainsSubstring;
 
 namespace
@@ -23,7 +23,7 @@ namespace
 constexpr std::size_t k_bytes = 1 << 20;
 GpuRuntime &runtime()
 {
-    REQUIRE(gpu_runtime() != nullptr); // linking tango-bulk-cuda registered it
+    REQUIRE(gpu_runtime() != nullptr); // linking tango-ucx-cuda registered it
     return *gpu_runtime();
 }
 GpuEventState settled(GpuRuntime &rt, GpuEvent e)

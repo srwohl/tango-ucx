@@ -1,8 +1,8 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
-#include <tango-bulk/bulk.h>
+#include <tango-ucx/ucx.h>
 #include <transport.h>
 #include <wire.h>
 
@@ -14,13 +14,13 @@
 #include <stdexcept>
 #include <thread>
 
-namespace TangoBulk::test
+namespace TangoUcx::test
 {
 inline auto deadline(std::chrono::seconds n = std::chrono::seconds(5))
 {
     return std::chrono::steady_clock::now() + n;
 }
-// Health and BulkSessions are sampled every 256 loop turns: poll until `done` or the deadline.
+// Health and UcxSessions are sampled every 256 loop turns: poll until `done` or the deadline.
 template <class Done> bool eventually(Done done, std::chrono::seconds s = std::chrono::seconds(10))
 {
     for(auto until = deadline(s); !done();
@@ -29,10 +29,10 @@ template <class Done> bool eventually(Done done, std::chrono::seconds s = std::c
             return done();
     return true;
 }
-// The sessions the BulkSessions document lists.
+// The sessions the UcxSessions document lists.
 inline nlohmann::json sessions(const Publisher &publisher)
 {
-    return nlohmann::json::parse(transport::bulk_sessions(publisher)).at("sessions");
+    return nlohmann::json::parse(transport::ucx_sessions(publisher)).at("sessions");
 }
 // A numeric field of the first session, such as "room"; ~0 when there is no session.
 inline std::uint64_t first_row(const Publisher &publisher, const char *key)
@@ -60,10 +60,10 @@ inline SubscriptionOptions small_options()
     o.max_wait = std::chrono::microseconds(100);
     return o;
 }
-// What a subscriber learns from the BulkStream attribute.
+// What a subscriber learns from the UcxStream attribute.
 inline transport::Offer offer_of(const Publisher &publisher)
 {
-    return transport::parse_bulk_stream(transport::bulk_stream(publisher));
+    return transport::parse_ucx_stream(transport::ucx_stream(publisher));
 }
 // The slots granted and not yet routed, once the publisher has granted any.
 inline std::uint32_t granted(const Publisher &publisher)
@@ -97,7 +97,7 @@ inline Subscription subscribe(Publisher &publisher, bool every,
 inline void publish_one(Publisher &publisher, std::byte value = std::byte{0x5a},
                         std::uint64_t timestamp = 123)
 {
-    publisher.bulk_start();
+    publisher.ucx_start();
     auto slot = publisher.acquire(deadline());
     if(!slot)
         throw std::runtime_error("publisher did not grant a slot");
@@ -107,4 +107,4 @@ inline void publish_one(Publisher &publisher, std::byte value = std::byte{0x5a},
     std::fill(fields.begin(), fields.end(), std::byte{0x21});
     std::move(*slot).publish(timestamp);
 }
-} // namespace TangoBulk::test
+} // namespace TangoUcx::test

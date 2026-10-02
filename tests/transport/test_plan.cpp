@@ -1,12 +1,12 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <memory.h>
 #include <transport.h>
 
-using namespace TangoBulk;
-using namespace TangoBulk::transport;
+using namespace TangoUcx;
+using namespace TangoUcx::transport;
 
 TEST_CASE("host plans account for fixed slots and reject invalid bounds")
 {

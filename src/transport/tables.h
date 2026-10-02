@@ -1,10 +1,10 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
 #include "memory.h"
 #include "transport.h"
-#include "ucx.h"
+#include "ucp.h"
 #include "wire.h"
 
 #include <algorithm>
@@ -24,7 +24,7 @@
 #include <unistd.h>
 #include <vector>
 
-namespace TangoBulk::transport
+namespace TangoUcx::transport
 {
 struct EventFd
 {
@@ -328,8 +328,8 @@ struct Sub final : Owner
     std::uint64_t session = 0;
     SubscriptionPlan plan;
     std::shared_ptr<Rings> rings;
-    std::unique_ptr<ucx::Context> context;
-    std::unique_ptr<ucx::Worker> worker;
+    std::unique_ptr<ucp::Context> context;
+    std::unique_ptr<ucp::Worker> worker;
     Region receive;
     ucp_ep_h ep = nullptr;
     std::vector<std::byte> recv_ops, ctrl_ops;
@@ -387,4 +387,4 @@ struct Sub final : Owner
     void release_batch(std::uint32_t);
     void cancel_receives();
 };
-} // namespace TangoBulk::transport
+} // namespace TangoUcx::transport

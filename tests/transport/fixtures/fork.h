@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
@@ -12,7 +12,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-namespace TangoBulk::test
+namespace TangoUcx::test
 {
 struct ForkOffer
 {
@@ -105,4 +105,4 @@ struct Forked
         ::close(out());
     }
 };
-} // namespace TangoBulk::test
+} // namespace TangoUcx::test

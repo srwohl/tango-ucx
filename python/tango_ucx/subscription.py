@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+# SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
 import importlib
@@ -11,7 +11,7 @@ from ._async import AsyncSubscription
 
 
 _MAJOR = 3
-_MARKER = re.compile(r"^tango-bulk/([0-9]+) (open|close)$")
+_MARKER = re.compile(r"^tango-ucx/([0-9]+) (open|close)$")
 _BUDGET = re.compile(r"^\s*([0-9]+)\s*(B|KiB|MiB|GiB)\s*$", re.IGNORECASE)
 _MEMORY = re.compile(r"^cuda:(0|[1-9][0-9]*)$")
 _UNITS = {"b": 1, "kib": 1024, "mib": 1024**2, "gib": 1024**3}
@@ -67,17 +67,17 @@ def _commands(proxy, tango):
         if major != _MAJOR:
             other_major = major
             continue
-        if description != f"tango-bulk/{_MAJOR} {role}":
+        if description != f"tango-ucx/{_MAJOR} {role}":
             continue
         if role in found:
-            raise RuntimeError("device has two sets of tango-bulk commands")
+            raise RuntimeError("device has two sets of tango-ucx commands")
         found[role] = command.cmd_name
     if "open" not in found or "close" not in found:
         if other_major is not None:
             raise RuntimeError(
-                f"device speaks tango-bulk/{other_major}; this library speaks tango-bulk/{_MAJOR}"
+                f"device speaks tango-ucx/{other_major}; this library speaks tango-ucx/{_MAJOR}"
             )
-        raise RuntimeError("device has no tango-bulk commands")
+        raise RuntimeError("device has no tango-ucx commands")
     return found["open"], found["close"]
 
 
@@ -120,11 +120,11 @@ def _subscribe(
     tango = _tango()
     proxy = _device_proxy(device, tango)
     open_name, close_name = _commands(proxy, tango)
-    stream = proxy.read_attribute("BulkStream").value
+    stream = proxy.read_attribute("UcxStream").value
     if not isinstance(stream, str):
-        raise RuntimeError("BulkStream is not a JSON string")
+        raise RuntimeError("UcxStream is not a JSON string")
 
-    _core = importlib.import_module("tango_bulk._core")
+    _core = importlib.import_module("tango_ucx._core")
 
     pending = _core.prepare(
         stream,

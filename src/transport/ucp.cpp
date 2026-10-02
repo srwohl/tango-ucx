@@ -1,6 +1,6 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
-#include "ucx.h"
+#include "ucp.h"
 
 #include <ucm/api/ucm.h>
 
@@ -10,7 +10,7 @@
 #include <mutex>
 #include <stdexcept>
 
-namespace TangoBulk::transport::ucx
+namespace TangoUcx::transport::ucp
 {
 void check(ucs_status_t s, const char *what)
 {
@@ -24,7 +24,7 @@ Context::Context()
     if(major < 1 || (major == 1 && minor < 21))
         throw std::runtime_error("UCX 1.21 or newer is required");
     ucp_config_t *cfg = nullptr;
-    check(ucp_config_read("TANGO_BULK", nullptr, &cfg), "ucp_config_read");
+    check(ucp_config_read("TANGO_UCX", nullptr, &cfg), "ucp_config_read");
     auto st = ucp_config_modify(cfg, "MM_ERROR_HANDLING", "y");
     if(st != UCS_OK)
     {
@@ -180,4 +180,4 @@ bool Worker::only_tcp(ucp_ep_h ep) const
             return false;
     return true;
 }
-} // namespace TangoBulk::transport::ucx
+} // namespace TangoUcx::transport::ucp

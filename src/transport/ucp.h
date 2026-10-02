@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-bulk project
+// SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #pragma once
 
@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <span>
 
-namespace TangoBulk::transport::ucx
+namespace TangoUcx::transport::ucp
 {
 class Context
 {
@@ -72,4 +72,4 @@ class Worker
     std::size_t address_bytes_ = 0, max_am_header_ = 0;
 };
 void check(ucs_status_t, const char *);
-} // namespace TangoBulk::transport::ucx
+} // namespace TangoUcx::transport::ucp
