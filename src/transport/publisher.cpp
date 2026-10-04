@@ -512,13 +512,13 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     bool held_device = ((every_mask | pull_mask) & bit) != 0;
     if(row.ready)
         ready_mask &= ~bit;
-    // A puller that ends before its End: what was in its ring is missing, for no frame is sent
-    // twice. Its ranges go to the pullers that are left. A set that empties before the start is
-    // no set.
+    // A puller left before it was sent End. Frames it received but did not release are counted
+    // as missing, because a frame is never sent twice.
     if(pull_mask & bit && !row.end_sent)
         missing += row.sent - row.credited;
     every_mask &= ~bit;
     pull_mask &= ~bit;
+    // With no pullers left before the start, clear the range. The stream then has no pull set.
     if(!pull_mask && !started.load(std::memory_order_acquire))
         range_frames = 0;
     if(failed && held_device)
@@ -550,23 +550,23 @@ bool Pub::control_pass()
             const auto &open_message = *entry.in.open;
             wire::Status status = wire::Ok;
             std::uint32_t row_index = plan.row_count;
-            bool holds = open_message.every ||
-                         open_message.range; // an every row or a puller: it can hold the device
+            // An every subscription or a puller can make the device wait.
+            bool holds_device = open_message.every || open_message.range;
             if(open_message.instance_id != instance_id)
                 status = wire::InstanceId;
             else if(finishing.load())
                 status = wire::Finished;
-            else if(holds && !limits.allow_every)
+            else if(holds_device && !limits.allow_every)
                 status = wire::EveryRefused;
-            else if(holds && started.load(std::memory_order_acquire))
-                status = wire::Started; // an every row and a puller join before the first grant
+            else if(holds_device && started.load(std::memory_order_acquire))
+                status = wire::Started; // every and pull must join before the start
             else if(find_row(open_message.session) >= 0 ||
                     (plan.sizes.opaque && open_message.ring_bytes < 2 * plan.sizes.frame_bytes))
-                status = wire::Malformed; // a packed ring holds a frame and its wrap at least
+                status = wire::Malformed; // a duplicate session, or a ring under two frames
             else if(open_message.range && (open_message.range % open_message.batch ||
                                            open_message.range > open_message.depth ||
                                            (pull_mask && open_message.range != range_frames)))
-                status = wire::Range; // whole batches, within its ring, and the set's
+                status = wire::Range; // must be whole batches, fit the ring, and match the set
             else
             {
                 for(std::uint32_t i = 0; i < plan.row_count; ++i)
@@ -609,7 +609,7 @@ bool Pub::control_pass()
                 control.reply(entry, {wire::Endpoint});
                 return;
             }
-            // The subscriber registered its rings and handlers before Open: it is ready now.
+            // The subscriber set up its ring and handlers before it sent Open, so it is ready now.
             row.ready = true;
             row.transport.n = std::uint8_t(worker->transports(row.ep, row.transport.c));
             ready_mask |= std::uint64_t{1} << row_index;
@@ -626,15 +626,14 @@ bool Pub::control_pass()
             auto address = worker->address();
             reply.address_bytes = std::uint16_t(address.size());
             std::memcpy(reply.address.data(), address.data(), address.size());
+            // The subscriber gave up waiting for the reply, so nobody will use the session.
             if(!control.reply(entry, reply))
-                retire(row_index, wire::Closing,
-                       false); // its caller gave up: nobody will use the session
+                retire(row_index, wire::Closing, false);
         });
 }
-// The grant ring is first in, first out, so the grants still queued are the newest issued, and
-// the device never saw them. Un-issued, they use no frame index and their slots are free at once.
-// Each ready every row reserved room for each of them: every rows join before the first grant.
-// So did the puller of each one's frame index, and they were to have the last frame indices.
+// Takes back the grants the device never picked up, after finish(). The grant ring is first in,
+// first out, so the grants still in it are the newest. Their slots become free, and the room
+// that every subscriptions and pullers reserved for them is released.
 void Pub::unissue_grants()
 {
     std::lock_guard lock(grants.m);
@@ -664,8 +663,8 @@ bool Pub::route_pass(std::int64_t now)
             break;
         slot.posted.store(false, std::memory_order_relaxed);
         slot.held = false;
-        // The frame's puller. A cancelled slot uses no frame index: every grant after it is for
-        // the index before, and the puller of the last index granted has one grant fewer.
+        // The puller this frame goes to. A cancelled slot uses no frame index, so every later
+        // grant moves down by one, and the puller of the newest granted index loses one grant.
         auto *to_puller =
             range_frames ? puller(slot.cancel ? next_frame_index + slots_granted - slots_routed - 1
                                               : next_frame_index)
@@ -683,8 +682,8 @@ bool Pub::route_pass(std::int64_t now)
             wire::put64(records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride + 8,
                         slot.timestamp);
             ++next_frame_index;
-            // Its range's puller has gone and no other could take the range: a puller with room
-            // for one more takes the frame, and with none it is missing.
+            // The range's puller is gone and no other puller could take the whole range. Any
+            // puller with room for one more frame takes this one. If none has room, it is missing.
             for(std::uint32_t row_index = 0;
                 range_frames && !to_puller && row_index < plan.row_count; ++row_index)
                 if(pull_mask >> row_index & 1 && has_room(rows[row_index]))
@@ -698,7 +697,7 @@ bool Pub::route_pass(std::int64_t now)
                 if(!row.ready || row.closing)
                     continue;
                 if(every_mask & bit || &row == to_puller)
-                    recipients |= bit; // it joined before the first grant
+                    recipients |= bit; // room was reserved for it when the slot was granted
                 else if(!row.pull && row.sent - row.credited < row.ring_depth &&
                         row.in_flight == 0 && now - row.last_send_ns >= row.min_interval_ns &&
                         (!row.ring_bytes ||
@@ -732,7 +731,7 @@ bool Pub::route_pass(std::int64_t now)
     }
     if(!ended)
         return work;
-    // A puller's End says what the set lost, so it waits until no puller has a frame in flight.
+    // A puller's End reports the set's missing count, so it waits until no puller is sending.
     bool sending = false;
     for(const auto &row : rows)
         sending |= row.pull && row.ready && row.in_flight;
