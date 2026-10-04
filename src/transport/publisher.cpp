@@ -38,7 +38,7 @@ struct PubRow
          end_sent = false, gpu = false, pull = false;
     bool flush_started = false, flush_done = false, close_started = false, close_done = false;
     wire::Reason reason = wire::FinishedReason;
-    std::int64_t close_started_ns = 0;
+    std::int64_t retired_ns = 0;
     ControlEntry *close_reply = nullptr;
 };
 struct RowObservation
@@ -72,7 +72,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::unique_ptr<SourceSlot[]> slots;
     std::vector<std::uint16_t> order;
     std::array<PubRow, 64> rows{};
-    std::uint64_t ready_mask = 0, every_mask = 0, retiring_mask = 0;
+    std::uint64_t ready_mask = 0, every_mask = 0;
     // A set of pullers: its rows, the frames of a range, the ranges given out so far, the row
     // each of the latest went to, the row that took the last, and the frames no puller received.
     std::uint64_t pull_mask = 0, ranges_taken = 0, missing = 0;
@@ -114,6 +114,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     void publish_health();
     void retire(std::uint32_t, wire::Reason, bool failed = false);
     void send_end(std::uint32_t);
+    void start_teardown(std::uint32_t, OpKind, bool force = false);
     void send_frame(std::uint32_t, std::uint32_t, std::int64_t);
     void send_control(std::uint32_t, OpKind, std::uint8_t, std::span<const std::byte>);
     void on_send(OpMeta *, ucs_status_t);
@@ -414,6 +415,30 @@ void Pub::send_end(std::uint32_t row_index)
     send_control(row_index, OpKind::End, wire::End, encoded);
     row.end_sent = true;
 }
+// Starts the flush or the close of a retiring row's endpoint. A forced close does not wait for
+// the subscriber.
+void Pub::start_teardown(std::uint32_t row_index, OpKind kind, bool force)
+{
+    assert(kind == OpKind::Flush || kind == OpKind::Close);
+    assert(!force || kind == OpKind::Close);
+    auto &operation = *operations.control(row_index, kind);
+    if(operation.in_flight)
+        return;
+    operation.in_flight = true;
+    auto &row = rows[row_index];
+    (kind == OpKind::Flush ? row.flush_started : row.close_started) = true;
+    ucp_request_param_t params{};
+    params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
+                          UCP_OP_ATTR_FIELD_USER_DATA | (force ? UCP_OP_ATTR_FIELD_FLAGS : 0);
+    params.request = &operation;
+    params.cb.send = send_cb;
+    params.user_data = &operation;
+    params.flags = force ? UCP_EP_CLOSE_FLAG_FORCE : 0;
+    auto *request = kind == OpKind::Flush ? ucp_ep_flush_nbx(row.ep, &params)
+                                          : ucp_ep_close_nbx(row.ep, &params);
+    if(!UCS_PTR_IS_PTR(request))
+        on_control(&operation, UCS_PTR_STATUS(request));
+}
 
 void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int64_t now)
 {
@@ -533,9 +558,8 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     row.ready = false;
     row.closing = true;
     row.reason = why;
-    row.close_started_ns = now_ns();
+    row.retired_ns = now_ns();
     row.end_due = why != wire::FinishedReason && why != wire::Closing;
-    retiring_mask |= bit;
 }
 // Why an Open is refused, or Ok. The checks run in order and the first that fails decides.
 wire::Status Pub::check_open(const wire::OpenMessage &open_message) const
@@ -834,64 +858,19 @@ bool Pub::retire_pass(std::int64_t now)
             work = true;
             continue;
         }
-        bool late = now - row.close_started_ns > k_close_ns;
-        if(row.ep && !row.close_started && late)
+        bool late = now - row.retired_ns > k_close_ns;
+        bool unclosed = row.ep && !row.close_started, idle = row.in_flight == 0;
+        // A flush follows the row's last send and a close follows the flush. A late row is
+        // closed by force, whatever it still has in flight.
+        if(unclosed && (late || (row.flush_done && idle)))
         {
-            auto *operation = operations.control(row_index, OpKind::Close);
-            if(!operation->in_flight)
-            {
-                operation->in_flight = true;
-                ucp_request_param_t params{};
-                params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
-                                      UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_FLAGS;
-                params.request = operation;
-                params.cb.send = send_cb;
-                params.user_data = operation;
-                params.flags = UCP_EP_CLOSE_FLAG_FORCE;
-                row.close_started = true;
-                auto *request = ucp_ep_close_nbx(row.ep, &params);
-                if(!UCS_PTR_IS_PTR(request))
-                    on_control(operation, UCS_PTR_STATUS(request));
-                work = true;
-            }
+            start_teardown(row_index, OpKind::Close, late);
+            work = true;
         }
-        else if(row.ep && !row.close_started && !row.flush_started && row.in_flight == 0)
+        else if(unclosed && !row.flush_started && idle)
         {
-            auto *operation = operations.control(row_index, OpKind::Flush);
-            if(!operation->in_flight)
-            {
-                operation->in_flight = true;
-                ucp_request_param_t params{};
-                params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
-                                      UCP_OP_ATTR_FIELD_USER_DATA;
-                params.request = operation;
-                params.cb.send = send_cb;
-                params.user_data = operation;
-                row.flush_started = true;
-                auto *request = ucp_ep_flush_nbx(row.ep, &params);
-                if(!UCS_PTR_IS_PTR(request))
-                    on_control(operation, UCS_PTR_STATUS(request));
-                work = true;
-            }
-        }
-        else if(row.ep && row.flush_done && !row.close_started && !row.in_flight)
-        {
-            auto *operation = operations.control(row_index, OpKind::Close);
-            if(!operation->in_flight)
-            {
-                operation->in_flight = true;
-                ucp_request_param_t params{};
-                params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
-                                      UCP_OP_ATTR_FIELD_USER_DATA;
-                params.request = operation;
-                params.cb.send = send_cb;
-                params.user_data = operation;
-                row.close_started = true;
-                auto *request = ucp_ep_close_nbx(row.ep, &params);
-                if(!UCS_PTR_IS_PTR(request))
-                    on_control(operation, UCS_PTR_STATUS(request));
-                work = true;
-            }
+            start_teardown(row_index, OpKind::Flush);
+            work = true;
         }
         if(row.close_done && row.in_flight == 0 &&
            !operations.control(row_index, OpKind::Flush)->in_flight &&
@@ -906,10 +885,9 @@ bool Pub::retire_pass(std::int64_t now)
             row.closing = false;
             row.end_due = false;
             row.end_sent = false;
-            retiring_mask &= ~(std::uint64_t{1} << row_index);
             work = true;
         }
-        else if(row.close_started && now - row.close_started_ns > k_close_ns + k_quarantine_ns)
+        else if(row.close_started && now - row.retired_ns > k_close_ns + k_quarantine_ns)
         {
             quarantine_owner();
             return work;
