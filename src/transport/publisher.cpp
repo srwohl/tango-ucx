@@ -79,7 +79,8 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::uint32_t range_frames = 0;
     std::vector<std::uint8_t> range_pullers;
     std::uint8_t last_taker = 63;
-    std::uint64_t slots_granted = 0, slots_routed = 0, next_frame_index = 0, skipped = 0, turn = 0;
+    std::uint64_t slots_granted = 0, slots_routed = 0, next_frame_index = 0, skipped = 0;
+    std::int64_t last_timer_ns = 0;
     std::uint32_t scan = 0, failed_every = 0, blocked = 0, ordinals = 0;
     IndexRing grants;
     ControlTable control;
@@ -123,6 +124,8 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
 namespace
 {
 constexpr std::int64_t k_close_ns = 2'000'000'000LL, k_quarantine_ns = 1'000'000'000LL;
+// How often eviction is checked and Health is sampled.
+constexpr std::int64_t k_timer_ns = 1'000'000LL;
 std::int64_t now_ns()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -263,8 +266,11 @@ void Pub::run()
         work |= worker->progress() != 0;
         work |= grant_pass();
         work |= retire_pass(now);
-        if(++turn % 256 == 0)
+        if(now - last_timer_ns >= k_timer_ns)
+        {
+            last_timer_ns = now;
             timer_pass(now);
+        }
         idle = work ? 0 : idle + 1;
         if(idle > 64)
         {
