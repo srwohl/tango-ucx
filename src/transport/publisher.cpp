@@ -27,7 +27,7 @@ struct PubRow
     std::uint32_t ordinal = 0;
     ucp_ep_h ep = nullptr;
     ucs_status_t transport_error = UCS_OK;
-    std::uint64_t id = 0, sent = 0, credited = 0, skipped = 0, passes = 0;
+    std::uint64_t session = 0, sent = 0, credited = 0, skipped = 0, passes = 0;
     // An opaque stream's packed ring, and where its last sent and last credited frames end.
     std::uint64_t ring_bytes = 0, sent_bytes = 0, credited_bytes = 0;
     std::uint32_t ring_depth = 0, in_flight = 0, reserved = 0;
@@ -276,12 +276,12 @@ void Pub::run()
 }
 std::uint64_t Pub::id_for(std::uint32_t row_index) const
 {
-    return rows[row_index].id;
+    return rows[row_index].session;
 }
-int Pub::find_row(std::uint64_t id) const
+int Pub::find_row(std::uint64_t session) const
 {
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-        if(rows[row_index].used && rows[row_index].id == id)
+        if(rows[row_index].used && rows[row_index].session == session)
             return int(row_index);
     return -1;
 }
@@ -401,7 +401,7 @@ void Pub::send_control(std::uint32_t row_index, OpKind kind, std::uint8_t messag
 void Pub::send_end(std::uint32_t row_index)
 {
     auto &row = rows[row_index];
-    wire::EndMessage end_message{row.id, row.sent, next_frame_index, row.reason,
+    wire::EndMessage end_message{row.session, row.sent, next_frame_index, row.reason,
                                  row.pull ? missing : 0};
     auto encoded = wire::encode(end_message);
     send_control(row_index, OpKind::End, wire::End, encoded);
@@ -411,17 +411,16 @@ void Pub::send_end(std::uint32_t row_index)
 void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int64_t now)
 {
     auto &row = rows[row_index];
+    auto &slot = slots[slot_index];
     auto &operation = *operations.frame(slot_index, row_index);
     auto *record = records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride;
     wire::FrameMessage frame_message{};
-    frame_message.session = row.id;
+    frame_message.session = row.session;
     frame_message.sequence = row.sent;
-    frame_message.payload_bytes = slots[slot_index].payload_bytes;
+    frame_message.payload_bytes = slot.payload_bytes;
     frame_message.packed = row.ring_bytes != 0; // the publisher places the frame, and says where
     frame_message.position =
-        frame_message.packed
-            ? place(row.sent_bytes, slots[slot_index].payload_bytes, row.ring_bytes)
-            : 0;
+        row.ring_bytes ? place(row.sent_bytes, slot.payload_bytes, row.ring_bytes) : 0;
     frame_message.index = wire::get64(record);
     frame_message.timestamp_ns = wire::get64(record + 8);
     frame_message.record_bytes = plan.sizes.padded_field_bytes;
@@ -438,9 +437,9 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     row.last_send_ns = now;
     ++row.sent;
     if(row.ring_bytes)
-        row.sent_bytes = frame_message.position + slots[slot_index].payload_bytes;
+        row.sent_bytes = frame_message.position + slot.payload_bytes;
     ++row.in_flight;
-    ++slots[slot_index].sends;
+    ++slot.sends;
     ucp_request_param_t params{};
     params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
                           UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMH |
@@ -453,7 +452,7 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     params.memory_type = UCS_MEMORY_TYPE_HOST;
     auto *request = ucp_am_send_nbx(row.ep, wire::Frame, header.data(), header_bytes,
                                     source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
-                                    slots[slot_index].payload_bytes, &params);
+                                    slot.payload_bytes, &params);
     if(!UCS_PTR_IS_PTR(request))
         on_send(&operation, UCS_PTR_STATUS(request));
 }
@@ -601,7 +600,7 @@ bool Pub::control_pass()
             row.ring_depth = open_message.depth;
             row.ring_bytes = plan.sizes.opaque ? open_message.ring_bytes : 0;
             row.gpu = open_message.gpu;
-            row.id = open_message.session;
+            row.session = open_message.session;
             row.min_interval_ns =
                 std::int64_t(std::min<std::uint64_t>(open_message.min_interval_ns, INT64_MAX));
             row.label.set({open_message.label.data(), open_message.label_bytes});
@@ -627,7 +626,7 @@ bool Pub::control_pass()
                 pull_mask |= std::uint64_t{1} << row_index;
                 range_frames = open_message.range;
             }
-            auto encoded = wire::encode(wire::SessionMessage{row.id});
+            auto encoded = wire::encode(wire::SessionMessage{row.session});
             send_control(row_index, OpKind::Ready, wire::Ready, encoded);
             wire::Reply reply{wire::Ok};
             auto address = worker->address();
