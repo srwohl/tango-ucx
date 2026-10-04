@@ -369,8 +369,9 @@ void Pub::cancel_slot(std::uint32_t slot_index)
 {
     if(slot_index < plan.slot_count)
     {
-        slots[slot_index].cancel = true;
-        slots[slot_index].posted.store(true, std::memory_order_release);
+        auto &slot = slots[slot_index];
+        slot.cancel = true;
+        slot.posted.store(true, std::memory_order_release);
     }
 }
 
@@ -942,10 +943,10 @@ void Pub::publish_health()
     observation.missing = missing;
     observation.failed_every = failed_every;
     observation.pressure_from = grants.empty() && blocked ? rows[blocked - 1].ordinal : 0;
-    for(std::uint32_t slot_index = 0; slot_index < plan.slot_count; ++slot_index)
+    for(const auto &slot : std::span(slots.get(), plan.slot_count))
     {
-        observation.slots_free += !slots[slot_index].held && slots[slot_index].sends == 0;
-        observation.slots_held += slots[slot_index].held;
+        observation.slots_free += !slot.held && slot.sends == 0;
+        observation.slots_held += slot.held;
     }
     observation.memory_hooks = context->memory_hooks();
     // The frames a row can still be granted: rows of its tables and, in a packed ring, bytes.
