@@ -357,9 +357,9 @@ void Sub::begin()
         ep =
             worker->endpoint({open_reply.address.data(), open_reply.address_bytes}, this, ep_error);
     }
-    catch(...)
+    catch(const std::exception &error)
     {
-        fail("could not create an endpoint to the publisher");
+        fail(std::format("could not create an endpoint to the publisher: {}", error.what()));
     }
 }
 SubOpMeta *Sub::recv_op(std::uint32_t k)
@@ -838,7 +838,10 @@ Subscription PendingSubscription::start(std::string_view reply, Deadline d, Clos
     if(!wire::parse(reply, m))
         throw std::runtime_error("invalid reply to Open");
     if(m.status != wire::Ok)
-        throw std::runtime_error(status_text(m.status));
+    {
+        std::string detail(m.detail.data(), m.detail_bytes);
+        throw std::runtime_error(status_text(m.status) + (detail.empty() ? "" : ": " + detail));
+    }
     // The Open was accepted, so the publisher holds a row: a failure from here on closes the
     // session. A reply without an address fails at the endpoint.
     s.reply_promise.set_value(m);

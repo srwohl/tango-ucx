@@ -606,10 +606,14 @@ bool Pub::control_pass()
                 row.ep = worker->endpoint({open_message.address.data(), open_message.address_bytes},
                                           &row, ep_error);
             }
-            catch(...)
+            catch(const std::exception &error)
             {
                 row.used = false;
-                control.reply(entry, {wire::Endpoint});
+                wire::Reply refused{wire::Endpoint};
+                std::string_view why = error.what();
+                refused.detail_bytes = std::uint8_t(std::min(why.size(), refused.detail.size()));
+                std::memcpy(refused.detail.data(), why.data(), refused.detail_bytes);
+                control.reply(entry, refused);
                 return;
             }
             // The subscriber set up its ring and handlers before it sent Open, so it is ready now.

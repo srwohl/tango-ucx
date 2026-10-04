@@ -185,6 +185,8 @@ std::string format(const Reply &r)
     json j = {{"interface", interface(k_reply)}, {"status", std::string(status_name(r.status))}};
     if(r.status == Ok && r.address_bytes)
         j["address"] = hex({r.address.data(), r.address_bytes});
+    if(r.detail_bytes)
+        j["detail"] = std::string(r.detail.data(), r.detail_bytes);
     return dump(j);
 }
 std::string format(const StreamMessage &m)
@@ -295,7 +297,7 @@ Status parse(std::string_view doc, Request &r)
 bool parse(std::string_view doc, Reply &r)
 {
     auto j = parse_json(doc);
-    std::string_view name, status, address;
+    std::string_view name, status, address, detail;
     if(check_interface(j, name) != Ok || name != k_reply || !string_key(j, "status", 32, status))
         return false;
     r = {};
@@ -303,6 +305,11 @@ bool parse(std::string_view doc, Reply &r)
     if(it == k_status_names.end())
         return false;
     r.status = Status(it - k_status_names.begin());
+    if(string_key(j, "detail", k_max_document, detail))
+    {
+        r.detail_bytes = std::uint8_t(std::min(detail.size(), r.detail.size()));
+        std::memcpy(r.detail.data(), detail.data(), r.detail_bytes);
+    }
     if(!j.contains("address"))
         return true;
     return string_key(j, "address", 2 * k_max_address, address) &&

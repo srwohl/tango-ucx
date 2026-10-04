@@ -20,6 +20,7 @@ inline constexpr std::size_t k_max_document = 16 * 1024;
 inline constexpr std::size_t k_max_text = 2048;
 inline constexpr std::size_t k_max_address = 4096;
 inline constexpr std::size_t k_max_label = 64;
+inline constexpr std::size_t k_max_detail = 128;
 // The UCX commands' type descriptions; a client finds the commands by them.
 inline constexpr const char *k_open_marker = "tango-ucx/3 open";
 inline constexpr const char *k_close_marker = "tango-ucx/3 close";
@@ -81,6 +82,9 @@ struct Reply
     Status status = Ok;
     std::array<std::byte, k_max_address> address{};
     std::uint16_t address_bytes = 0;
+    // Why the request was refused, in the publisher's own words. Most replies have none.
+    std::array<char, k_max_detail> detail{};
+    std::uint8_t detail_bytes = 0;
 };
 // The UcxStream attribute: what every frame of this publisher instance is.
 struct StreamMessage
