@@ -89,11 +89,12 @@ ucs_status_t on_frame(void *arg, const void *h, size_t hn, void *data, size_t n,
     auto rndv = (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV) != 0;
     wire::FrameMessage f;
     const auto &sizes = s->plan.sizes;
-    bool valid = wire::decode({static_cast<const std::byte *>(h), hn}, sizes.padded_fields, f) &&
-                 f.session == s->session && f.payload_bytes == n && f.sequence >= s->credited &&
-                 !(s->plan.gpu && !rndv) && f.sequence < s->credited + s->plan.D &&
-                 !s->rings->bit_test(s->rings->busy, f.sequence % s->plan.D);
-    auto k = std::uint32_t(f.sequence % s->plan.D);
+    bool valid =
+        wire::decode({static_cast<const std::byte *>(h), hn}, sizes.padded_field_bytes, f) &&
+        f.session == s->session && f.payload_bytes == n && f.sequence >= s->credited &&
+        !(s->plan.gpu && !rndv) && f.sequence < s->credited + s->plan.ring_depth &&
+        !s->rings->bit_test(s->rings->busy, f.sequence % s->plan.ring_depth);
+    auto k = std::uint32_t(f.sequence % s->plan.ring_depth);
     auto at = std::uint64_t(k) * sizes.frame_bytes;
     if(valid && sizes.opaque)
     {
@@ -122,7 +123,7 @@ ucs_status_t on_frame(void *arg, const void *h, size_t hn, void *data, size_t n,
     auto *r = s->rings->record(k);
     wire::put64(r, f.index);
     wire::put64(r + 8, f.timestamp_ns);
-    std::memcpy(r + 16, f.record.data(), sizes.padded_fields);
+    std::memcpy(r + 16, f.record.data(), sizes.padded_field_bytes);
     if(!rndv)
     {
         if(!data)
@@ -212,13 +213,13 @@ void Sub::setup()
     rings = std::make_shared<Rings>();
     rings->plan = plan;
     rings->records.resize(plan.records_bytes);
-    rings->batches = std::vector<BatchRow>(plan.D);
+    rings->batches = std::vector<BatchRow>(plan.ring_depth);
     if(plan.sizes.opaque)
-        rings->placements.assign(2ull * plan.D, 0);
+        rings->placements.assign(2ull * plan.ring_depth, 0);
     if(plan.gpu)
     {
         auto ring = std::make_shared<GpuRing>();
-        ring->events.reserve(plan.D);
+        ring->events.reserve(plan.ring_depth);
         ring->memory = ring->runtime->allocate(options.gpu, plan.payload_bytes);
         for(auto &row : rings->batches)
             ring->events.push_back(row.event = ring->runtime->make_event(options.gpu));
@@ -228,18 +229,18 @@ void Sub::setup()
         rings->storage = std::shared_ptr<void>(new std::byte[plan.payload_bytes], [](void *p)
                                                { delete[] static_cast<std::byte *>(p); });
     rings->payload = static_cast<std::byte *>(rings->storage.get());
-    rings->released.reserve(plan.D);
-    auto words = (plan.D + 63) / 64;
+    rings->released.reserve(plan.ring_depth);
+    auto words = (plan.ring_depth + 63) / 64;
     rings->busy.assign(words, 0);
     rings->landed.assign(words, 0);
     rings->returned.assign(words, 0);
     rings->event_wait.assign(words, 0);
     receive = Region::adopt(context->get(), rings->storage, plan.payload_bytes,
                             plan.gpu ? UCS_MEMORY_TYPE_CUDA : UCS_MEMORY_TYPE_HOST);
-    recv_ops.resize(std::uint64_t(plan.D) * plan.op_stride);
+    recv_ops.resize(std::uint64_t(plan.ring_depth) * plan.op_stride);
     ctrl_ops.resize(std::uint64_t(3) * plan.op_stride);
-    queue.reserve(plan.D);
-    for(std::uint32_t k = 0; k < plan.D; ++k)
+    queue.reserve(plan.ring_depth);
+    for(std::uint32_t k = 0; k < plan.ring_depth; ++k)
     {
         auto *o = recv_op(k);
         std::construct_at(o);
@@ -446,13 +447,15 @@ void Sub::landed(std::uint32_t k)
 bool Sub::fits(std::uint64_t q, std::uint64_t at, std::uint64_t n) const
 {
     const auto &p = rings->placements;
-    auto arrived_at = [&](std::uint64_t s) { return rings->bit_test(rings->busy, s % plan.D); };
+    auto arrived_at = [&](std::uint64_t s)
+    { return rings->bit_test(rings->busy, s % plan.ring_depth); };
     auto low = q; // the lowest sequence of the run not arrived that ends below q
     while(low > credited && !arrived_at(low - 1))
         if(q - --low > k_max_gap)
             return false;
-    auto end =
-        low == credited ? freed : p[2 * ((low - 1) % plan.D)] + p[2 * ((low - 1) % plan.D) + 1];
+    auto end = low == credited ? freed
+                               : p[2 * ((low - 1) % plan.ring_depth)] +
+                                     p[2 * ((low - 1) % plan.ring_depth) + 1];
     if(low == q ? at != place(end, n, plan.payload_bytes) : at < end + (q - low))
         return false;
     auto high = q + 1; // the next sequence above q that has arrived
@@ -461,7 +464,7 @@ bool Sub::fits(std::uint64_t q, std::uint64_t at, std::uint64_t n) const
             return false;
     if(high >= arrived)
         return true;
-    auto next = p[2 * (high % plan.D)], bytes = p[2 * (high % plan.D) + 1];
+    auto next = p[2 * (high % plan.ring_depth)], bytes = p[2 * (high % plan.ring_depth) + 1];
     return high == q + 1 ? next == place(at + n, bytes, plan.payload_bytes)
                          : at + n + (high - q - 1) <= next;
 }
@@ -473,8 +476,9 @@ bool Sub::assemble(std::int64_t now)
     {
         if(assembled >= bound)
             break;
-        auto k = std::uint32_t(assembled % plan.D);
-        auto cap = std::min<std::uint64_t>({plan.batch, plan.D - k, bound - assembled});
+        auto k = std::uint32_t(assembled % plan.ring_depth);
+        auto cap =
+            std::min<std::uint64_t>({plan.batch_size, plan.ring_depth - k, bound - assembled});
         std::uint32_t n = 0;
         // A batch is one run of bytes, and of one range: it ends where the next frame starts at
         // the ring's front, or is of another range. A puller may be sent part of a range.
@@ -490,12 +494,12 @@ bool Sub::assemble(std::int64_t now)
             first_landed_ns = now;
         // The next frame has arrived, and is apart: a row busy beyond the ring's depth is an old
         // frame's, not yet credited.
-        bool cut = n < cap && assembled + n < credited + plan.D &&
+        bool cut = n < cap && assembled + n < credited + plan.ring_depth &&
                    rings->bit_test(rings->busy, k + n) && apart(k + n);
         // No frame can follow until a batch is released: every row is in use, or the packed ring
         // has no room for a grant. Waiting out max_wait would hold the device for nothing.
         auto *last = plan.sizes.opaque ? &rings->placements[2 * (k + n - 1)] : nullptr;
-        cut |= assembled + n == credited + plan.D ||
+        cut |= assembled + n == credited + plan.ring_depth ||
                (last && !ring_room(last[0] + last[1] - freed, 0, plan.sizes.frame_bytes,
                                    plan.payload_bytes));
         if(n < cap && !cut && now - first_landed_ns < std::int64_t(plan.max_wait_ns) && !failed &&
@@ -536,7 +540,7 @@ void Sub::decide(std::int64_t now)
         return;
     // Only the next sequence matters: a frame landed beyond a missing one must not hold off
     // the End grace.
-    bool drained = receiving == 0 && !rings->bit_test(rings->landed, assembled % plan.D);
+    bool drained = receiving == 0 && !rings->bit_test(rings->landed, assembled % plan.ring_depth);
     if(has_end)
     {
         if(end.reason != wire::FinishedReason && drained)
@@ -574,11 +578,11 @@ void Sub::decide(std::int64_t now)
 }
 void Sub::release_batch(std::uint32_t k)
 {
-    if(k >= plan.D)
+    if(k >= plan.ring_depth)
         return;
     auto &row = rings->batches[k];
     for(std::uint32_t i = 0; i < row.frames; ++i)
-        rings->bit_set(rings->returned, (row.first_sequence + i) % plan.D);
+        rings->bit_set(rings->returned, (row.first_sequence + i) % plan.ring_depth);
     row.frames = 0;
     row.viewed = false;
     row.recorded.store(false, std::memory_order_relaxed);
@@ -587,7 +591,7 @@ void Sub::release_pass()
 {
     for(int k; (k = rings->released.try_pop()) >= 0;)
     {
-        if(std::uint32_t(k) < plan.D && rings->batches[k].viewed)
+        if(std::uint32_t(k) < plan.ring_depth && rings->batches[k].viewed)
             rings->bit_set(rings->event_wait, k); // released; its GPU event decides when it is free
         else
             release_batch(std::uint32_t(k));
@@ -618,12 +622,13 @@ void Sub::credit_pass()
     if(stop.load() || failed)
         return;
     auto c = credited;
-    while(c < assembled && rings->bit_test(rings->returned, c % plan.D))
+    while(c < assembled && rings->bit_test(rings->returned, c % plan.ring_depth))
     {
-        rings->bit_clear(rings->returned, c % plan.D);
-        rings->bit_clear(rings->busy, c % plan.D);
+        rings->bit_clear(rings->returned, c % plan.ring_depth);
+        rings->bit_clear(rings->busy, c % plan.ring_depth);
         if(plan.sizes.opaque)
-            freed = rings->placements[2 * (c % plan.D)] + rings->placements[2 * (c % plan.D) + 1];
+            freed = rings->placements[2 * (c % plan.ring_depth)] +
+                    rings->placements[2 * (c % plan.ring_depth) + 1];
         ++c;
     }
     credited = c;
@@ -639,13 +644,13 @@ void Sub::publish_health()
     observation.frames = frames;
     observation.skipped = skipped;
     observation.last_index = last_index == UINT64_MAX ? 0 : last_index;
-    observation.slots_free = plan.D - rings->bit_count(rings->busy);
+    observation.slots_free = plan.ring_depth - rings->bit_count(rings->busy);
     observation.slots_held = rings->bit_count(rings->busy);
     observation.memory_hooks = context->memory_hooks();
 }
 void Sub::cancel_receives()
 {
-    for(std::uint32_t k = 0; k < plan.D; ++k)
+    for(std::uint32_t k = 0; k < plan.ring_depth; ++k)
     {
         auto *o = recv_op(k);
         if(o->in_flight)
@@ -808,8 +813,8 @@ std::string PendingSubscription::open_message() const
     wire::OpenMessage m{};
     m.session = s.session;
     m.instance_id = s.offer.instance_id;
-    m.depth = s.plan.D;
-    m.batch = s.plan.batch;
+    m.depth = s.plan.ring_depth;
+    m.batch = s.plan.batch_size;
     m.every = s.every && !s.range;
     m.range = s.range;
     if(s.options.max_rate > 0)

@@ -43,8 +43,8 @@ class PublisherOperations
     void allocate(void *owner, const PublisherPlan &p, std::uint32_t request_bytes)
     {
         assert(storage.empty());
-        slot_count = p.S;
-        row_count = p.M;
+        slot_count = p.slot_count;
+        row_count = p.row_count;
         op_stride = p.op_stride;
         this->request_bytes = request_bytes;
         header_bytes = p.sizes.header_bytes;

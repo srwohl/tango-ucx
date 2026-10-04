@@ -128,22 +128,22 @@ PublisherPlan plan_publisher(const Description &d, const PublisherLimits &l, std
         throw std::invalid_argument("UCX request is larger than 1 KiB");
     if(p.sizes.header_bytes > max_header)
         throw std::invalid_argument("frame header does not fit UCX max AM header");
-    p.M = l.max_sessions;
+    p.row_count = l.max_sessions;
     p.op_stride = std::uint32_t(align(add({request, sizeof(OpMeta), p.sizes.header_bytes}), 64));
-    auto per = add({p.sizes.frame_bytes, p.sizes.record_stride, mul(p.M, p.op_stride),
+    auto per = add({p.sizes.frame_bytes, p.sizes.record_stride, mul(p.row_count, p.op_stride),
                     sizeof(std::uint64_t) + sizeof(std::uint16_t)});
-    auto fixed =
-        add({k_pub_fixed, PublisherOperations::control_bytes(p.M, p.op_stride), k_region_charge});
+    auto fixed = add({k_pub_fixed, PublisherOperations::control_bytes(p.row_count, p.op_stride),
+                      k_region_charge});
     auto fits = l.budget > fixed ? (l.budget - fixed) / per : 0;
-    p.S = std::uint32_t(std::min<std::uint64_t>(fits, k_max_source_slots));
-    if(p.S < p.M + 2)
+    p.slot_count = std::uint32_t(std::min<std::uint64_t>(fits, k_max_source_slots));
+    if(p.slot_count < p.row_count + 2)
         throw std::invalid_argument(
             std::format("budget {} holds {} source slots of {} bytes; {} sessions need {}",
-                        l.budget, fits, per, p.M, p.M + 2));
-    p.source_bytes = mul(p.S, p.sizes.frame_bytes);
-    p.records_bytes = mul(p.S, p.sizes.record_stride);
-    p.ops_bytes = mul(mul(p.S, p.M), p.op_stride);
-    p.charge = add({fixed, mul(p.S, per)});
+                        l.budget, fits, per, p.row_count, p.row_count + 2));
+    p.source_bytes = mul(p.slot_count, p.sizes.frame_bytes);
+    p.records_bytes = mul(p.slot_count, p.sizes.record_stride);
+    p.ops_bytes = mul(mul(p.slot_count, p.row_count), p.op_stride);
+    p.charge = add({fixed, mul(p.slot_count, per)});
     return p;
 }
 
@@ -167,7 +167,7 @@ SubscriptionPlan plan_subscription(const Offer &o, bool every, const Subscriptio
         throw std::invalid_argument("a GPU subscription cannot receive an opaque stream");
     if(!(options.max_rate >= 0) || (every && options.max_rate > 0))
         throw std::invalid_argument("max_rate must be 0 or more, and applies to latest only");
-    p.batch = options.batch;
+    p.batch_size = options.batch;
     p.max_wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(options.max_wait).count();
     p.op_stride = std::uint32_t(align(add({request, 16}), 64));
     auto per = add({p.sizes.frame_bytes, p.sizes.record_stride, p.op_stride, 64, 12});
@@ -182,27 +182,28 @@ SubscriptionPlan plan_subscription(const Offer &o, bool every, const Subscriptio
         auto room = options.budget > fixed ? options.budget - fixed : 0;
         depth = std::min({room / add({per, p.sizes.frame_bytes / 256, 1}), room / mul(8, per),
                           std::uint64_t{k_max_depth}});
-        depth -= depth % p.batch;
+        depth -= depth % p.batch_size;
         p.payload_bytes = room - depth * per;
-        if(depth < 2ull * p.batch || p.payload_bytes < mul(3, p.sizes.frame_bytes))
+        if(depth < 2ull * p.batch_size || p.payload_bytes < mul(3, p.sizes.frame_bytes))
             throw std::invalid_argument(std::format(
                 "budget {} holds a ring of {} bytes and {} frames; it needs three frames of {} "
                 "bytes and two batches of {}",
-                options.budget, p.payload_bytes, depth, p.sizes.frame_bytes, p.batch));
+                options.budget, p.payload_bytes, depth, p.sizes.frame_bytes, p.batch_size));
     }
     else
     {
-        depth -= depth % p.batch;
-        if(depth < 2ull * p.batch)
+        depth -= depth % p.batch_size;
+        if(depth < 2ull * p.batch_size)
             throw std::invalid_argument(std::format(
                 "budget {} holds {} frames of {} bytes; two batches of {} need {} bytes",
-                options.budget, fits, per, p.batch, add({fixed, mul(2ull * p.batch, per)})));
+                options.budget, fits, per, p.batch_size,
+                add({fixed, mul(2ull * p.batch_size, per)})));
         p.payload_bytes = mul(depth, p.sizes.frame_bytes);
     }
-    p.D = std::uint32_t(depth);
-    p.records_bytes = mul(p.D, p.sizes.record_stride);
-    p.recv_ops_bytes = mul(p.D, p.op_stride);
-    p.charge = add({fixed, mul(p.D, per), p.sizes.opaque ? p.payload_bytes : 0});
+    p.ring_depth = std::uint32_t(depth);
+    p.records_bytes = mul(p.ring_depth, p.sizes.record_stride);
+    p.recv_ops_bytes = mul(p.ring_depth, p.op_stride);
+    p.charge = add({fixed, mul(p.ring_depth, per), p.sizes.opaque ? p.payload_bytes : 0});
     return p;
 }
 

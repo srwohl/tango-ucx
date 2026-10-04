@@ -12,7 +12,8 @@ using namespace TangoUcx::transport;
 TEST_CASE("publisher operation layout stays fixed when its source plan changes")
 {
     auto plan = plan_publisher({Element::U8, {64}, 8}, PublisherLimits{}, 256, 4096);
-    auto slot = plan.S - 1, row = plan.M - 1, header_bytes = plan.sizes.header_bytes;
+    auto slot = plan.slot_count - 1, row = plan.row_count - 1,
+         header_bytes = plan.sizes.header_bytes;
     int owner = 0;
     PublisherOperations operations;
     operations.allocate(&owner, plan, 256);
@@ -41,7 +42,7 @@ TEST_CASE("host plans account for fixed slots and reject invalid bounds")
     limits.max_sessions = 2;
     limits.allow_every = true;
     auto p = plan_publisher(d, limits, 256, 4096);
-    CHECK(p.S >= p.M + 2);
+    CHECK(p.slot_count >= p.row_count + 2);
     CHECK(p.charge <= limits.budget);
     CHECK(p.sizes.frame_bytes == 128);
     CHECK(p.sizes.record_stride == 24);
@@ -51,10 +52,10 @@ TEST_CASE("host plans account for fixed slots and reject invalid bounds")
     opts.budget = 4ull << 20;
     opts.batch = 2;
     auto s = plan_subscription(o, true, opts, 256);
-    CHECK(s.D >= 4);
-    CHECK(s.D % 2 == 0);
+    CHECK(s.ring_depth >= 4);
+    CHECK(s.ring_depth % 2 == 0);
     CHECK(s.charge <= opts.budget);
-    CHECK(s.payload_bytes == std::uint64_t(s.D) * 128);
+    CHECK(s.payload_bytes == std::uint64_t(s.ring_depth) * 128);
 
     opts.gpu = 0;
     CHECK_THROWS_AS(plan_subscription(o, true, opts, 256), std::invalid_argument);
@@ -72,10 +73,10 @@ TEST_CASE("host configurations are capped, or refused before anything is charged
     SubscriptionOptions deep;
     deep.budget = 1ull << 30;
     auto p = plan_publisher(tiny, wide, 1024, 4096);
-    CHECK(p.S == 1024);
+    CHECK(p.slot_count == 1024);
     CHECK(p.charge <= wide.budget);
     auto s = plan_subscription(Offer{tiny, wide, 1}, false, deep, 1024);
-    CHECK(s.D == 65536);
+    CHECK(s.ring_depth == 65536);
     CHECK(s.charge <= deep.budget);
 
     // UCX reports the request size and the largest header, so only the plans can be given these.
@@ -101,7 +102,7 @@ TEST_CASE("host configurations are capped, or refused before anything is charged
         {"1,025 field bytes", {Element::U8, {1}, 1025}, gib, 1, 1, "over 1,024", "over 1,024"},
         {"budget below the fixed part", tiny, 1024, 1, 1, "holds 0 source slots", "holds 0 frames"},
         {"D below 2 batches", big, 6ull << 20, 1, 4, nullptr, "two batches of 4"},
-        {"S < M + 2", big, 32ull << 20, 64, 1, "64 sessions need 66", nullptr},
+        {"slots < rows + 2", big, 32ull << 20, 64, 1, "64 sessions need 66", nullptr},
         {"M = 65", tiny, gib, 65, 1, "must be 1 to 64", nullptr},
     };
     for(const auto &row : rows)
@@ -149,7 +150,7 @@ TEST_CASE("host configurations are capped, or refused before anything is charged
     REQUIRE(why.find("two batches of 4 need ") != std::string::npos);
     two.budget = std::stoull(why.substr(why.find(" need ") + 6));
     auto at = plan_subscription(offer, false, two, 1024);
-    CHECK(at.D == 8);
+    CHECK(at.ring_depth == 8);
     CHECK(at.charge == two.budget);
     --two.budget;
     CHECK_THROWS_AS(plan_subscription(offer, false, two, 1024), std::invalid_argument);

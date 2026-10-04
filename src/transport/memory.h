@@ -15,19 +15,19 @@ struct Offer;
 struct Sizes
 {
     std::uint64_t frame_bytes = 0;
-    std::uint32_t field_bytes = 0, padded_fields = 0, record_stride = 0, header_bytes = 0;
+    std::uint32_t field_bytes = 0, padded_field_bytes = 0, record_stride = 0, header_bytes = 0;
     bool opaque = false; // frame_bytes is then the most a frame may have
 };
 struct PublisherPlan
 {
     Sizes sizes;
-    std::uint32_t S = 0, M = 0, op_stride = 0;
+    std::uint32_t slot_count = 0, row_count = 0, op_stride = 0;
     std::uint64_t source_bytes = 0, records_bytes = 0, ops_bytes = 0, charge = 0;
 };
 struct SubscriptionPlan
 {
     Sizes sizes;
-    std::uint32_t D = 0, batch = 0, op_stride = 0;
+    std::uint32_t ring_depth = 0, batch_size = 0, op_stride = 0;
     std::uint64_t payload_bytes = 0, records_bytes = 0, recv_ops_bytes = 0, charge = 0,
                   max_wait_ns = 0;
     bool gpu = false;

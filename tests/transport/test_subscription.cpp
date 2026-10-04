@@ -45,8 +45,8 @@ std::unique_ptr<transport::Sub> bare_sub(std::uint32_t depth, std::uint32_t batc
     auto sub =
         std::make_unique<Sub>(Offer{d, test::small_limits(), 1}, true, test::small_options());
     sub->plan.sizes = sizes_of(d);
-    sub->plan.D = depth;
-    sub->plan.batch = batch;
+    sub->plan.ring_depth = depth;
+    sub->plan.batch_size = batch;
     sub->plan.max_wait_ns = 1000;
     sub->rings = std::make_shared<Rings>();
     sub->rings->plan = sub->plan;

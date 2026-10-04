@@ -16,7 +16,7 @@ struct Batch::Copy
 Batch::Batch(std::shared_ptr<transport::Rings> r, std::uint32_t first)
     : rings_(std::move(r)), first_(first)
 {
-    if(!rings_ || first >= rings_->plan.D)
+    if(!rings_ || first >= rings_->plan.ring_depth)
         throw std::out_of_range("batch row");
     const auto &row = rings_->batches[first];
     frames_ = row.frames;

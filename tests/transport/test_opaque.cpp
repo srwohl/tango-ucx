@@ -543,13 +543,14 @@ TEST_CASE("an opaque stream's plans: slots of the maximum at the source, a packe
     auto d = test::opaque_description(9ull << 20);
     auto p = plan_publisher(d, {.budget = 64ull << 20, .max_sessions = 1}, 256, 4096);
     CHECK((p.sizes.opaque && p.sizes.frame_bytes == 9ull << 20));
-    CHECK(p.source_bytes == p.S * (9ull << 20));
+    CHECK(p.source_bytes == p.slot_count * (9ull << 20));
     SubscriptionOptions o;
     o.batch = 100;
     auto s = plan_subscription({d, limits(), 1}, true, o, 256);
     CHECK((s.charge <= o.budget && s.charge > o.budget - (1 << 20)));
     CHECK(s.payload_bytes > 250ull << 20); // the tables take little of 256 MiB
-    CHECK((s.D % 100 == 0 && s.D >= 256 * (s.payload_bytes / (9ull << 20)) - 100));
+    CHECK(
+        (s.ring_depth % 100 == 0 && s.ring_depth >= 256 * (s.payload_bytes / (9ull << 20)) - 100));
     o.budget = 4ull << 20; // small frames: the tables take an eighth at most
     s = plan_subscription({test::opaque_description(64), limits(), 1}, true, o, 256);
     CHECK((s.charge <= o.budget && s.payload_bytes > 7 * (o.budget / 8) - (128 << 10)));

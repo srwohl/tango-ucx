@@ -194,7 +194,7 @@ TEST_CASE("a GPU ring is capped at 4,096 frames, and a GPU that does not exist i
     Offer offer{{Element::U8, {1}}, test::small_limits(), 1};
     SubscriptionOptions options;
     options.gpu = 0;
-    CHECK(plan_subscription(offer, true, options, 256).D == 4096);
+    CHECK(plan_subscription(offer, true, options, 256).ring_depth == 4096);
     REQUIRE(cudaGetDeviceCount(&options.gpu) == cudaSuccess);
     CHECK_THROWS_WITH(prepare(offer, true, options), ContainsSubstring("cudaSetDevice"));
 }

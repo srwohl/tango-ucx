@@ -17,7 +17,7 @@ struct SourceSlot
 {
     std::atomic<bool> posted{false};
     bool cancel = false, held = false;
-    std::uint64_t timestamp = 0, bytes = 0;
+    std::uint64_t timestamp = 0, payload_bytes = 0;
     std::uint32_t sends = 0;
 };
 struct PubRow
@@ -29,8 +29,8 @@ struct PubRow
     ucs_status_t transport_error = UCS_OK;
     std::uint64_t id = 0, sent = 0, credited = 0, skipped = 0, passes = 0;
     // An opaque stream's packed ring, and where its last sent and last credited frames end.
-    std::uint64_t ring = 0, sent_bytes = 0, credited_bytes = 0;
-    std::uint32_t depth = 0, in_flight = 0, reserved = 0;
+    std::uint64_t ring_bytes = 0, sent_bytes = 0, credited_bytes = 0;
+    std::uint32_t ring_depth = 0, in_flight = 0, reserved = 0;
     std::int64_t min_interval_ns = 0, last_send_ns = 0, blocked_since_ns = 0;
     std::int64_t transfer_max_ns = 0, transfer_sum_ns = 0;
     Text<64> label, transport;
@@ -216,15 +216,16 @@ void Pub::setup()
     plan = plan_publisher(description, limits, req, worker->max_am_header());
     source = Region::allocate(context->get(), plan.source_bytes);
     records.resize(plan.records_bytes);
-    slots = std::make_unique<SourceSlot[]>(plan.S);
-    order.resize(plan.S);
+    slots = std::make_unique<SourceSlot[]>(plan.slot_count);
+    order.resize(plan.slot_count);
     operations.allocate(this, plan, req);
-    grants.reserve(plan.S);
-    range_pullers.assign(plan.S + 2, 0); // the grants outstanding span fewer ranges than this
-    for(std::uint32_t r = 0; r < plan.M; ++r)
+    grants.reserve(plan.slot_count);
+    range_pullers.assign(plan.slot_count + 2,
+                         0); // the grants outstanding span fewer ranges than this
+    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
-        rows[r].pub = this;
-        rows[r].row = std::uint8_t(r);
+        rows[row_index].pub = this;
+        rows[row_index].row = std::uint8_t(row_index);
     }
     worker->set_am(wire::Credit, on_credit, this);
     setup_ok = true;
@@ -272,24 +273,25 @@ void Pub::run()
     }
     shutdown();
 }
-std::uint64_t Pub::id_for(std::uint32_t r) const
+std::uint64_t Pub::id_for(std::uint32_t row_index) const
 {
-    return rows[r].id;
+    return rows[row_index].id;
 }
 int Pub::find_row(std::uint64_t id) const
 {
-    for(std::uint32_t r = 0; r < plan.M; ++r)
-        if(rows[r].used && rows[r].id == id)
-            return int(r);
+    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+        if(rows[row_index].used && rows[row_index].id == id)
+            return int(row_index);
     return -1;
 }
 // Room for more frames, some of them granted now: rows of the receive tables for the frames
 // and, in a packed ring, the bytes for the grants. One of each is room for one more grant.
 bool Pub::has_room(const PubRow &row, std::uint64_t frames, std::uint64_t grants) const
 {
-    return row.sent + row.reserved - row.credited + frames <= row.depth &&
-           (!row.ring || ring_room(row.sent_bytes - row.credited_bytes, row.reserved + grants - 1,
-                                   plan.sizes.frame_bytes, row.ring));
+    return row.sent + row.reserved - row.credited + frames <= row.ring_depth &&
+           (!row.ring_bytes ||
+            ring_room(row.sent_bytes - row.credited_bytes, row.reserved + grants - 1,
+                      plan.sizes.frame_bytes, row.ring_bytes));
 }
 // The puller that holds the range of a frame index, or none. The index says which range, and
 // the table which puller: after a pass no rule gives it. A range's first grant gives the range
@@ -308,43 +310,44 @@ PubRow *Pub::puller(std::uint64_t frame_index)
     std::uint64_t outstanding = last > first ? last - first : 0, passed_over = 0;
     for(std::uint32_t step = 1; step <= rows.size(); ++step)
     {
-        auto r = (last_taker + step) % rows.size();
-        if(!(pull_mask >> r & 1))
+        auto row_index = (last_taker + step) % rows.size();
+        if(!(pull_mask >> row_index & 1))
             continue;
-        if(has_room(rows[r], untaken ? range_frames : std::max<std::uint64_t>(outstanding, 1),
+        if(has_room(rows[row_index],
+                    untaken ? range_frames : std::max<std::uint64_t>(outstanding, 1),
                     std::max<std::uint64_t>(outstanding, 1)))
         {
             for(; passed_over; passed_over &= passed_over - 1)
                 ++rows[std::countr_zero(passed_over)].passes;
-            rows[r].reserved += std::uint32_t(outstanding);
+            rows[row_index].reserved += std::uint32_t(outstanding);
             ranges_taken += untaken;
-            return &rows[holder = last_taker = std::uint8_t(r)];
+            return &rows[holder = last_taker = std::uint8_t(row_index)];
         }
-        passed_over |= std::uint64_t{1} << r;
+        passed_over |= std::uint64_t{1} << row_index;
     }
     if(untaken && !pull_mask) // no puller is left: the range is nobody's, and its frames missing
         holder = last_taker, ++ranges_taken;
     return nullptr;
 }
-std::span<std::byte> Pub::payload(std::uint32_t k)
+std::span<std::byte> Pub::payload(std::uint32_t slot_index)
 {
-    if(k >= plan.S)
+    if(slot_index >= plan.slot_count)
         throw std::out_of_range("source slot");
-    return {source.at(std::uint64_t(k) * plan.sizes.frame_bytes),
+    return {source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
             std::size_t(plan.sizes.frame_bytes)};
 }
-std::span<std::byte> Pub::fields(std::uint32_t k)
+std::span<std::byte> Pub::fields(std::uint32_t slot_index)
 {
-    if(k >= plan.S)
+    if(slot_index >= plan.slot_count)
         throw std::out_of_range("source slot");
-    return {records.data() + std::uint64_t(k) * plan.sizes.record_stride + 16,
+    return {records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride + 16,
             plan.sizes.field_bytes};
 }
 // An opaque frame names its length; an array frame has the one its shape gives.
-void Pub::publish_slot(std::uint32_t k, std::optional<std::uint64_t> timestamp,
+void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> timestamp,
                        std::optional<std::size_t> bytes)
 {
-    if(k >= plan.S)
+    if(slot_index >= plan.slot_count)
         return;
     if(bytes.has_value() != plan.sizes.opaque)
         throw std::logic_error(plan.sizes.opaque ? "an opaque stream publishes with publish_bytes"
@@ -352,34 +355,34 @@ void Pub::publish_slot(std::uint32_t k, std::optional<std::uint64_t> timestamp,
     if(bytes && (!*bytes || *bytes > plan.sizes.frame_bytes))
         throw std::invalid_argument(std::format("a frame of {} bytes; an opaque frame has 1 to {}",
                                                 *bytes, plan.sizes.frame_bytes));
-    auto &s = slots[k];
-    s.bytes = bytes.value_or(plan.sizes.frame_bytes);
-    s.timestamp = timestamp.value_or(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                         std::chrono::system_clock::now().time_since_epoch())
-                                         .count());
-    s.cancel = false;
-    s.posted.store(true, std::memory_order_release);
+    auto &slot = slots[slot_index];
+    slot.payload_bytes = bytes.value_or(plan.sizes.frame_bytes);
+    slot.timestamp = timestamp.value_or(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            std::chrono::system_clock::now().time_since_epoch())
+                                            .count());
+    slot.cancel = false;
+    slot.posted.store(true, std::memory_order_release);
 }
-void Pub::cancel_slot(std::uint32_t k)
+void Pub::cancel_slot(std::uint32_t slot_index)
 {
-    if(k < plan.S)
+    if(slot_index < plan.slot_count)
     {
-        slots[k].cancel = true;
-        slots[k].posted.store(true, std::memory_order_release);
+        slots[slot_index].cancel = true;
+        slots[slot_index].posted.store(true, std::memory_order_release);
     }
 }
 
-void Pub::send_control(std::uint32_t r, OpKind kind, std::uint8_t type,
+void Pub::send_control(std::uint32_t row_index, OpKind kind, std::uint8_t type,
                        std::span<const std::byte> b)
 {
-    auto &o = *operations.control(r, kind);
+    auto &o = *operations.control(row_index, kind);
     if(o.in_flight)
         return;
     auto h = operations.header(&o);
     assert(b.size() <= h.size());
     std::memcpy(h.data(), b.data(), b.size());
     o.in_flight = true;
-    auto &row = rows[r];
+    auto &row = rows[row_index];
     if(kind == OpKind::Ready || kind == OpKind::End)
         ++row.in_flight;
     ucp_request_param_t p{};
@@ -392,50 +395,51 @@ void Pub::send_control(std::uint32_t r, OpKind kind, std::uint8_t type,
     if(!UCS_PTR_IS_PTR(q))
         on_control(&o, UCS_PTR_STATUS(q));
 }
-void Pub::send_ready(std::uint32_t r)
+void Pub::send_ready(std::uint32_t row_index)
 {
-    auto b = wire::encode(wire::SessionMessage{rows[r].id});
-    send_control(r, OpKind::Ready, wire::Ready, b);
+    auto b = wire::encode(wire::SessionMessage{rows[row_index].id});
+    send_control(row_index, OpKind::Ready, wire::Ready, b);
 }
-void Pub::send_end(std::uint32_t r)
+void Pub::send_end(std::uint32_t row_index)
 {
-    auto &row = rows[r];
+    auto &row = rows[row_index];
     wire::EndMessage m{row.id, row.sent, next_frame_index, row.reason, row.pull ? missing : 0};
     auto b = wire::encode(m);
-    send_control(r, OpKind::End, wire::End, b);
+    send_control(row_index, OpKind::End, wire::End, b);
     row.end_sent = true;
 }
 
-void Pub::send_frame(std::uint32_t k, std::uint32_t r, std::int64_t now)
+void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int64_t now)
 {
-    auto &row = rows[r];
-    auto &o = *operations.frame(k, r);
-    auto *rec = records.data() + std::uint64_t(k) * plan.sizes.record_stride;
+    auto &row = rows[row_index];
+    auto &o = *operations.frame(slot_index, row_index);
+    auto *rec = records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride;
     wire::FrameMessage f{};
     f.session = row.id;
     f.sequence = row.sent;
-    f.payload_bytes = slots[k].bytes;
-    f.packed = row.ring != 0; // the publisher places the frame, and says where
-    f.position = f.packed ? place(row.sent_bytes, slots[k].bytes, row.ring) : 0;
+    f.payload_bytes = slots[slot_index].payload_bytes;
+    f.packed = row.ring_bytes != 0; // the publisher places the frame, and says where
+    f.position =
+        f.packed ? place(row.sent_bytes, slots[slot_index].payload_bytes, row.ring_bytes) : 0;
     f.index = wire::get64(rec);
     f.timestamp_ns = wire::get64(rec + 8);
-    f.record_bytes = plan.sizes.padded_fields;
+    f.record_bytes = plan.sizes.padded_field_bytes;
     std::memcpy(f.record.data(), rec + 16, f.record_bytes);
     auto h = operations.header(&o);
     auto hn = wire::encode_into(h, f);
     if(!hn)
     {
-        retire(r, wire::Protocol, true);
+        retire(row_index, wire::Protocol, true);
         return;
     }
     o.sent_ns = now;
     o.in_flight = true;
     row.last_send_ns = now;
     ++row.sent;
-    if(row.ring)
-        row.sent_bytes = f.position + slots[k].bytes;
+    if(row.ring_bytes)
+        row.sent_bytes = f.position + slots[slot_index].payload_bytes;
     ++row.in_flight;
-    ++slots[k].sends;
+    ++slots[slot_index].sends;
     ucp_request_param_t p{};
     p.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
                      UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMH |
@@ -446,9 +450,9 @@ void Pub::send_frame(std::uint32_t k, std::uint32_t r, std::int64_t now)
     p.user_data = &o;
     p.memh = source.memh();
     p.memory_type = UCS_MEMORY_TYPE_HOST;
-    auto *q =
-        ucp_am_send_nbx(row.ep, wire::Frame, h.data(), hn,
-                        source.at(std::uint64_t(k) * plan.sizes.frame_bytes), slots[k].bytes, &p);
+    auto *q = ucp_am_send_nbx(row.ep, wire::Frame, h.data(), hn,
+                              source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
+                              slots[slot_index].payload_bytes, &p);
     if(!UCS_PTR_IS_PTR(q))
         on_send(&o, UCS_PTR_STATUS(q));
 }
@@ -457,26 +461,26 @@ void Pub::on_send(OpMeta *o, ucs_status_t st)
     if(!o->in_flight)
         return;
     o->in_flight = false;
-    std::uint32_t r = o->row;
-    std::uint32_t k = o->slot;
-    auto &row = rows[r];
+    std::uint32_t row_index = o->row;
+    std::uint32_t slot_index = o->slot;
+    auto &row = rows[row_index];
     if(row.in_flight)
         --row.in_flight;
-    if(k < plan.S && slots[k].sends)
-        --slots[k].sends;
+    if(slot_index < plan.slot_count && slots[slot_index].sends)
+        --slots[slot_index].sends;
     auto t = now_ns() - o->sent_ns;
     row.transfer_max_ns = std::max(row.transfer_max_ns, t);
     row.transfer_sum_ns += t;
     if(st != UCS_OK && st != UCS_ERR_CANCELED)
-        retire(r, st == UCS_ERR_REJECTED ? wire::Protocol : wire::Closing, true);
+        retire(row_index, st == UCS_ERR_REJECTED ? wire::Protocol : wire::Closing, true);
 }
 void Pub::on_control(OpMeta *o, ucs_status_t st)
 {
     if(!o->in_flight)
         return;
     o->in_flight = false;
-    auto r = o->row;
-    auto &row = rows[r];
+    auto row_index = o->row;
+    auto &row = rows[row_index];
     switch(o->kind)
     {
         case OpKind::Ready:
@@ -484,7 +488,7 @@ void Pub::on_control(OpMeta *o, ucs_status_t st)
             if(row.in_flight)
                 --row.in_flight;
             if(st != UCS_OK && st != UCS_ERR_CANCELED && !row.closing)
-                retire(r, wire::Closing, true);
+                retire(row_index, wire::Closing, true);
             return;
         case OpKind::Flush:
             if(st != UCS_OK)
@@ -503,14 +507,14 @@ void Pub::on_control(OpMeta *o, ucs_status_t st)
             return;
     }
 }
-void Pub::retire(std::uint32_t r, wire::Reason why, bool failed)
+void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
 {
-    if(r >= plan.M)
+    if(row_index >= plan.row_count)
         return;
-    auto &row = rows[r];
+    auto &row = rows[row_index];
     if(!row.used || row.closing)
         return;
-    auto bit = std::uint64_t{1} << r;
+    auto bit = std::uint64_t{1} << row_index;
     bool held = ((every_mask | pull_mask) & bit) != 0;
     if(row.ready)
         ready_mask &= ~bit;
@@ -539,19 +543,19 @@ bool Pub::control_pass()
         {
             if(!e.in.open)
             {
-                int r = find_row(e.in.close.session);
-                if(r < 0 || rows[r].close_reply)
+                int row_index = find_row(e.in.close.session);
+                if(row_index < 0 || rows[row_index].close_reply)
                 {
                     control.reply(e, {wire::UnknownSession});
                     return;
                 }
-                rows[r].close_reply = &e;
-                retire(r, wire::Closing, false);
+                rows[row_index].close_reply = &e;
+                retire(row_index, wire::Closing, false);
                 return;
             }
             const auto &m = *e.in.open;
             wire::Status status = wire::Ok;
-            std::uint32_t r = plan.M;
+            std::uint32_t row_index = plan.row_count;
             bool holds = m.every || m.range; // an every row or a puller: it can hold the device
             if(m.instance_id != instance_id)
                 status = wire::InstanceId;
@@ -569,13 +573,13 @@ bool Pub::control_pass()
                 status = wire::Range; // whole batches, within its ring, and the set's
             else
             {
-                for(std::uint32_t i = 0; i < plan.M; ++i)
+                for(std::uint32_t i = 0; i < plan.row_count; ++i)
                     if(!rows[i].used)
                     {
-                        r = i;
+                        row_index = i;
                         break;
                     }
-                if(r == plan.M)
+                if(row_index == plan.row_count)
                     status = wire::NoSession;
             }
             if(status != wire::Ok)
@@ -583,16 +587,16 @@ bool Pub::control_pass()
                 control.reply(e, {status});
                 return;
             }
-            auto &row = rows[r];
+            auto &row = rows[row_index];
             row = PubRow{};
             row.pub = this;
-            row.row = std::uint8_t(r);
+            row.row = std::uint8_t(row_index);
             row.ordinal = ++ordinals;
             row.used = true;
             row.every = m.every;
             row.pull = m.range != 0;
-            row.depth = m.depth;
-            row.ring = plan.sizes.opaque ? m.ring_bytes : 0;
+            row.ring_depth = m.depth;
+            row.ring_bytes = plan.sizes.opaque ? m.ring_bytes : 0;
             row.gpu = m.gpu;
             row.id = m.session;
             row.min_interval_ns =
@@ -611,21 +615,22 @@ bool Pub::control_pass()
             // The subscriber registered its rings and handlers before Open: it is ready now.
             row.ready = true;
             row.transport.n = std::uint8_t(worker->transports(row.ep, row.transport.c));
-            ready_mask |= std::uint64_t{1} << r;
+            ready_mask |= std::uint64_t{1} << row_index;
             if(m.every)
-                every_mask |= std::uint64_t{1} << r;
+                every_mask |= std::uint64_t{1} << row_index;
             if(m.range)
             {
-                pull_mask |= std::uint64_t{1} << r;
+                pull_mask |= std::uint64_t{1} << row_index;
                 range_frames = m.range;
             }
-            send_ready(r);
+            send_ready(row_index);
             wire::Reply reply{wire::Ok};
             auto a = worker->address();
             reply.address_bytes = std::uint16_t(a.size());
             std::memcpy(reply.address.data(), a.data(), a.size());
             if(!control.reply(e, reply))
-                retire(r, wire::Closing, false); // its caller gave up: nobody will use the session
+                retire(row_index, wire::Closing,
+                       false); // its caller gave up: nobody will use the session
         });
 }
 // The grant ring is first in, first out, so the grants still queued are the newest issued, and
@@ -636,16 +641,16 @@ void Pub::unissue_grants()
 {
     std::lock_guard l(grants.m);
     auto n = grants.size;
-    for(int k; (k = grants.take_locked()) >= 0;)
-        slots[k].held = false;
+    for(int slot_index; (slot_index = grants.take_locked()) >= 0;)
+        slots[slot_index].held = false;
     for(std::uint32_t g = 0; range_frames && g < n; ++g)
         if(auto *p = puller(next_frame_index + slots_granted - slots_routed - 1 - g);
            p && p->reserved)
             --p->reserved;
     slots_granted -= n;
-    for(std::uint32_t r = 0; r < plan.M; ++r)
-        if((ready_mask & every_mask) >> r & 1)
-            rows[r].reserved -= n;
+    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+        if((ready_mask & every_mask) >> row_index & 1)
+            rows[row_index].reserved -= n;
 }
 
 bool Pub::route_pass(std::int64_t now)
@@ -655,69 +660,71 @@ bool Pub::route_pass(std::int64_t now)
         unissue_grants();
     while(slots_routed < slots_granted)
     {
-        auto k = order[slots_routed % plan.S];
-        auto &s = slots[k];
-        if(!s.posted.load(std::memory_order_acquire))
+        auto slot_index = order[slots_routed % plan.slot_count];
+        auto &slot = slots[slot_index];
+        if(!slot.posted.load(std::memory_order_acquire))
             break;
-        s.posted.store(false, std::memory_order_relaxed);
-        s.held = false;
+        slot.posted.store(false, std::memory_order_relaxed);
+        slot.held = false;
         // The frame's puller. A cancelled slot uses no frame index: every grant after it is for
         // the index before, and the puller of the last index granted has one grant fewer.
         auto *to_puller =
-            range_frames ? puller(s.cancel ? next_frame_index + slots_granted - slots_routed - 1
-                                           : next_frame_index)
+            range_frames ? puller(slot.cancel ? next_frame_index + slots_granted - slots_routed - 1
+                                              : next_frame_index)
                          : nullptr;
         ++slots_routed;
-        for(std::uint32_t r = 0; r < plan.M; ++r)
-            if((every_mask & (std::uint64_t{1} << r)) && rows[r].reserved)
-                --rows[r].reserved;
+        for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+            if((every_mask & (std::uint64_t{1} << row_index)) && rows[row_index].reserved)
+                --rows[row_index].reserved;
         if(to_puller && to_puller->reserved)
             --to_puller->reserved;
-        if(!s.cancel)
+        if(!slot.cancel)
         {
-            wire::put64(records.data() + std::uint64_t(k) * plan.sizes.record_stride,
+            wire::put64(records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride,
                         next_frame_index);
-            wire::put64(records.data() + std::uint64_t(k) * plan.sizes.record_stride + 8,
-                        s.timestamp);
+            wire::put64(records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride + 8,
+                        slot.timestamp);
             ++next_frame_index;
             // Its range's puller has gone and no other could take the range: a puller with room
             // for one more takes the frame, and with none it is missing.
-            for(std::uint32_t r = 0; range_frames && !to_puller && r < plan.M; ++r)
-                if(pull_mask >> r & 1 && has_room(rows[r]))
-                    to_puller = &rows[r];
+            for(std::uint32_t row_index = 0;
+                range_frames && !to_puller && row_index < plan.row_count; ++row_index)
+                if(pull_mask >> row_index & 1 && has_room(rows[row_index]))
+                    to_puller = &rows[row_index];
             missing += range_frames && !to_puller;
             std::uint64_t to = 0;
-            for(std::uint32_t r = 0; r < plan.M; ++r)
+            for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
             {
-                auto bit = std::uint64_t{1} << r;
-                auto &row = rows[r];
+                auto bit = std::uint64_t{1} << row_index;
+                auto &row = rows[row_index];
                 if(!row.ready || row.closing)
                     continue;
                 if(every_mask & bit || &row == to_puller)
                     to |= bit; // it joined before the first grant
-                else if(!row.pull && row.sent - row.credited < row.depth && row.in_flight == 0 &&
-                        now - row.last_send_ns >= row.min_interval_ns &&
-                        (!row.ring ||
-                         place(row.sent_bytes, s.bytes, row.ring) + s.bytes - row.credited_bytes <=
-                             row.ring))
+                else if(!row.pull && row.sent - row.credited < row.ring_depth &&
+                        row.in_flight == 0 && now - row.last_send_ns >= row.min_interval_ns &&
+                        (!row.ring_bytes ||
+                         place(row.sent_bytes, slot.payload_bytes, row.ring_bytes) +
+                                 slot.payload_bytes - row.credited_bytes <=
+                             row.ring_bytes))
                     to |= bit;
             }
-            for(std::uint32_t r = 0; r < plan.M; ++r)
+            for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
             {
-                auto bit = std::uint64_t{1} << r;
+                auto bit = std::uint64_t{1} << row_index;
                 if(ready_mask & bit && !((every_mask | pull_mask) & bit) && !(to & bit))
                 {
                     ++skipped;
-                    ++rows[r].skipped;
+                    ++rows[row_index].skipped;
                 }
             }
-            for(std::uint32_t r = 0; r < plan.M; ++r)
-                if(to & (std::uint64_t{1} << r))
-                    send_frame(k, r, now);
+            for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+                if(to & (std::uint64_t{1} << row_index))
+                    send_frame(slot_index, row_index, now);
         }
         else
         {
-            s.cancel = false;
+            slot.cancel = false;
         }
         work = true;
     }
@@ -731,11 +738,11 @@ bool Pub::route_pass(std::int64_t now)
     bool sending = false;
     for(const auto &row : rows)
         sending |= row.pull && row.ready && row.in_flight;
-    for(std::uint32_t r = 0; r < plan.M; ++r)
+    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
-        auto &row = rows[r];
+        auto &row = rows[row_index];
         if(row.ready && !row.end_sent && row.in_flight == 0 && !(row.pull && sending))
-            send_end(r);
+            send_end(row_index);
     }
     return work;
 }
@@ -747,27 +754,27 @@ bool Pub::grant_pass()
     blocked = 0;
     for(;;)
     {
-        int k = -1;
-        for(std::uint32_t i = 0; i < plan.S; ++i)
+        int slot_index = -1;
+        for(std::uint32_t i = 0; i < plan.slot_count; ++i)
         {
-            auto q = (scan + i) % plan.S;
-            if(!slots[q].held && slots[q].sends == 0)
+            auto candidate = (scan + i) % plan.slot_count;
+            if(!slots[candidate].held && slots[candidate].sends == 0)
             {
-                k = q;
-                scan = (q + 1) % plan.S;
+                slot_index = candidate;
+                scan = (candidate + 1) % plan.slot_count;
                 break;
             }
         }
-        if(k < 0)
+        if(slot_index < 0)
             break;
         bool room = true;
-        for(std::uint32_t r = 0; r < plan.M; ++r)
-            if((ready_mask & every_mask) & (std::uint64_t{1} << r))
+        for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+            if((ready_mask & every_mask) & (std::uint64_t{1} << row_index))
             {
-                if(!has_room(rows[r]))
+                if(!has_room(rows[row_index]))
                 {
                     room = false;
-                    blocked = r + 1;
+                    blocked = row_index + 1;
                     break;
                 }
             }
@@ -779,22 +786,23 @@ bool Pub::grant_pass()
         if(room && pull_mask && !(p && has_room(*p)))
         {
             auto *slow = p;
-            for(std::uint32_t r = 0; !p && r < plan.M; ++r)
-                if(pull_mask >> r & 1 && !(slow && slow->last_send_ns <= rows[r].last_send_ns))
-                    slow = &rows[r];
+            for(std::uint32_t row_index = 0; !p && row_index < plan.row_count; ++row_index)
+                if(pull_mask >> row_index & 1 &&
+                   !(slow && slow->last_send_ns <= rows[row_index].last_send_ns))
+                    slow = &rows[row_index];
             room = false;
             blocked = slow->row + 1;
         }
         if(!room)
             break;
-        for(std::uint32_t r = 0; r < plan.M; ++r)
-            if((ready_mask & every_mask) & (std::uint64_t{1} << r))
-                ++rows[r].reserved;
+        for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+            if((ready_mask & every_mask) & (std::uint64_t{1} << row_index))
+                ++rows[row_index].reserved;
         if(p)
             ++p->reserved;
-        slots[k].held = true;
-        order[slots_granted % plan.S] = k;
-        grants.push(k);
+        slots[slot_index].held = true;
+        order[slots_granted % plan.slot_count] = slot_index;
+        grants.push(slot_index);
         ++slots_granted;
         work = true;
     }
@@ -803,21 +811,21 @@ bool Pub::grant_pass()
 bool Pub::retire_pass(std::int64_t now)
 {
     bool work = false;
-    for(std::uint32_t r = 0; r < plan.M; ++r)
+    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
-        auto &row = rows[r];
+        auto &row = rows[row_index];
         if(!row.used || !row.closing)
             continue;
         if(row.end_due && !row.end_sent && row.in_flight == 0 && row.ep)
         {
-            send_end(r);
+            send_end(row_index);
             work = true;
             continue;
         }
         bool late = now - row.close_started_ns > k_close_ns;
         if(row.ep && !row.close_started && late)
         {
-            auto *o = operations.control(r, OpKind::Close);
+            auto *o = operations.control(row_index, OpKind::Close);
             if(!o->in_flight)
             {
                 o->in_flight = true;
@@ -838,7 +846,7 @@ bool Pub::retire_pass(std::int64_t now)
         }
         else if(row.ep && !row.close_started && !row.flush_started && row.in_flight == 0)
         {
-            auto *o = operations.control(r, OpKind::Flush);
+            auto *o = operations.control(row_index, OpKind::Flush);
             if(!o->in_flight)
             {
                 o->in_flight = true;
@@ -857,7 +865,7 @@ bool Pub::retire_pass(std::int64_t now)
         }
         else if(row.ep && row.flush_done && !row.close_started && !row.in_flight)
         {
-            auto *o = operations.control(r, OpKind::Close);
+            auto *o = operations.control(row_index, OpKind::Close);
             if(!o->in_flight)
             {
                 o->in_flight = true;
@@ -875,8 +883,8 @@ bool Pub::retire_pass(std::int64_t now)
             }
         }
         if(row.close_done && row.in_flight == 0 &&
-           !operations.control(r, OpKind::Flush)->in_flight &&
-           !operations.control(r, OpKind::Close)->in_flight)
+           !operations.control(row_index, OpKind::Flush)->in_flight &&
+           !operations.control(row_index, OpKind::Close)->in_flight)
         {
             if(row.close_reply)
             {
@@ -887,7 +895,7 @@ bool Pub::retire_pass(std::int64_t now)
             row.closing = false;
             row.end_due = false;
             row.end_sent = false;
-            retiring_mask &= ~(std::uint64_t{1} << r);
+            retiring_mask &= ~(std::uint64_t{1} << row_index);
             work = true;
         }
         else if(row.close_started && now - row.close_started_ns > k_close_ns + k_quarantine_ns)
@@ -906,17 +914,18 @@ void Pub::timer_pass(std::int64_t now)
 {
     bool waiting = !finishing.load(std::memory_order_relaxed) && grants.empty() && blocked;
     auto timeout = std::chrono::nanoseconds(limits.pressure_timeout).count();
-    for(std::uint32_t r = 0; r < plan.M; ++r)
+    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
-        auto &row = rows[r];
-        bool blocking = waiting && (every_mask >> r & 1 ? !has_room(row)
-                                                        : pull_mask >> r & 1 && blocked == r + 1);
+        auto &row = rows[row_index];
+        bool blocking = waiting && (every_mask >> row_index & 1
+                                        ? !has_room(row)
+                                        : pull_mask >> row_index & 1 && blocked == row_index + 1);
         if(!blocking)
             row.blocked_since_ns = 0;
         else if(!row.blocked_since_ns)
             row.blocked_since_ns = now;
         else if(timeout && now - row.blocked_since_ns > timeout)
-            retire(r, wire::Evicted, true);
+            retire(row_index, wire::Evicted, true);
     }
     publish_health();
 }
@@ -928,25 +937,25 @@ void Pub::publish_health()
     o.missing = missing;
     o.failed_every = failed_every;
     o.pressure_from = grants.empty() && blocked ? rows[blocked - 1].ordinal : 0;
-    for(std::uint32_t k = 0; k < plan.S; ++k)
+    for(std::uint32_t slot_index = 0; slot_index < plan.slot_count; ++slot_index)
     {
-        o.slots_free += !slots[k].held && slots[k].sends == 0;
-        o.slots_held += slots[k].held;
+        o.slots_free += !slots[slot_index].held && slots[slot_index].sends == 0;
+        o.slots_held += slots[slot_index].held;
     }
     o.memory_hooks = context->memory_hooks();
     // The frames a row can still be granted: rows of its tables and, in a packed ring, bytes.
     auto room = [&](const PubRow &w) -> std::uint64_t
     {
-        auto frames = w.depth - std::min<std::uint64_t>(w.depth, w.sent - w.credited);
-        if(!w.ring)
+        auto frames = w.ring_depth - std::min<std::uint64_t>(w.ring_depth, w.sent - w.credited);
+        if(!w.ring_bytes)
             return frames;
-        auto fit = (w.ring - (w.sent_bytes - w.credited_bytes) + 1) / plan.sizes.frame_bytes;
+        auto fit = (w.ring_bytes - (w.sent_bytes - w.credited_bytes) + 1) / plan.sizes.frame_bytes;
         return std::min(frames, fit ? fit - 1 : 0);
     };
     for(const auto &w : rows)
         if(w.used)
             o.rows[o.count++] = {
-                w.ordinal, w.depth,           std::uint32_t(room(w)),
+                w.ordinal, w.ring_depth,      std::uint32_t(room(w)),
                 w.every,   w.closing,         w.sent,
                 w.skipped, w.transfer_max_ns, w.sent ? w.transfer_sum_ns / std::int64_t(w.sent) : 0,
                 w.label,   w.transport,       w.pull,
@@ -964,18 +973,18 @@ void Pub::quarantine_owner()
 void Pub::shutdown()
 {
     auto now = now_ns();
-    for(std::uint32_t r = 0; r < plan.M; ++r)
-        if(rows[r].used && !rows[r].closing)
+    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+        if(rows[row_index].used && !rows[row_index].closing)
         {
-            retire(r, wire::Closing, false);
-            rows[r].end_due = true; // the subscriber learns why its session ended
+            retire(row_index, wire::Closing, false);
+            rows[row_index].end_due = true; // the subscriber learns why its session ended
         }
     auto deadline = now + k_close_ns + k_quarantine_ns;
     while(now_ns() < deadline)
     {
         bool active = false;
-        for(auto &r : rows)
-            active |= r.used;
+        for(auto &row : rows)
+            active |= row.used;
         if(!active)
             break;
         control_pass();
@@ -984,8 +993,8 @@ void Pub::shutdown()
         std::this_thread::yield();
     }
     bool active = false;
-    for(auto &r : rows)
-        active |= r.used;
+    for(auto &row : rows)
+        active |= row.used;
     if(active)
     {
         quarantine_owner();
@@ -1079,10 +1088,11 @@ std::optional<Slot> Publisher::acquire(Deadline d)
 {
     if(!p_ || p_->finishing.load())
         return {};
-    int k = p_->grants.pop_until(d, [&] { return p_->finishing.load() || p_->stopping.load(); });
-    if(k < 0)
+    int slot_index =
+        p_->grants.pop_until(d, [&] { return p_->finishing.load() || p_->stopping.load(); });
+    if(slot_index < 0)
         return {};
-    return Slot(p_, k);
+    return Slot(p_, slot_index);
 }
 // No slot is granted before this, and no every Open is accepted after it.
 void Publisher::ucx_start()
