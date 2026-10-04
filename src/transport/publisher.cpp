@@ -36,8 +36,7 @@ struct PubRow
     Text<64> label, transport;
     bool used = false, ready = false, every = false, closing = false, end_due = false,
          end_sent = false, gpu = false, pull = false;
-    bool flush_started = false, flush_done = false, close_started = false, close_done = false,
-         forced = false;
+    bool flush_started = false, flush_done = false, close_started = false, close_done = false;
     wire::Reason reason = wire::FinishedReason;
     std::int64_t close_started_ns = 0;
     ControlEntry *close_reply = nullptr;
@@ -492,13 +491,7 @@ void Pub::on_control(OpMeta *operation, ucs_status_t status)
                 retire(row_index, wire::Closing, true);
             return;
         case OpKind::Flush:
-            if(status != UCS_OK)
-            {
-                row.forced = true;
-                row.flush_done = true;
-            }
-            else
-                row.flush_done = true;
+            row.flush_done = true;
             return;
         case OpKind::Close:
             row.close_done = true;
@@ -843,7 +836,6 @@ bool Pub::retire_pass(std::int64_t now)
                 params.user_data = operation;
                 params.flags = UCP_EP_CLOSE_FLAG_FORCE;
                 row.close_started = true;
-                row.forced = true;
                 auto *request = ucp_ep_close_nbx(row.ep, &params);
                 if(!UCS_PTR_IS_PTR(request))
                     on_control(operation, UCS_PTR_STATUS(request));
