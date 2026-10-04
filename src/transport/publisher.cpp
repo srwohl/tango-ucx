@@ -143,6 +143,26 @@ void send_cb(void *, ucs_status_t status, void *arg)
     else
         publisher->on_control(operation, status);
 }
+// Puts an operation in flight and returns what UCX needs to run it. The request lives in the
+// operation's own storage, and send_cb is called when it completes.
+ucp_request_param_t prepare(OpMeta &operation, std::uint32_t flags = 0)
+{
+    operation.in_flight = true;
+    ucp_request_param_t params{};
+    params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
+                          UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_FLAGS;
+    params.flags = flags;
+    params.request = &operation;
+    params.cb.send = send_cb;
+    params.user_data = &operation;
+    return params;
+}
+// UCX does not call send_cb for an operation that completed at once, so it is called here.
+void complete_if_done(OpMeta &operation, ucs_status_ptr_t request)
+{
+    if(!UCS_PTR_IS_PTR(request))
+        send_cb(nullptr, UCS_PTR_STATUS(request), &operation);
+}
 void ep_error(void *arg, ucp_ep_h, ucs_status_t status)
 {
     auto *row = static_cast<PubRow *>(arg);
@@ -256,11 +276,7 @@ void Pub::run()
         catch(...)
         {
         };
-        source.unmap();
-        if(worker)
-            worker->destroy();
-        if(context)
-            context->destroy();
+        shutdown(); // no session was opened, so this only releases what setup created
         return;
     }
     unsigned idle = 0;
@@ -306,12 +322,15 @@ bool Pub::has_room(const PubRow &row, std::uint64_t frames, std::uint64_t grants
             ring_room(row.sent_bytes - row.credited_bytes, row.reserved + grants - 1,
                       plan.sizes.frame_bytes, row.ring_bytes));
 }
-// The puller that holds the range of a frame index, or none. The index says which range, and
+// The puller that holds the range of a frame index, or none, as in a stream with no pull set.
+// The index says which range, and
 // the table which puller: after a pass no rule gives it. A range's first grant gives the range
 // to the next puller in the fixed order that has room for all of it. A range whose puller has
 // gone goes to the next with room for its grants outstanding, which that puller then reserves.
 PubRow *Pub::puller(std::uint64_t frame_index)
 {
+    if(!range_frames)
+        return nullptr;
     auto range_start = frame_index - frame_index % range_frames;
     auto &holder = range_pullers[frame_index / range_frames % range_pullers.size()];
     bool untaken = frame_index / range_frames == ranges_taken;
@@ -390,26 +409,18 @@ void Pub::cancel_slot(std::uint32_t slot_index)
 void Pub::send_control(std::uint32_t row_index, OpKind kind, std::uint8_t message_id,
                        std::span<const std::byte> encoded)
 {
+    assert(kind == OpKind::Ready || kind == OpKind::End);
     auto &operation = *operations.control(row_index, kind);
     if(operation.in_flight)
         return;
     auto header = operations.header(&operation);
     assert(encoded.size() <= header.size());
     std::memcpy(header.data(), encoded.data(), encoded.size());
-    operation.in_flight = true;
     auto &row = rows[row_index];
-    if(kind == OpKind::Ready || kind == OpKind::End)
-        ++row.in_flight;
-    ucp_request_param_t params{};
-    params.op_attr_mask =
-        UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-    params.request = &operation;
-    params.cb.send = send_cb;
-    params.user_data = &operation;
-    auto *request =
-        ucp_am_send_nbx(row.ep, message_id, header.data(), encoded.size(), nullptr, 0, &params);
-    if(!UCS_PTR_IS_PTR(request))
-        on_control(&operation, UCS_PTR_STATUS(request));
+    ++row.in_flight;
+    auto params = prepare(operation);
+    complete_if_done(operation, ucp_am_send_nbx(row.ep, message_id, header.data(), encoded.size(),
+                                                nullptr, 0, &params));
 }
 void Pub::send_end(std::uint32_t row_index)
 {
@@ -429,20 +440,11 @@ void Pub::start_teardown(std::uint32_t row_index, OpKind kind, bool force)
     auto &operation = *operations.control(row_index, kind);
     if(operation.in_flight)
         return;
-    operation.in_flight = true;
     auto &row = rows[row_index];
     (kind == OpKind::Flush ? row.flush_started : row.close_started) = true;
-    ucp_request_param_t params{};
-    params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
-                          UCP_OP_ATTR_FIELD_USER_DATA | (force ? UCP_OP_ATTR_FIELD_FLAGS : 0);
-    params.request = &operation;
-    params.cb.send = send_cb;
-    params.user_data = &operation;
-    params.flags = force ? UCP_EP_CLOSE_FLAG_FORCE : 0;
-    auto *request = kind == OpKind::Flush ? ucp_ep_flush_nbx(row.ep, &params)
-                                          : ucp_ep_close_nbx(row.ep, &params);
-    if(!UCS_PTR_IS_PTR(request))
-        on_control(&operation, UCS_PTR_STATUS(request));
+    auto params = prepare(operation, force ? UCP_EP_CLOSE_FLAG_FORCE : 0);
+    complete_if_done(operation, kind == OpKind::Flush ? ucp_ep_flush_nbx(row.ep, &params)
+                                                      : ucp_ep_close_nbx(row.ep, &params));
 }
 
 void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int64_t now)
@@ -470,28 +472,21 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
         return;
     }
     operation.sent_ns = now;
-    operation.in_flight = true;
     row.last_send_ns = now;
     ++row.sent;
     if(row.ring_bytes)
         row.sent_bytes = frame_message.position + slot.payload_bytes;
     ++row.in_flight;
     ++slot.sends;
-    ucp_request_param_t params{};
-    params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
-                          UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMH |
-                          UCP_OP_ATTR_FIELD_MEMORY_TYPE | UCP_OP_ATTR_FIELD_FLAGS;
-    params.flags = row.gpu ? UCP_AM_SEND_FLAG_RNDV : 0; // an eager frame cannot land in GPU memory
-    params.request = &operation;
-    params.cb.send = send_cb;
-    params.user_data = &operation;
+    // An eager frame cannot land in GPU memory.
+    auto params = prepare(operation, row.gpu ? UCP_AM_SEND_FLAG_RNDV : 0);
+    params.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
     params.memh = source.memh();
     params.memory_type = UCS_MEMORY_TYPE_HOST;
-    auto *request = ucp_am_send_nbx(row.ep, wire::Frame, header.data(), header_bytes,
-                                    source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
-                                    slot.payload_bytes, &params);
-    if(!UCS_PTR_IS_PTR(request))
-        on_send(&operation, UCS_PTR_STATUS(request));
+    complete_if_done(operation,
+                     ucp_am_send_nbx(row.ep, wire::Frame, header.data(), header_bytes,
+                                     source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
+                                     slot.payload_bytes, &params));
 }
 void Pub::on_send(OpMeta *operation, ucs_status_t status)
 {
@@ -684,7 +679,7 @@ void Pub::unissue_grants()
         slots[slot_index].held = false;
     // The grants in the ring are the newest, so they would have had the last frame indices.
     auto newest = next_frame_index + slots_granted - slots_routed - 1;
-    for(std::uint32_t back = 0; range_frames && back < queued; ++back)
+    for(std::uint32_t back = 0; back < queued; ++back)
         if(auto *holder = puller(newest - back); holder && holder->reserved)
             --holder->reserved;
     slots_granted -= queued;
@@ -708,10 +703,8 @@ bool Pub::route_pass(std::int64_t now)
         slot.held = false;
         // The puller this frame goes to. A cancelled slot uses no frame index, so every later
         // grant moves down by one, and the puller of the newest granted index loses one grant.
-        auto *to_puller =
-            range_frames ? puller(slot.cancel ? next_frame_index + slots_granted - slots_routed - 1
-                                              : next_frame_index)
-                         : nullptr;
+        auto *to_puller = puller(slot.cancel ? next_frame_index + slots_granted - slots_routed - 1
+                                             : next_frame_index);
         ++slots_routed;
         for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
             if((every_mask & (std::uint64_t{1} << row_index)) && rows[row_index].reserved)
@@ -821,9 +814,7 @@ bool Pub::grant_pass()
         // The puller of the grant's frame index, which is the next one if no slot ahead of it is
         // cancelled. The device waits for that puller or, when none has room for the range, for
         // the one longest without a frame. With no puller left it does not wait.
-        auto *holder = room && range_frames
-                           ? puller(next_frame_index + slots_granted - slots_routed)
-                           : nullptr;
+        auto *holder = room ? puller(next_frame_index + slots_granted - slots_routed) : nullptr;
         if(room && pull_mask && !(holder && has_room(*holder)))
         {
             auto *slow = holder;
@@ -976,30 +967,22 @@ void Pub::quarantine_owner()
 }
 void Pub::shutdown()
 {
-    auto now = now_ns();
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
         if(rows[row_index].used && !rows[row_index].closing)
         {
             retire(row_index, wire::Closing, false);
             rows[row_index].end_due = true; // the subscriber learns why its session ended
         }
-    auto deadline = now + k_close_ns + k_quarantine_ns;
-    while(now_ns() < deadline)
+    auto in_use = [&] { return std::ranges::any_of(rows, &PubRow::used); };
+    auto deadline = now_ns() + k_close_ns + k_quarantine_ns;
+    while(in_use() && now_ns() < deadline)
     {
-        bool active = false;
-        for(auto &row : rows)
-            active |= row.used;
-        if(!active)
-            break;
         control_pass();
         worker->progress();
         retire_pass(now_ns());
         std::this_thread::yield();
     }
-    bool active = false;
-    for(auto &row : rows)
-        active |= row.used;
-    if(active)
+    if(in_use())
     {
         quarantine_owner();
         return;
