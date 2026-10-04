@@ -185,6 +185,7 @@ Pub::Pub(Description description, PublisherLimits limits)
 {
     instance_id = (random64() >> 8) | 1;
 
+    // A maximum payload size makes this an opaque stream.
     if(this->description.max_payload_bytes)
         this->description.element = Element::Bytes;
 }
