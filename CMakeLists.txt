@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.18)
 project(tango-ucx VERSION 0.1.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 include(CTest)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -50,5 +51,11 @@ if(TANGO_UCX_CUDA)
 endif()
 install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
     FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
-install(EXPORT tango-ucx-targets NAMESPACE tango-ucx::
-    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/tango-ucx")
+set(_config_dir "${CMAKE_INSTALL_LIBDIR}/cmake/tango-ucx")
+install(EXPORT tango-ucx-targets NAMESPACE tango-ucx:: DESTINATION "${_config_dir}")
+configure_package_config_file(cmake/tango-ucx-config.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/tango-ucx-config.cmake" INSTALL_DESTINATION "${_config_dir}")
+write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/tango-ucx-config-version.cmake"
+    COMPATIBILITY SameMinorVersion)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/tango-ucx-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/tango-ucx-config-version.cmake" DESTINATION "${_config_dir}")

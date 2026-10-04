@@ -44,6 +44,28 @@ add_test(NAME test_python
         "${Python3_EXECUTABLE}" -m pytest "${PROJECT_SOURCE_DIR}/python/tests")
 set_tests_properties(test_python PROPERTIES LABELS python)
 
+# A project outside the tree builds against the installed package, and Python imports the
+# installed one. A consumer built without the sanitizer would not link a sanitized archive.
+if(NOT TANGO_UCX_SANITIZERS)
+    set(stage "${CMAKE_BINARY_DIR}/stage")
+    add_test(NAME install_stage
+        COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}" --prefix "${stage}")
+    add_test(NAME install_consumer
+        COMMAND "${CMAKE_CTEST_COMMAND}" --build-and-test "${CMAKE_CURRENT_SOURCE_DIR}/install"
+            "${stage}/consumer" --build-generator "${CMAKE_GENERATOR}" --build-options
+            "-DCMAKE_PREFIX_PATH=${stage}" "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+            --test-command consumer)
+    add_test(NAME install_python
+        COMMAND "${CMAKE_COMMAND}" -E env "PYTHONPATH=${stage}/${TANGO_UCX_PYTHON_SITE}"
+            "${Python3_EXECUTABLE}" -c
+            "import tango_ucx; assert tango_ucx.__file__.startswith('${stage}/'), tango_ucx.__file__")
+    add_test(NAME install_remove COMMAND "${CMAKE_COMMAND}" -E rm -rf "${stage}")
+    set_tests_properties(install_stage PROPERTIES FIXTURES_SETUP stage LABELS install)
+    set_tests_properties(install_remove PROPERTIES FIXTURES_CLEANUP stage LABELS install)
+    set_tests_properties(install_consumer install_python PROPERTIES
+        FIXTURES_REQUIRED stage LABELS install)
+endif()
+
 if(TANGO_UCX_CUDA)
     add_subdirectory(gpu)
 endif()

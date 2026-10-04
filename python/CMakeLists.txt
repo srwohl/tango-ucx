@@ -19,8 +19,9 @@ configure_file(tango_ucx/__init__.py "${_python_build_package}/__init__.py" COPY
 configure_file(tango_ucx/_async.py "${_python_build_package}/_async.py" COPYONLY)
 configure_file(tango_ucx/subscription.py "${_python_build_package}/subscription.py" COPYONLY)
 
-set(_python_install_dir
-    "${CMAKE_INSTALL_LIBDIR}/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages/tango_ucx")
-install(TARGETS _core LIBRARY DESTINATION "${_python_install_dir}")
+set(_python_site
+    "${CMAKE_INSTALL_LIBDIR}/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages")
+set(TANGO_UCX_PYTHON_SITE "${_python_site}" PARENT_SCOPE) # the install test imports from it
+install(TARGETS _core LIBRARY DESTINATION "${_python_site}/tango_ucx")
 install(FILES tango_ucx/__init__.py tango_ucx/_async.py tango_ucx/subscription.py
-    DESTINATION "${_python_install_dir}")
+    DESTINATION "${_python_site}/tango_ucx")
