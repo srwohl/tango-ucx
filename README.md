@@ -6,7 +6,7 @@ The host-only UCX vertical slice, Tango control, and Python host subscriber are
 implemented. CUDA receive through DLPack is Phase 3. Opaque streams, which carry a
 detector's compressed frames unchanged and each with its own length, are Phase 4
 ([`NEXT.md`](NEXT.md)). Pull delivery shares one UCX stream among a set of pullers, a range
-of frames at a time ([`NEXT-pull.md`](NEXT-pull.md)).
+of frames at a time.
 
 Library and test source must remain under the line ceiling in `budget.toml`, which also
 records the estimates and per-file allowances.
