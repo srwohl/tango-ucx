@@ -872,7 +872,15 @@ namespace TangoUcx
 {
 Subscription::Subscription(std::unique_ptr<transport::Sub> s) : s_(std::move(s)) {}
 Subscription::Subscription(Subscription &&) noexcept = default;
-Subscription &Subscription::operator=(Subscription &&) noexcept = default;
+Subscription &Subscription::operator=(Subscription &&other) noexcept
+{
+    if(this != &other)
+    {
+        close(std::chrono::steady_clock::now() + std::chrono::seconds(2));
+        s_ = std::move(other.s_);
+    }
+    return *this;
+}
 Subscription::~Subscription()
 {
     close(std::chrono::steady_clock::now() + std::chrono::seconds(2));

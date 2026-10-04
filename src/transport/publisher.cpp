@@ -93,6 +93,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     explicit Pub(Description, PublisherLimits);
     ~Pub();
     void start();
+    void stop();
     void run();
     void setup();
     void shutdown();
@@ -196,12 +197,16 @@ Pub::Pub(Description description, PublisherLimits limits)
 }
 Pub::~Pub()
 {
+    stop();
+}
+// Ends the loop and waits for it. The loop holds a reference to its publisher, so letting go of
+// the last handle does not end it.
+void Pub::stop()
+{
+    stopping = true;
+    control.wake();
     if(loop.joinable())
-    {
-        stopping = true;
-        control.wake();
         loop.join();
-    }
 }
 void Pub::start()
 {
@@ -1071,18 +1076,20 @@ Publisher::Publisher(Description description, PublisherLimits limits)
     p_->start();
 }
 Publisher::Publisher(Publisher &&) noexcept = default;
-Publisher &Publisher::operator=(Publisher &&) noexcept = default;
+Publisher &Publisher::operator=(Publisher &&other) noexcept
+{
+    if(this != &other)
+    {
+        if(p_)
+            p_->stop();
+        p_ = std::move(other.p_);
+    }
+    return *this;
+}
 Publisher::~Publisher()
 {
     if(p_)
-    {
-        p_->stopping.store(true);
-        p_->control.wake();
-        if(p_->loop.joinable())
-            p_->loop.join();
-        if(p_->quarantined)
-            p_.reset();
-    }
+        p_->stop();
 }
 std::optional<Slot> Publisher::acquire(Deadline deadline)
 {

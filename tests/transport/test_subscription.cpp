@@ -291,3 +291,30 @@ TEST_CASE("a publisher that closes tells its subscriptions why they end")
     CHECK(sub.outcome() == Outcome::Failed);
     CHECK(sub.health().failure == "the publisher closed");
 }
+
+TEST_CASE("a subscription that is assigned over closes as a destroyed one does")
+{
+    Publisher publisher(test::small_description(), test::small_limits(1));
+    int closes = 0;
+    auto sub = test::subscribe(publisher, true, test::small_options(),
+                               [&, fence = test::closer_for(publisher)](auto doc, Deadline by)
+                               {
+                                   ++closes;
+                                   return fence(doc, by);
+                               });
+    sub = Subscription();
+    CHECK(closes == 1);
+    // one row: this Open would be refused if the session were still open
+    CHECK_NOTHROW(test::subscribe(publisher, true).close(test::deadline()));
+}
+
+TEST_CASE("a publisher that is assigned over closes as a destroyed one does")
+{
+    Publisher publisher(test::small_description(), test::small_limits(1));
+    auto sub = test::subscribe(publisher, true, test::small_options(),
+                               test::FaultAdapter::lose_close_fence());
+    publisher = Publisher(test::small_description(), test::small_limits(1));
+    CHECK_FALSE(sub.read(test::deadline()));
+    CHECK(sub.outcome() == Outcome::Failed);
+    CHECK(sub.health().failure == "the publisher closed");
+}
