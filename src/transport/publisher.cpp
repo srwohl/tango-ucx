@@ -201,7 +201,7 @@ Pub::~Pub()
 void Pub::start()
 {
     auto ready = setup_done.get_future();
-    loop = std::jthread([self = shared_from_this()] { self->run(); });
+    loop = std::jthread(&Pub::run, shared_from_this());
     // A refused setup: join here, or the loop may drop the last reference and join itself.
     ready.wait();
     if(!setup_ok)
