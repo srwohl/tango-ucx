@@ -103,6 +103,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     int find_row(std::uint64_t) const;
     bool has_room(const PubRow &, std::uint64_t frames = 1, std::uint64_t grants = 1) const;
     PubRow *puller(std::uint64_t);
+    wire::Status check_open(const wire::OpenMessage &) const;
     bool control_pass();
     void unissue_grants();
     bool route_pass(std::int64_t);
@@ -530,6 +531,32 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     row.end_due = why != wire::FinishedReason && why != wire::Closing;
     retiring_mask |= bit;
 }
+// Why an Open is refused, or Ok. The checks run in order and the first that fails decides.
+wire::Status Pub::check_open(const wire::OpenMessage &open_message) const
+{
+    // An every subscription or a puller can make the device wait.
+    bool holds_device = open_message.every || open_message.range;
+    bool is_puller = open_message.range != 0;
+    if(open_message.instance_id != instance_id)
+        return wire::InstanceId;
+    if(finishing.load())
+        return wire::Finished;
+    if(holds_device && !limits.allow_every)
+        return wire::EveryRefused;
+    if(holds_device && started.load(std::memory_order_acquire))
+        return wire::Started; // every and pull must join before the start
+    if(find_row(open_message.session) >= 0)
+        return wire::Malformed; // the session id is already in use
+    if(plan.sizes.opaque && open_message.ring_bytes < 2 * plan.sizes.frame_bytes)
+        return wire::Malformed; // a packed ring must hold two of the largest frame
+    if(is_puller && open_message.range % open_message.batch)
+        return wire::Range; // a range must be whole batches
+    if(is_puller && open_message.range > open_message.depth)
+        return wire::Range; // a range must fit the ring
+    if(is_puller && pull_mask && open_message.range != range_frames)
+        return wire::Range; // every puller of a set has the same range
+    return wire::Ok;
+}
 bool Pub::control_pass()
 {
     return control.drain(
@@ -548,36 +575,12 @@ bool Pub::control_pass()
                 return;
             }
             const auto &open_message = *entry.in.open;
-            wire::Status status = wire::Ok;
-            std::uint32_t row_index = plan.row_count;
-            // An every subscription or a puller can make the device wait.
-            bool holds_device = open_message.every || open_message.range;
-            if(open_message.instance_id != instance_id)
-                status = wire::InstanceId;
-            else if(finishing.load())
-                status = wire::Finished;
-            else if(holds_device && !limits.allow_every)
-                status = wire::EveryRefused;
-            else if(holds_device && started.load(std::memory_order_acquire))
-                status = wire::Started; // every and pull must join before the start
-            else if(find_row(open_message.session) >= 0 ||
-                    (plan.sizes.opaque && open_message.ring_bytes < 2 * plan.sizes.frame_bytes))
-                status = wire::Malformed; // a duplicate session, or a ring under two frames
-            else if(open_message.range && (open_message.range % open_message.batch ||
-                                           open_message.range > open_message.depth ||
-                                           (pull_mask && open_message.range != range_frames)))
-                status = wire::Range; // must be whole batches, fit the ring, and match the set
-            else
-            {
-                for(std::uint32_t i = 0; i < plan.row_count; ++i)
-                    if(!rows[i].used)
-                    {
-                        row_index = i;
-                        break;
-                    }
-                if(row_index == plan.row_count)
-                    status = wire::NoSession;
-            }
+            auto status = check_open(open_message);
+            std::uint32_t row_index = 0;
+            while(row_index < plan.row_count && rows[row_index].used)
+                ++row_index;
+            if(status == wire::Ok && row_index == plan.row_count)
+                status = wire::NoSession;
             if(status != wire::Ok)
             {
                 control.reply(entry, {status});
