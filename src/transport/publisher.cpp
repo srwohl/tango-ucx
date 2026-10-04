@@ -343,7 +343,7 @@ std::span<std::byte> Pub::fields(std::uint32_t slot_index)
     return {records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride + 16,
             plan.sizes.field_bytes};
 }
-// An opaque frame names its length; an array frame has the one its shape gives.
+// Marks a filled slot ready to send. Opaque streams pass the frame's length; array streams do not.
 void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> timestamp,
                        std::optional<std::size_t> bytes)
 {
@@ -363,6 +363,7 @@ void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> ti
     slot.cancel = false;
     slot.posted.store(true, std::memory_order_release);
 }
+// Gives a slot back unpublished. It is still posted because the loop takes slots in grant order.
 void Pub::cancel_slot(std::uint32_t slot_index)
 {
     if(slot_index < plan.slot_count)
