@@ -59,13 +59,14 @@ std::string command(Tango::DeviceProxy &proxy, const std::string &name, std::str
     proxy.command_inout(name, in) >> reply;
     return reply;
 }
-Subscription subscribe(Tango::DeviceProxy &proxy, bool every, SubscriptionOptions options)
+Subscription subscribe(Tango::DeviceProxy &proxy, bool every, SubscriptionOptions options,
+                       std::uint32_t range = 0)
 {
     auto names = discover(proxy);
     std::string stream;
     proxy.read_attribute("UcxStream") >> stream;
     auto pending =
-        transport::prepare(transport::parse_ucx_stream(stream), every, std::move(options));
+        transport::prepare(transport::parse_ucx_stream(stream), every, std::move(options), range);
     auto reply = command(proxy, names.open, pending.open_message());
     // Close uses its own copy of the proxy: it may run after the caller's proxy is gone, and it
     // sets the timeout from the close deadline without touching the caller's.
@@ -90,5 +91,11 @@ Subscription every(Tango::DeviceProxy &proxy, SubscriptionOptions options)
 Subscription latest(Tango::DeviceProxy &proxy, SubscriptionOptions options)
 {
     return subscribe(proxy, false, std::move(options));
+}
+Subscription pull(Tango::DeviceProxy &proxy, std::uint32_t range, SubscriptionOptions options)
+{
+    if(!range)
+        throw std::invalid_argument("a puller's range is at least one frame");
+    return subscribe(proxy, false, std::move(options), range);
 }
 } // namespace TangoUcx

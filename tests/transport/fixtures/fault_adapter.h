@@ -82,7 +82,7 @@ struct RawPeer
     {
         wire::OpenMessage m{};
         m.session = session;
-        m.incarnation = offer_of(publisher).incarnation;
+        m.instance_id = offer_of(publisher).instance_id;
         m.depth = depth;
         m.ring_bytes = ring_bytes;
         m.batch = 1;

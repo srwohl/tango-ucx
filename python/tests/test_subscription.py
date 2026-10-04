@@ -12,7 +12,7 @@ import tango_ucx
 import tango_ucx.subscription as subscription_module
 
 
-STREAM = json.dumps({"interface": "tango-ucx-stream/3.0", "incarnation": 12})
+STREAM = json.dumps({"interface": "tango-ucx-stream/3.0", "instance_id": 12})
 OPEN_REPLY = json.dumps({"interface": "tango-ucx-reply/3.0", "status": "ok"})
 CLOSE_REPLY = json.dumps({"interface": "tango-ucx-reply/3.0", "status": "ok"})
 

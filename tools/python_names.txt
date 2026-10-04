@@ -4,6 +4,7 @@
 
 every
 latest
+pull
 Subscription
 Batch
 Failed

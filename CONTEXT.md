@@ -39,18 +39,19 @@ dtype string that the library carries without interpreting.
 _Avoid_: extension, user data, custom metadata
 
 **Frame index**:
-A frame's position in its incarnation's publication order, starting at 0. Every
-subscription sees the same index for the same frame.
+A frame's position in its publisher instance's publication order, starting at 0.
+Every subscription sees the same index for the same frame.
 _Avoid_: frame number, frame id, event counter
 
 **Description**:
-What every frame of an incarnation is: element type, shape, and the size and dtype of the
-application fields. An opaque stream's has no shape, and the most bytes a frame may have.
+What every frame of a publisher instance is: element type, shape, and the size and dtype
+of the application fields. An opaque stream's has no shape, and the most bytes a frame may have.
 _Avoid_: geometry, layout, schema, array terms
 
-**Incarnation**:
-One publisher's life, from construction to finish, with one description. A new
-incarnation restarts the frame index.
+**Instance ID**:
+The `instance_id` field identifies one publisher's life, from construction to finish,
+with one description.
+Each new publisher instance gets a new instance ID and restarts the frame index.
 _Avoid_: epoch, generation, acquisition
 
 **Batch**:
@@ -72,8 +73,8 @@ _Avoid_: producer, server
 
 **Start**:
 The point at which a publisher begins to grant slots, set by the device with `ucx_start`.
-No frame is published before it. An every subscription joins before it and is refused after
-it; a latest subscription joins at any time.
+No frame is published before it. An every subscription and a puller join before it and are
+refused after it; a latest subscription joins at any time.
 _Avoid_: arm, go
 
 **Slot**:
@@ -83,8 +84,9 @@ has the size of the largest frame, and the device says each frame's length when 
 _Avoid_: slot handle, publication, cell
 
 **Pressure**:
-The condition in which an every subscription has no room for another frame, so the
-publisher refuses new slots and the device must wait, buffer or stop.
+The condition in which an every subscription has no room for another frame, or no puller of
+a set has room for a range, so the publisher refuses new slots and the device must wait,
+buffer or stop. A puller that is passed over applies none.
 _Avoid_: backpressure, stall, throttle
 
 **Skip**:
@@ -109,8 +111,8 @@ and fixed for the subscription.
 _Avoid_: flow policy, flow, ordered, lossless, lossy
 
 **Every**:
-Delivery of every frame of the incarnation, in order, from frame index 0. The subscription
-joins before the start, and applies pressure when it has no room.
+Delivery of every frame of the publisher instance, in order, from frame index 0.
+The subscription joins before the start, and applies pressure when it has no room.
 _Avoid_: ordered, lossless, reliable
 
 **Latest**:
@@ -119,10 +121,26 @@ undelivered frame may be replaced by a newer one; a delivered frame never is.
 _Avoid_: lossy, preview, freshest, conflate
 
 **Pull**:
-Delivery shared by a set of pullers: each frame goes to exactly one puller, in contiguous
-ranges, and together they receive every frame. Named after ZeroMQ's PUSH/PULL. Planned,
-not yet built.
+Delivery shared by a set of pullers: each frame goes to exactly one puller, a range at a
+time, and together they receive every frame. The pullers take their ranges in a fixed order,
+and one that has no room for a range when its turn comes is passed over. A puller joins
+before the start. After a pass no rule says which puller has a frame: the records do. Named
+after ZeroMQ's PUSH/PULL.
 _Avoid_: group, round-robin fan-out, load balancing
+
+**Range**:
+The consecutive frames one puller receives before the next puller's turn. It is a whole
+number of batches, no more than the puller's ring depth, and the same for every puller of a
+set. A batch never spans two ranges. What is left of the range of a puller that has gone
+goes to the pullers that remain.
+_Avoid_: block, stripe, shard
+
+**Missing**:
+A frame that no puller of a set received and released: it was in the ring of a puller that
+ended before End, or no puller had room for it once its own had gone. Missing frames are
+counted, never sent again, and every puller that reaches End is told the count and ends
+failed.
+_Avoid_: lost frame, dropped frame
 
 **Fan-out**:
 Every subscription receiving its own copy of the frames its delivery entitles it to. This
@@ -196,13 +214,14 @@ How a subscription ended, reported once after its last batch: end, failed or can
 _Avoid_: end reason, terminal state, last error
 
 **End**:
-The outcome when the publisher finished its incarnation and the subscription received
-everything its delivery entitles it to.
+The outcome when the publisher finished publishing and the subscription received
+everything its delivery entitles it to. For a puller, the set also has no missing frame.
 _Avoid_: eof
 
 **Failed**:
 The outcome when the session ended without the subscriber asking: the publisher died, the
-transport broke, or the subscription was evicted.
+transport broke, or the subscription was evicted. Also a puller's outcome when its set has
+missing frames, after it received all of its own.
 _Avoid_: aborted
 
 **Cancelled**:
@@ -211,7 +230,8 @@ _Avoid_: interrupted
 
 **Eviction**:
 The publisher ending an every subscription that has held pressure longer than the
-publisher allows.
+publisher allows. Of a set, it ends the puller the device waits for: the one that holds the
+range or, when no puller has room for a range, the one longest without a frame.
 _Avoid_: kick
 
 **Health**:

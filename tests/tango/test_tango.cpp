@@ -47,9 +47,9 @@ template <class T> T attribute(Tango::DeviceProxy &p, const char *name)
     a >> v;
     return v;
 }
-std::uint64_t incarnation(Tango::DeviceProxy &p)
+std::uint64_t instance_id(Tango::DeviceProxy &p)
 {
-    return transport::parse_ucx_stream(attribute<std::string>(p, "UcxStream")).incarnation;
+    return transport::parse_ucx_stream(attribute<std::string>(p, "UcxStream")).instance_id;
 }
 // UcxSessions is sampled every 256 loop turns: read it until `done` accepts it, or the deadline.
 template <class Done> bool sessions_until(Tango::DeviceProxy &p, Done done, Deadline until)
@@ -61,13 +61,13 @@ template <class Done> bool sessions_until(Tango::DeviceProxy &p, Done done, Dead
             return false;
 }
 // What a sequencer checks before it starts a capture: each label names a ready every session of
-// this incarnation.
-bool ready(const nlohmann::json &doc, std::uint64_t incarnation, std::vector<std::string> labels)
+// this publisher instance.
+bool ready(const nlohmann::json &doc, std::uint64_t instance_id, std::vector<std::string> labels)
 {
     for(const auto &s : doc.at("sessions"))
         if(s.at("delivery") == "every" && s.at("state") == "ready")
             std::erase(labels, s.at("label").get<std::string>());
-    return doc.at("incarnation") == incarnation && labels.empty();
+    return doc.at("instance_id") == instance_id && labels.empty();
 }
 // An archiver: joins after `delay`, then reads until its outcome, `pause` after each batch.
 struct Archiver
@@ -163,6 +163,34 @@ TEST_CASE("every and latest subscriptions receive a device server's frames")
     newest.close(in());
 }
 
+TEST_CASE("the pullers of a device server's set share its frames, a range at a time")
+{
+    auto proxy = device();
+    Subscription pullers[] = {pull(proxy, 8, {.batch = 4, .label = "a"}),
+                              pull(proxy, 8, {.batch = 4, .label = "b"})};
+    CHECK_THROWS(pull(proxy, 6, {.batch = 4})); // not whole batches: the status is `range`
+    CHECK(sessions_until(
+        proxy, [](auto d) { return d["sessions"][1]["delivery"] == "pull" && d["missing"] == 0; },
+        in()));
+    REQUIRE(publish(proxy, 20) == 20);
+    proxy.command_inout("Finish");
+    std::map<std::uint64_t, int> received;
+    for(std::size_t p = 0; p < 2; ++p)
+    {
+        while(auto batch = pullers[p].read(in()))
+            for(std::size_t i = 0; i < batch->frames(); ++i)
+            {
+                CHECK(batch->index(i) / 8 % 2 == p);
+                ++received[batch->index(i)];
+            }
+        CHECK(pullers[p].outcome() == Outcome::End);
+        pullers[p].close(in());
+    }
+    CHECK(received.size() == 20);
+    for(auto [index, times] : received)
+        CHECK(times == 1);
+}
+
 TEST_CASE("UcxClose answers once the session row is free")
 {
     auto proxy = device(); // two session rows
@@ -200,8 +228,8 @@ TEST_CASE("the UCX attributes describe the stream and its sessions")
         proxy, [&](auto d)
         { return (doc = d)["sessions"].size() == 1 && doc["sessions"][0]["sent"] == 3; }, in()));
     INFO(doc.dump());
-    CHECK(doc["interface"] == "tango-ucx-sessions/3.1");
-    CHECK(doc["incarnation"] == offer.incarnation);
+    CHECK(doc["interface"] == "tango-ucx-sessions/3.2");
+    CHECK(doc["instance_id"] == offer.instance_id);
     auto row = doc["sessions"][0];
     CHECK((row["ordinal"] == 1 && row["label"] == "archiver" && row["delivery"] == "every" &&
            row["state"] == "ready" && row["skipped"] == 0));
@@ -215,7 +243,7 @@ TEST_CASE("the UCX attributes describe the stream and its sessions")
 TEST_CASE("detach_publisher waits for the UCX commands inside the publisher")
 {
     auto proxy = device();
-    auto before = incarnation(proxy);
+    auto before = instance_id(proxy);
     std::atomic<bool> stop{false};
     std::atomic<int> replies{0}, unavailable{0}, other{0};
     auto hammer = [&]
@@ -254,7 +282,7 @@ TEST_CASE("detach_publisher waits for the UCX commands inside the publisher")
     CHECK(replies > 0);
     CHECK(other == 0);
     INFO("replies " << replies << ", unavailable " << unavailable);
-    CHECK(incarnation(proxy) != before);
+    CHECK(instance_id(proxy) != before);
     auto sub = every(proxy);
     REQUIRE(publish(proxy, 1) == 1);
     CHECK(sub.read(in()));
@@ -281,14 +309,14 @@ TEST_CASE("a sequencer starts a capture once its archivers are ready, and each g
                     if(!ended)
                         ended = sub.outcome();
                 }
-                catch(...) // the finished incarnation refuses Opens until Prepare replaces it
+                catch(...) // the finished publisher refuses Opens until Prepare replaces it
                 {
                     std::this_thread::sleep_for(50ms);
                 }
         });
     REQUIRE(sessions_until(proxy, [](auto d) { return d["sessions"].size() == 1; }, in()));
     command(proxy, "Prepare", 4);
-    auto now = incarnation(proxy);
+    auto now = instance_id(proxy);
     Archiver fast("fast", 0ms, 0ms), steady("steady", 50ms, 1ms),
         slow("slow", 150ms, 20ms, 192 << 10); // its ring is shorter than the capture
     REQUIRE(sessions_until(
@@ -314,7 +342,7 @@ TEST_CASE("a sequencer whose archiver never joins does not start the capture")
 {
     auto proxy = device();
     command(proxy, "Prepare", 4);
-    auto now = incarnation(proxy);
+    auto now = instance_id(proxy);
     Archiver fast("fast", 0ms, 0ms), steady("steady", 50ms, 0ms); // "slow" never joins
     CHECK(sessions_until(proxy, [&](auto d) { return ready(d, now, {"fast", "steady"}); }, in()));
     CHECK_FALSE(sessions_until(

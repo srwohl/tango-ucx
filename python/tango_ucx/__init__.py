@@ -9,6 +9,6 @@ class Failed(Exception):
         self.last_index = last_index
 
 
-from .subscription import Batch, GpuView, Subscription, every, latest
+from .subscription import Batch, GpuView, Subscription, every, latest, pull
 
-__all__ = ["Batch", "Failed", "GpuView", "Subscription", "every", "latest"]
+__all__ = ["Batch", "Failed", "GpuView", "Subscription", "every", "latest", "pull"]

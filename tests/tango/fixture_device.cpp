@@ -19,7 +19,7 @@ using namespace TangoUcx;
 
 // Publishes frames of 4,096 bytes, each filled with its frame index's low byte, and the index
 // as its one application field. The UCX commands are installed as StreamOpen and StreamClose.
-// Opaque makes an opaque incarnation, whose frames and application fields PublishBytes is given.
+// Opaque makes an opaque publisher instance; PublishBytes supplies frames and application fields.
 class Device : public TANGO_BASE_CLASS
 {
   public:
@@ -69,8 +69,8 @@ class Device : public TANGO_BASE_CLASS
         }
         return done;
     }
-    // Ends this incarnation and makes another with `rows` session rows. The subscribers of this
-    // one get End, and five seconds to close their sessions.
+    // Ends this publisher instance and makes another with `rows` session rows. Its subscribers
+    // get End, and five seconds to close their sessions.
     void prepare(Tango::DevLong rows)
     {
         publisher->finish();
@@ -83,7 +83,7 @@ class Device : public TANGO_BASE_CLASS
         init_device();
     }
     // Publishes n frames from a thread of the device, as fast as its sessions allow, then ends
-    // the incarnation.
+    // the publisher instance.
     void start(Tango::DevLong n)
     {
         publisher->ucx_start();
@@ -97,8 +97,8 @@ class Device : public TANGO_BASE_CLASS
                 publisher->finish();
             });
     }
-    // Ends this incarnation and makes an opaque one: the most a frame may have and the size of
-    // the application fields, then their dtype.
+    // Ends this publisher instance and makes an opaque one: the maximum frame size, then
+    // the application fields' size and dtype.
     void opaque(const Tango::DevVarLongStringArray &a)
     {
         description = {Element::Bytes, {}, std::uint32_t(a.lvalue[1]), std::string(a.svalue[0])};

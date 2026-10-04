@@ -27,7 +27,7 @@ def ucx_stream():
     return json.dumps(
         {
             "interface": "tango-ucx-stream/3.0",
-            "incarnation": 12648430,
+            "instance_id": 12648430,
             "element": "u16",
             "shape": [4, 8],
             "field_bytes": 8,
@@ -51,8 +51,8 @@ def test_prepare_builds_an_open_message_from_ucx_stream_and_options(ucx_stream):
     )
 
     message = json.loads(pending.open_message())
-    assert message["interface"] == "tango-ucx-open/3.1"
-    assert message["incarnation"] == 12648430
+    assert message["interface"] == "tango-ucx-open/3.2"
+    assert message["instance_id"] == 12648430
     assert message["delivery"] == "latest"
     assert message["batch"] == 4
     assert message["min_interval_ns"] == 500_000_000
@@ -83,7 +83,7 @@ def test_start_calls_the_python_closer_after_an_accepted_open_cannot_reach_ready
 
     assert len(calls) == 1
     assert calls[0][0] == {
-        "interface": "tango-ucx-close/3.1",
+        "interface": "tango-ucx-close/3.2",
         "session": session,
     }
     assert calls[0][1] > 0

@@ -71,7 +71,7 @@ TEST_CASE("a subscriber killed with SIGKILL is detected through the UCX peer end
         if(!test::read_all(child.in(), &fo, sizeof(fo)))
             ::_exit(2);
         transport::Offer o{test::small_description(), test::small_limits(fo.sessions),
-                           fo.incarnation};
+                           fo.instance_id};
         o.limits.allow_every = fo.every != 0;
         try
         {
@@ -95,7 +95,7 @@ TEST_CASE("a subscriber killed with SIGKILL is detected through the UCX peer end
     }
     Publisher publisher(test::small_description(), test::small_limits(2));
     auto o = test::offer_of(publisher);
-    test::ForkOffer fo{o.incarnation, o.limits.max_sessions, std::uint8_t(o.limits.allow_every)};
+    test::ForkOffer fo{o.instance_id, o.limits.max_sessions, std::uint8_t(o.limits.allow_every)};
     REQUIRE(test::write_all(child.out(), &fo, sizeof(fo)));
     auto open = test::read_text(child.in());
     REQUIRE_FALSE(open.empty());
@@ -144,7 +144,7 @@ TEST_CASE("a publisher killed with SIGKILL ends an every subscription Failed aft
         {
             Publisher publisher(test::small_description(), test::small_limits(1));
             auto o = test::offer_of(publisher);
-            test::ForkOffer fo{o.incarnation, o.limits.max_sessions,
+            test::ForkOffer fo{o.instance_id, o.limits.max_sessions,
                                std::uint8_t(o.limits.allow_every)};
             if(!test::write_all(child.out(), &fo, sizeof(fo)))
                 ::_exit(2);
@@ -163,7 +163,7 @@ TEST_CASE("a publisher killed with SIGKILL ends an every subscription Failed aft
     }
     test::ForkOffer fo{};
     REQUIRE(test::read_all(child.in(), &fo, sizeof(fo)));
-    transport::Offer o{test::small_description(), test::small_limits(fo.sessions), fo.incarnation};
+    transport::Offer o{test::small_description(), test::small_limits(fo.sessions), fo.instance_id};
     o.limits.allow_every = fo.every != 0;
     auto pending = transport::prepare(o, true, test::small_options());
     REQUIRE(test::write_text(child.out(), pending.open_message()));

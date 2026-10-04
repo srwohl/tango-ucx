@@ -3,10 +3,35 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <memory.h>
+#include <publisher_operations.h>
 #include <transport.h>
 
 using namespace TangoUcx;
 using namespace TangoUcx::transport;
+
+TEST_CASE("publisher operation layout stays fixed when its source plan changes")
+{
+    auto plan = plan_publisher({Element::U8, {64}, 8}, PublisherLimits{}, 256, 4096);
+    auto slot = plan.S - 1, row = plan.M - 1, header_bytes = plan.sizes.header_bytes;
+    int owner = 0;
+    PublisherOperations operations;
+    operations.allocate(&owner, plan, 256);
+    auto *frame = operations.frame(slot, row);
+    auto *close = operations.control(row, OpKind::Close);
+    plan = {};
+    CHECK(operations.frame(slot, row) == frame);
+    CHECK(operations.control(row, OpKind::Close) == close);
+    CHECK(frame != close);
+    CHECK(frame->owner == &owner);
+    CHECK(frame->slot == slot);
+    CHECK(frame->row == row);
+    CHECK(close->kind == OpKind::Close);
+    auto header = operations.header(frame);
+    CHECK(header.size() == header_bytes);
+    std::fill(header.begin(), header.end(), std::byte{0x3c});
+    CHECK(frame->kind == OpKind::Frame);
+    CHECK(operations.header(close).size() == header_bytes);
+}
 
 TEST_CASE("host plans account for fixed slots and reject invalid bounds")
 {

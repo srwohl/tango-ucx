@@ -359,6 +359,35 @@ TEST_CASE("a latest subscription to an opaque stream skips what its packed ring 
     CHECK(sub.health().skipped > 0);
 }
 
+TEST_CASE("an opaque batch the packed ring cannot hold is cut when the ring is full, and its "
+          "subscription is not evicted")
+{
+    auto l = limits();
+    l.pressure_timeout = 300ms;
+    Publisher publisher(test::opaque_description(), l);
+    auto o = options(2ull << 20, 64); // the ring holds fewer than 32 frames of the maximum
+    o.max_wait = 30s;
+    auto sub = test::subscribe(publisher, true, o);
+    const std::uint64_t frames = 100;
+    std::jthread device(
+        [&]
+        {
+            for(std::uint64_t i = 0; i < frames; ++i)
+                if(!test::publish_opaque(publisher, 64 << 10, i))
+                    break;
+            publisher.finish();
+        });
+    std::uint64_t next = 0;
+    while(auto batch = sub.read(test::deadline()))
+    {
+        CHECK(batch->frames() < 32);
+        next += batch->frames();
+    }
+    CHECK(next == frames);
+    CHECK(sub.outcome() == Outcome::End);
+    CHECK(publisher.health().failed_every == 0);
+}
+
 TEST_CASE("an opaque batch is one run of bytes, cut where the packed ring wraps, and End follows "
           "the last")
 {

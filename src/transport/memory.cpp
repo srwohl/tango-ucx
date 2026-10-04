@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "memory.h"
+#include "publisher_operations.h"
 #include "transport.h"
 #include "wire.h"
 
@@ -128,10 +129,11 @@ PublisherPlan plan_publisher(const Description &d, const PublisherLimits &l, std
     if(p.sizes.header_bytes > max_header)
         throw std::invalid_argument("frame header does not fit UCX max AM header");
     p.M = l.max_sessions;
-    p.op_stride = std::uint32_t(align(add({request, 24, p.sizes.header_bytes}), 64));
+    p.op_stride = std::uint32_t(align(add({request, sizeof(OpMeta), p.sizes.header_bytes}), 64));
     auto per = add({p.sizes.frame_bytes, p.sizes.record_stride, mul(p.M, p.op_stride),
                     sizeof(std::uint64_t) + sizeof(std::uint16_t)});
-    auto fixed = add({k_pub_fixed, mul(4ull * p.M, p.op_stride), k_region_charge});
+    auto fixed =
+        add({k_pub_fixed, PublisherOperations::control_bytes(p.M, p.op_stride), k_region_charge});
     auto fits = l.budget > fixed ? (l.budget - fixed) / per : 0;
     p.S = std::uint32_t(std::min<std::uint64_t>(fits, k_max_source_slots));
     if(p.S < p.M + 2)

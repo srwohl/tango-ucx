@@ -16,7 +16,7 @@ namespace TangoUcx::test
 {
 struct ForkOffer
 {
-    std::uint64_t incarnation;
+    std::uint64_t instance_id;
     std::uint32_t sessions;
     std::uint8_t every;
 };

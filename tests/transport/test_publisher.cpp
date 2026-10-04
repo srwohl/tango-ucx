@@ -109,7 +109,7 @@ TEST_CASE("UcxSessions lists all 64 sessions with their 64-byte labels")
     {
         wire::OpenMessage m{};
         m.session = session;
-        m.incarnation = test::offer_of(publisher).incarnation;
+        m.instance_id = test::offer_of(publisher).instance_id;
         m.depth = 4;
         m.batch = 1;
         m.label_bytes = 64;
@@ -285,7 +285,7 @@ TEST_CASE("frames are routed in grant order, and a cancelled slot uses no frame 
     sub.close(test::deadline());
 }
 
-TEST_CASE("refused Opens get every-refused, incarnation, no-session and finished")
+TEST_CASE("refused Opens get every-refused, instance_id, no-session and finished")
 {
     auto limits = test::small_limits(1);
     limits.allow_every = false;
@@ -302,7 +302,7 @@ TEST_CASE("refused Opens get every-refused, incarnation, no-session and finished
         return reply.status;
     };
     CHECK(status([](auto &m) { m.every = true; }) == wire::EveryRefused);
-    CHECK(status([](auto &m) { ++m.incarnation; }) == wire::Incarnation);
+    CHECK(status([](auto &m) { ++m.instance_id; }) == wire::InstanceId);
     CHECK(status([](auto &) {}) == wire::Ok);
     CHECK(status([](auto &m) { ++m.session; }) == wire::NoSession);
     publisher.finish();

@@ -21,9 +21,10 @@ constexpr std::string_view k_open = "tango-ucx-open", k_close = "tango-ucx-close
                            k_sessions = "tango-ucx-sessions";
 constexpr std::array<std::string_view, 11> k_element_names{
     "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bytes"};
-constexpr std::array<std::string_view, 12> k_status_names{
-    "ok",       "malformed", "version",         "incarnation", "every-refused", "no-session",
-    "endpoint", "finished",  "unknown-session", "busy",        "timeout",       "started"};
+constexpr std::array<std::string_view, 13> k_status_names{
+    "ok",         "malformed", "version",  "instance_id",     "every-refused",
+    "no-session", "endpoint",  "finished", "unknown-session", "busy",
+    "timeout",    "started",   "range"};
 
 std::string interface(std::string_view name)
 {
@@ -125,22 +126,25 @@ json parse_json(std::string_view doc)
 Status parse_open(const json &j, OpenMessage &m)
 {
     constexpr auto max64 = std::numeric_limits<std::uint64_t>::max();
-    std::uint64_t depth = 0, batch = 0;
+    std::uint64_t depth = 0, batch = 0, range = 0;
     std::string_view delivery, label, address;
-    bool ok =
-        unsigned_key(j, "session", max64, m.session) && m.session &&
-        unsigned_key(j, "incarnation", max64, m.incarnation) &&
-        unsigned_key(j, "depth", 65536, depth) && depth && unsigned_key(j, "batch", depth, batch) &&
-        batch && unsigned_key(j, "min_interval_ns", max64, m.min_interval_ns) &&
-        string_key(j, "delivery", 6, delivery) && (delivery == "every" || delivery == "latest") &&
-        bool_key(j, "gpu", m.gpu) && string_key(j, "label", k_max_label, label) &&
-        string_key(j, "address", 2 * k_max_address, address) &&
-        unhex(address, m.address, m.address_bytes) && m.address_bytes;
+    bool ok = unsigned_key(j, "session", max64, m.session) && m.session &&
+              unsigned_key(j, "instance_id", max64, m.instance_id) &&
+              unsigned_key(j, "depth", 65536, depth) && depth &&
+              unsigned_key(j, "batch", depth, batch) && batch &&
+              unsigned_key(j, "min_interval_ns", max64, m.min_interval_ns) &&
+              string_key(j, "delivery", 6, delivery) &&
+              (delivery == "every" || delivery == "latest" ||
+               (delivery == "pull" && unsigned_key(j, "range", UINT32_MAX, range) && range)) &&
+              bool_key(j, "gpu", m.gpu) && string_key(j, "label", k_max_label, label) &&
+              string_key(j, "address", 2 * k_max_address, address) &&
+              unhex(address, m.address, m.address_bytes) && m.address_bytes;
     if(!ok || (j.contains("ring_bytes") &&
                !(unsigned_key(j, "ring_bytes", max64, m.ring_bytes) && m.ring_bytes)))
         return Malformed;
     m.depth = std::uint32_t(depth);
     m.batch = std::uint32_t(batch);
+    m.range = std::uint32_t(range);
     m.every = delivery == "every";
     m.label_bytes = std::uint8_t(label.size());
     std::memcpy(m.label.data(), label.data(), label.size());
@@ -156,16 +160,20 @@ std::string format(const OpenMessage &m)
 {
     json j = {{"interface", interface(k_open)},
               {"session", m.session},
-              {"incarnation", m.incarnation},
+              {"instance_id", m.instance_id},
               {"depth", m.depth},
               {"batch", m.batch},
               {"min_interval_ns", m.min_interval_ns},
-              {"delivery", m.every ? "every" : "latest"},
+              {"delivery", m.range   ? "pull"
+                           : m.every ? "every"
+                                     : "latest"},
               {"gpu", m.gpu},
               {"label", std::string(m.label.data(), m.label_bytes)},
               {"address", hex({m.address.data(), m.address_bytes})}};
     if(m.ring_bytes)
         j["ring_bytes"] = m.ring_bytes;
+    if(m.range)
+        j["range"] = m.range;
     return dump(j);
 }
 std::string format(const CloseMessage &m)
@@ -183,7 +191,7 @@ std::string format(const StreamMessage &m)
 {
     const auto &d = m.description;
     json j = {{"interface", interface(k_stream)},
-              {"incarnation", m.incarnation},
+              {"instance_id", m.instance_id},
               {"element", k_element_names.at(std::size_t(d.element))}};
     // An opaque stream has no shape, so a 3.0 subscriber, which needs one, refuses it before Open.
     if(d.max_payload_bytes)
@@ -202,16 +210,20 @@ std::string format(const SessionsMessage &m)
     for(const auto &r : m.sessions)
         sessions.push_back(json{{"ordinal", r.ordinal},
                                 {"label", r.label},
-                                {"delivery", r.every ? "every" : "latest"},
+                                {"delivery", r.pull    ? "pull"
+                                             : r.every ? "every"
+                                                       : "latest"},
                                 {"state", r.retiring ? "retiring" : "ready"},
                                 {"depth", r.depth},
                                 {"room", r.room},
                                 {"sent", r.sent},
                                 {"skipped", r.skipped},
                                 {"transfer_max_us", r.transfer_max_us},
-                                {"transport", r.transport}});
+                                {"transport", r.transport},
+                                {"passes", r.passes}});
     return dump({{"interface", interface(k_sessions)},
-                 {"incarnation", m.incarnation},
+                 {"instance_id", m.instance_id},
+                 {"missing", m.missing},
                  {"sessions", std::move(sessions)}});
 }
 Status parse(std::string_view doc, StreamMessage &m)
@@ -226,7 +238,7 @@ Status parse(std::string_view doc, StreamMessage &m)
     bool opaque = j.contains("max_payload_bytes");
     bool ok =
         name == k_stream &&
-        unsigned_key(j, "incarnation", std::numeric_limits<std::uint64_t>::max(), m.incarnation) &&
+        unsigned_key(j, "instance_id", std::numeric_limits<std::uint64_t>::max(), m.instance_id) &&
         string_key(j, "element", 8, element) && unsigned_key(j, "field_bytes", 1024, field_bytes) &&
         string_key(j, "field_dtype", k_max_document, dtype) &&
         bool_key(j, "allow_every", m.allow_every) &&
@@ -365,18 +377,15 @@ std::array<std::byte, 32> encode(const EndMessage &m)
     put64(b.data(), m.session);
     put64(b.data() + 8, m.sequences);
     put64(b.data() + 16, m.frames);
-    b[24] = std::byte(m.reason);
+    put64(b.data() + 24, m.reason | m.missing << 8);
     return b;
 }
 bool decode(std::span<const std::byte> b, EndMessage &m)
 {
     if(b.size() != 32 || std::to_integer<unsigned>(b[24]) > Closing)
         return false;
-    for(int i = 25; i < 32; ++i)
-        if(b[i] != std::byte{})
-            return false;
     m = {get64(b.data()), get64(b.data() + 8), get64(b.data() + 16),
-         Reason(std::to_integer<unsigned>(b[24]))};
+         Reason(std::to_integer<unsigned>(b[24])), get64(b.data() + 24) >> 8};
     return true;
 }
 } // namespace TangoUcx::wire
@@ -405,7 +414,7 @@ Offer parse_ucx_stream(std::string_view document)
         throw std::runtime_error(status == wire::Version
                                      ? "UcxStream speaks another tango-ucx major version"
                                      : "UcxStream is not a valid tango-ucx-stream document");
-    Offer offer{std::move(m.description), {}, m.incarnation};
+    Offer offer{std::move(m.description), {}, m.instance_id};
     offer.limits.allow_every = m.allow_every;
     offer.limits.max_sessions = m.max_sessions;
     return offer;

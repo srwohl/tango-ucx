@@ -26,4 +26,7 @@ void detach_publisher(Tango::DeviceImpl &);
 // Finds the UCX commands, reads UcxStream, opens a session and waits for the publisher's Ready.
 Subscription every(Tango::DeviceProxy &, SubscriptionOptions = {});
 Subscription latest(Tango::DeviceProxy &, SubscriptionOptions = {});
+// A puller of the device's set: it takes `range` frames at each of its turns. A range is whole
+// batches, no more than the receive ring holds, and the same for every puller of the set.
+Subscription pull(Tango::DeviceProxy &, std::uint32_t range, SubscriptionOptions = {});
 } // namespace TangoUcx

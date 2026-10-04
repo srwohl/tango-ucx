@@ -17,7 +17,7 @@ struct Offer
 {
     Description description;
     PublisherLimits limits;
-    std::uint64_t incarnation = 0;
+    std::uint64_t instance_id = 0;
 };
 
 // A UCX command's JSON document in, its reply document out; parsed on the calling thread.
@@ -42,13 +42,15 @@ class PendingSubscription
     Subscription start(std::string_view open_reply, Deadline, Closer) &&;
 
   private:
-    friend PendingSubscription prepare(const Offer &, bool, SubscriptionOptions);
+    friend PendingSubscription prepare(const Offer &, bool, SubscriptionOptions, std::uint32_t);
     struct Impl;
     explicit PendingSubscription(std::unique_ptr<Impl>);
     std::unique_ptr<Impl> p_;
 };
 
-PendingSubscription prepare(const Offer &, bool every, SubscriptionOptions = {});
+// A range of frames makes it a puller: whole batches, and no more than its ring's depth.
+PendingSubscription prepare(const Offer &, bool every, SubscriptionOptions = {},
+                            std::uint32_t range = 0);
 
 enum class GpuEventState
 {

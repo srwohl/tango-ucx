@@ -351,6 +351,7 @@ struct Sub final : Owner
     Offer offer;
     SubscriptionOptions options;
     bool every = true;
+    std::uint32_t range = 0; // a puller's: the frames of a range. It is an every subscription too
     wire::Reply open_reply{};
     std::uint64_t session = 0;
     SubscriptionPlan plan;

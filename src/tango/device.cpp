@@ -151,7 +151,7 @@ void install_ucx_attributes(std::vector<Tango::Attr *> &list)
     add(list,
         new HealthAttr<U64>("UcxPublished", Tango::DEV_ULONG64,
                             [](const Health &h) { return U64(h.frames); }),
-        "Frames published in this incarnation");
+        "Frames published by this publisher instance");
     add(list,
         new HealthAttr<U64>("UcxSkipped", Tango::DEV_ULONG64,
                             [](const Health &h) { return U64(h.skipped); }),
@@ -159,11 +159,11 @@ void install_ucx_attributes(std::vector<Tango::Attr *> &list)
     add(list,
         new HealthAttr<U32>("UcxPressure", Tango::DEV_ULONG,
                             [](const Health &h) { return U32(h.pressure_from); }),
-        "The UcxSessions ordinal of the every session the device waits for; 0: none");
+        "The UcxSessions ordinal of the every or pull session the device waits for; 0: none");
     add(list,
         new HealthAttr<U32>("UcxFailedEvery", Tango::DEV_ULONG,
                             [](const Health &h) { return U32(h.failed_every); }),
-        "Every sessions that ended without the subscriber closing them");
+        "Every and pull sessions that ended without the subscriber closing them");
 }
 void attach_publisher(Tango::DeviceImpl &device, Publisher &publisher)
 {

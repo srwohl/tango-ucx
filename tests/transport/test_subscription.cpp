@@ -37,6 +37,36 @@ struct FakePublisher
         peer.send(wire::End, wire::encode(wire::EndMessage{peer.session, sequences, sequences}));
     }
 };
+// A subscription's tables without UCX: the test lands frames and runs the passes by hand.
+std::unique_ptr<transport::Sub> bare_sub(std::uint32_t depth, std::uint32_t batch)
+{
+    using namespace TangoUcx::transport;
+    Description d = test::small_description();
+    auto sub =
+        std::make_unique<Sub>(Offer{d, test::small_limits(), 1}, true, test::small_options());
+    sub->plan.sizes = sizes_of(d);
+    sub->plan.D = depth;
+    sub->plan.batch = batch;
+    sub->plan.max_wait_ns = 1000;
+    sub->rings = std::make_shared<Rings>();
+    sub->rings->plan = sub->plan;
+    sub->rings->payload = new std::byte[128 * depth];
+    sub->rings->storage = std::shared_ptr<void>(sub->rings->payload, [](void *p)
+                                                { delete[] static_cast<std::byte *>(p); });
+    sub->rings->records.resize(depth * sub->plan.sizes.record_stride);
+    sub->rings->batches = std::vector<BatchRow>(depth);
+    sub->rings->released.reserve(depth);
+    sub->rings->busy.assign(1, 0);
+    sub->rings->landed.assign(1, 0);
+    sub->rings->returned.assign(1, 0);
+    sub->queue.reserve(depth);
+    return sub;
+}
+void land(transport::Sub &sub, std::uint32_t row, std::uint64_t index)
+{
+    wire::put64(sub.rings->record(row), index);
+    sub.landed(row);
+}
 } // namespace
 
 TEST_CASE("a held batch keeps its host storage alive after close")
@@ -58,36 +88,35 @@ TEST_CASE("a held batch keeps its host storage alive after close")
 
 TEST_CASE("End is a bound and does not complete before an earlier frame lands")
 {
-    using namespace TangoUcx::transport;
-    Description d = test::small_description();
-    PublisherLimits limits = test::small_limits();
-    Offer offer{d, limits, 1};
-    auto sub = std::make_unique<Sub>(offer, true, test::small_options());
-    sub->plan.sizes = sizes_of(d);
-    sub->plan.D = 2;
-    sub->plan.batch = 1;
-    sub->rings = std::make_shared<Rings>();
-    sub->rings->plan = sub->plan;
-    sub->rings->payload = new std::byte[256];
-    sub->rings->storage = std::shared_ptr<void>(sub->rings->payload, [](void *p)
-                                                { delete[] static_cast<std::byte *>(p); });
-    sub->rings->records.resize(2 * sub->plan.sizes.record_stride);
-    sub->rings->batches = std::vector<BatchRow>(2);
-    sub->rings->released.reserve(2);
-    sub->rings->busy.assign(1, 0);
-    sub->rings->landed.assign(1, 0);
-    sub->rings->returned.assign(1, 0);
-    sub->queue.reserve(2);
+    auto sub = bare_sub(2, 1);
     sub->has_end = true;
     sub->end = {1, 1, 1, TangoUcx::wire::FinishedReason};
     sub->end_at_ns = 1'000'000'000LL;
     sub->decide(2'000'000'000LL);
     CHECK(sub->outcome.load() == 0);
-    wire::put64(sub->rings->record(0), 0);
-    sub->landed(0);
+    land(*sub, 0, 0);
     REQUIRE(sub->assemble(2'000'000'001LL));
     sub->decide(2'000'000'002LL);
     CHECK(sub->outcome.load() == int(Outcome::End));
+}
+
+TEST_CASE("a short batch waits out max_wait from its own first frame, and does not wait when "
+          "every row is in use")
+{
+    auto sub = bare_sub(4, 2);
+    for(std::uint32_t k = 0; k < 3; ++k)
+        land(*sub, k, k);
+    REQUIRE(sub->assemble(10)); // frames 0 and 1; frame 2 landed before they were delivered
+    CHECK(sub->assembled == 2);
+    CHECK_FALSE(sub->assemble(1009));
+    REQUIRE(sub->assemble(1010));
+    CHECK(sub->assembled == 3);
+    land(*sub, 3, 3);
+    REQUIRE(sub->assemble(1011)); // the ring's end
+    sub->credited = 1;            // frame 0 was released, and frames 1 to 3 are held
+    land(*sub, 0, 4);
+    REQUIRE(sub->assemble(1012)); // the last free row: no frame can follow it
+    CHECK(sub->assembled == 5);
 }
 
 TEST_CASE("batches are cut at their size, at the ring's wrap, after max_wait and at End")

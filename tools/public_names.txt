@@ -66,6 +66,7 @@ GpuView::records
 GpuView::frames
 every
 latest
+pull
 
 # Both: what Health reports
 Health::frames

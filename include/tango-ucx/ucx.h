@@ -65,7 +65,7 @@ struct SubscriptionOptions
 struct Health
 {
     std::uint64_t frames = 0, skipped = 0;
-    std::uint32_t every = 0, latest = 0, failed_every = 0;
+    std::uint32_t every = 0, latest = 0, failed_every = 0; // every: with the pullers
     bool pressure = false;
     std::uint32_t pressure_from = 0, slots_free = 0, slots_held = 0;
     std::uint64_t last_index = 0, transfer_max_ns = 0, transfer_mean_ns = 0;
@@ -124,7 +124,7 @@ class Publisher
     Publisher(const Publisher &) = delete;
     Publisher &operator=(const Publisher &) = delete;
     ~Publisher();
-    void ucx_start(); // slots are granted from here on; every subscriptions join before it
+    void ucx_start(); // slots are granted from here on; every and pull join before it
     std::optional<Slot> acquire(Deadline);
     void finish();
     Health health() const;

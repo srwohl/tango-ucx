@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <format>
 #include <stdexcept>
 
 namespace TangoUcx::transport
@@ -26,10 +27,10 @@ std::string status_text(wire::Status s)
 {
     switch(s)
     {
-        case wire::Incarnation:
-            return "publisher incarnation changed";
+        case wire::InstanceId:
+            return "publisher instance ID changed";
         case wire::EveryRefused:
-            return "publisher refuses every";
+            return "publisher refuses every and pull";
         case wire::NoSession:
             return "publisher has no free session row";
         case wire::Endpoint:
@@ -43,7 +44,9 @@ std::string status_text(wire::Status s)
         case wire::Timeout:
             return "publisher did not answer in time";
         case wire::Started:
-            return "publisher has started: an every subscription joins before its start";
+            return "publisher has started: every and pull join before its start";
+        case wire::Range:
+            return "a range is whole batches, fits the receive ring, and is the same for a set";
         default:
             return "malformed or refused control message";
     }
@@ -435,8 +438,6 @@ void Sub::landed(std::uint32_t k)
 {
     rings->bit_set(rings->landed, k);
     last_landed_ns = now_ns();
-    if(!first_landed_ns)
-        first_landed_ns = last_landed_ns;
 }
 // A packed ring's frame of sequence q, at the position its header states. It lies after every
 // frame of a lower sequence that has arrived and before every one of a higher, leaving a byte at
@@ -475,17 +476,30 @@ bool Sub::assemble(std::int64_t now)
         auto k = std::uint32_t(assembled % plan.D);
         auto cap = std::min<std::uint64_t>({plan.batch, plan.D - k, bound - assembled});
         std::uint32_t n = 0;
-        // A batch is one run of bytes: it ends where the next frame starts at the ring's front.
-        while(n < cap && rings->bit_test(rings->landed, k + n) && !(n && rings->wraps(k + n)))
-            ++n;
+        // A batch is one run of bytes, and of one range: it ends where the next frame starts at
+        // the ring's front, or is of another range. A puller may be sent part of a range.
+        auto index = [&](std::uint32_t i) { return wire::get64(rings->record(i)); };
+        auto apart = [&](std::uint32_t i)
+        { return rings->wraps(i) || (range && index(i) / range != index(i - 1) / range); };
+        while(n < cap && rings->bit_test(rings->landed, k + n) && !(n && apart(k + n)))
+            if(++n; range && (index(k + n - 1) + 1) % range == 0)
+                cap = n; // the last frame of a range: nothing more is waited for
         if(!n)
             break;
-        // The next frame has arrived, and wraps: a row busy beyond the ring's depth is an old
+        if(!first_landed_ns) // max_wait runs from the pass that first sees the batch's first frame
+            first_landed_ns = now;
+        // The next frame has arrived, and is apart: a row busy beyond the ring's depth is an old
         // frame's, not yet credited.
         bool cut = n < cap && assembled + n < credited + plan.D &&
-                   rings->bit_test(rings->busy, k + n) && rings->wraps(k + n);
-        if(n < cap && !cut && first_landed_ns &&
-           now - first_landed_ns < std::int64_t(plan.max_wait_ns) && !failed && !has_end)
+                   rings->bit_test(rings->busy, k + n) && apart(k + n);
+        // No frame can follow until a batch is released: every row is in use, or the packed ring
+        // has no room for a grant. Waiting out max_wait would hold the device for nothing.
+        auto *last = plan.sizes.opaque ? &rings->placements[2 * (k + n - 1)] : nullptr;
+        cut |= assembled + n == credited + plan.D ||
+               (last && !ring_room(last[0] + last[1] - freed, 0, plan.sizes.frame_bytes,
+                                   plan.payload_bytes));
+        if(n < cap && !cut && now - first_landed_ns < std::int64_t(plan.max_wait_ns) && !failed &&
+           !has_end)
             break;
         deliver(k, n);
         work = true;
@@ -501,7 +515,7 @@ void Sub::deliver(std::uint32_t k, std::uint32_t n)
     {
         rings->bit_clear(rings->landed, k + i);
         auto idx = wire::get64(rings->record(k + i));
-        if(last_index != UINT64_MAX && idx > last_index + 1)
+        if(!range && last_index != UINT64_MAX && idx > last_index + 1) // a puller's ranges jump
         {
             skipped += idx - last_index - 1;
             gap = true;
@@ -536,7 +550,9 @@ void Sub::decide(std::int64_t now)
         }
         if(assembled == end.sequences)
         {
-            bool complete = !every || end.sequences == 0 || !gap;
+            if(end.missing) // a puller's own part is whole, and the set's is not
+                fail(std::format("{} frames reached no puller", end.missing));
+            bool complete = !end.missing && (!every || end.sequences == 0 || !gap);
             outcome.store(int(complete ? TangoUcx::Outcome::End : TangoUcx::Outcome::Failed));
             queue.signal();
             return;
@@ -791,10 +807,11 @@ std::string PendingSubscription::open_message() const
     auto &s = *p_->sub;
     wire::OpenMessage m{};
     m.session = s.session;
-    m.incarnation = s.offer.incarnation;
+    m.instance_id = s.offer.instance_id;
     m.depth = s.plan.D;
     m.batch = s.plan.batch;
-    m.every = s.every;
+    m.every = s.every && !s.range;
+    m.range = s.range;
     if(s.options.max_rate > 0)
         m.min_interval_ns = std::uint64_t(std::min(1e9 / s.options.max_rate, 9.2e18));
     m.gpu = s.plan.gpu;
@@ -831,9 +848,11 @@ Subscription PendingSubscription::start(std::string_view reply, Deadline d, Clos
     }
     return sub;
 }
-PendingSubscription prepare(const Offer &o, bool every, SubscriptionOptions options)
+PendingSubscription prepare(const Offer &o, bool every, SubscriptionOptions options,
+                            std::uint32_t range)
 {
-    auto s = std::make_unique<Sub>(o, every, std::move(options));
+    auto s = std::make_unique<Sub>(o, every || range, std::move(options));
+    s->range = range;
     auto ready = s->setup_done.get_future();
     s->start_loop();
     ready.get();

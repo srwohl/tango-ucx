@@ -102,13 +102,14 @@ def _subscribe(
     memory,
     allow_gpu_over_tcp,
     label,
+    range=0,
 ):
     budget = _budget_bytes(budget)
     if isinstance(batch, bool) or not isinstance(batch, int) or batch < 1:
         raise ValueError("batch must be a positive integer")
     max_wait = _seconds(max_wait, "max_wait")
     max_rate = 0.0 if max_rate is None else _seconds(max_rate, "max_rate")
-    gpu = {}
+    gpu = {"range": range} if range else {}
     if memory != "host":
         match = _MEMORY.fullmatch(memory) if isinstance(memory, str) else None
         if not match:
@@ -210,6 +211,34 @@ def latest(
         memory=memory,
         allow_gpu_over_tcp=allow_gpu_over_tcp,
         label=label,
+    )
+
+
+def pull(
+    device,
+    range,
+    *,
+    budget="256MiB",
+    batch=1,
+    max_wait=0.01,
+    memory="host",
+    allow_gpu_over_tcp=False,
+    label="",
+):
+    """A puller of the device's set, which takes `range` frames at each of its turns."""
+    if isinstance(range, bool) or not isinstance(range, int) or range < 1:
+        raise ValueError("range must be a positive integer")
+    return _subscribe(
+        device,
+        every=False,
+        budget=budget,
+        batch=batch,
+        max_wait=max_wait,
+        max_rate=None,
+        memory=memory,
+        allow_gpu_over_tcp=allow_gpu_over_tcp,
+        label=label,
+        range=range,
     )
 
 

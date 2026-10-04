@@ -719,7 +719,7 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle ucx_stream_json, p
                                                    py::handle budget, py::handle batch,
                                                    py::handle max_wait_seconds, py::handle max_rate,
                                                    py::handle allow_gpu_over_tcp, py::handle label,
-                                                   int gpu)
+                                                   int gpu, std::uint32_t range)
 {
     const auto document = require_string(ucx_stream_json, "ucx_stream_json");
     const bool delivery_every = require_bool(every, "every");
@@ -748,7 +748,7 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle ucx_stream_json, p
     std::optional<transport::PendingSubscription> pending;
     {
         py::gil_scoped_release release;
-        pending.emplace(transport::prepare(offer, delivery_every, std::move(options)));
+        pending.emplace(transport::prepare(offer, delivery_every, std::move(options), range));
     }
     return std::make_shared<PythonPendingSubscription>(std::move(*pending), gpu);
 }
@@ -799,5 +799,6 @@ PYBIND11_MODULE(_core, module)
 
     module.def("prepare", &prepare, py::arg("ucx_stream_json"), py::arg("every"), py::arg("budget"),
                py::arg("batch"), py::arg("max_wait_seconds"), py::arg("max_rate"),
-               py::arg("allow_gpu_over_tcp"), py::arg("label"), py::arg("gpu") = -1);
+               py::arg("allow_gpu_over_tcp"), py::arg("label"), py::arg("gpu") = -1,
+               py::arg("range") = 0); // a range makes it a puller
 }

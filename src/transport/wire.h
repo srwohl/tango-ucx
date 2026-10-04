@@ -14,7 +14,7 @@
 namespace TangoUcx::wire
 {
 inline constexpr std::uint8_t k_major = 3;
-inline constexpr std::uint8_t k_minor = 1; // 3.1: opaque streams and their packed rings
+inline constexpr std::uint8_t k_minor = 2; // 3.1: opaque streams; 3.2: pull delivery
 inline constexpr std::size_t k_max_document = 16 * 1024;
 inline constexpr std::size_t k_max_address = 4096;
 inline constexpr std::size_t k_max_label = 64;
@@ -34,7 +34,7 @@ enum Status : std::uint16_t
     Ok,
     Malformed,
     Version,
-    Incarnation,
+    InstanceId,
     EveryRefused,
     NoSession,
     Endpoint,
@@ -42,7 +42,8 @@ enum Status : std::uint16_t
     UnknownSession,
     Busy,
     Timeout,
-    Started
+    Started,
+    Range
 };
 enum Reason : std::uint8_t
 {
@@ -55,8 +56,8 @@ enum Reason : std::uint8_t
 // Control plane: JSON documents carried by the UCX commands.
 struct OpenMessage
 {
-    std::uint64_t session = 0, incarnation = 0;
-    std::uint32_t depth = 0, batch = 0;
+    std::uint64_t session = 0, instance_id = 0;
+    std::uint32_t depth = 0, batch = 0, range = 0;     // range: a puller's, the frames of a range
     std::uint64_t min_interval_ns = 0, ring_bytes = 0; // ring_bytes: an opaque stream's packed ring
     bool every = false, gpu = false;
     std::array<char, k_max_label> label{};
@@ -79,10 +80,10 @@ struct Reply
     std::array<std::byte, k_max_address> address{};
     std::uint16_t address_bytes = 0;
 };
-// The UcxStream attribute: what every frame of this incarnation is.
+// The UcxStream attribute: what every frame of this publisher instance is.
 struct StreamMessage
 {
-    std::uint64_t incarnation = 0;
+    std::uint64_t instance_id = 0;
     Description description;
     bool allow_every = false;
     std::uint32_t max_sessions = 0;
@@ -96,11 +97,14 @@ struct SessionRow
     std::uint32_t depth = 0, room = 0;
     std::uint64_t sent = 0, skipped = 0, transfer_max_us = 0;
     std::string transport;
+    bool pull = false;
+    std::uint64_t passes = 0; // a puller's: the turns it was passed over
 };
 struct SessionsMessage
 {
-    std::uint64_t incarnation = 0;
+    std::uint64_t instance_id = 0;
     std::vector<SessionRow> sessions;
+    std::uint64_t missing = 0; // the frames no puller of the set received
 };
 
 std::string format(const OpenMessage &);
@@ -134,10 +138,13 @@ struct CreditMessage
 {
     std::uint64_t session = 0, credit = 0, bytes = 0;
 };
+// `missing` is a set's, and only a puller's End has it: the frames no puller received. It is
+// the seven bytes after the reason, which are zero in every other End.
 struct EndMessage
 {
     std::uint64_t session = 0, sequences = 0, frames = 0;
     Reason reason = FinishedReason;
+    std::uint64_t missing = 0;
 };
 
 std::array<std::byte, 8> encode(const SessionMessage &);

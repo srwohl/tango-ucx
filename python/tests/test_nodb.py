@@ -209,6 +209,43 @@ def test_nodb_every_iterates_each_frame_in_order_then_stops_at_end(server):
         assert health["transport"]
 
 
+def test_nodb_pullers_share_the_frames_a_range_at_a_time_and_stop_at_end(server):
+    import tango
+
+    pullers = [tango_ucx.pull(server[1], 16, batch=8, max_wait=0.05) for _ in range(2)]
+    with pytest.raises(RuntimeError, match="range"):
+        tango_ucx.pull(server[1], 12, batch=8)  # not whole batches
+    with pytest.raises(ValueError, match="range"):
+        tango_ucx.pull(server[1], 0)
+    tango.DeviceProxy(server[1]).command_inout("Start", 100)
+    indices = [_indices(puller) for puller in pullers]
+    assert sorted(indices[0] + indices[1]) == list(range(100))
+    for turn, own in enumerate(indices):
+        assert all(index // 16 % 2 == turn for index in own)
+    assert [puller.outcome for puller in pullers] == ["end", "end"]
+    assert pullers[0].health()["failure"] == ""
+    for puller in pullers:
+        puller.close()
+
+
+def test_nodb_a_puller_that_leaves_frames_unread_fails_the_other_with_the_count(server):
+    import tango
+
+    leaving, staying = (tango_ucx.pull(server[1], 4, batch=4, max_wait=0.05) for _ in range(2))
+    proxy = tango.DeviceProxy(server[1])
+    assert proxy.command_inout("Publish", 8) == 8  # a range each
+    deadline = time.monotonic() + 10
+    while leaving.health()["frames"] < 4 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    leaving.close()  # with its range in its ring, unread
+    assert proxy.command_inout("Publish", 8) == 8
+    proxy.command_inout("Finish")
+    with pytest.raises(tango_ucx.Failed, match="4 frames reached no puller"):
+        _indices(staying)
+    assert staying.outcome == "failed"
+    staying.close()
+
+
 def test_nodb_latest_delivers_increasing_frames_then_stops_at_end(server):
     import tango
 
