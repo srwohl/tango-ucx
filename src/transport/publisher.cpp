@@ -647,9 +647,10 @@ void Pub::unissue_grants()
     auto queued = grants.size;
     for(int slot_index; (slot_index = grants.take_locked()) >= 0;)
         slots[slot_index].held = false;
-    for(std::uint32_t grant = 0; range_frames && grant < queued; ++grant)
-        if(auto *holder = puller(next_frame_index + slots_granted - slots_routed - 1 - grant);
-           holder && holder->reserved)
+    // The grants in the ring are the newest, so they would have had the last frame indices.
+    auto newest = next_frame_index + slots_granted - slots_routed - 1;
+    for(std::uint32_t back = 0; range_frames && back < queued; ++back)
+        if(auto *holder = puller(newest - back); holder && holder->reserved)
             --holder->reserved;
     slots_granted -= queued;
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
