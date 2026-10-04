@@ -130,14 +130,14 @@ std::int64_t now_ns()
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
-void send_cb(void *, ucs_status_t st, void *arg)
+void send_cb(void *, ucs_status_t status, void *arg)
 {
-    auto *o = static_cast<OpMeta *>(arg);
-    auto *p = static_cast<Pub *>(o->owner);
-    if(o->kind == OpKind::Frame)
-        p->on_send(o, st);
+    auto *operation = static_cast<OpMeta *>(arg);
+    auto *publisher = static_cast<Pub *>(operation->owner);
+    if(operation->kind == OpKind::Frame)
+        publisher->on_send(operation, status);
     else
-        p->on_control(o, st);
+        publisher->on_control(operation, status);
 }
 void ep_error(void *arg, ucp_ep_h, ucs_status_t status)
 {
@@ -212,13 +212,13 @@ void Pub::setup()
 {
     context = std::make_unique<ucp::Context>();
     worker = std::make_unique<ucp::Worker>(*context);
-    auto req = context->request_bytes();
-    plan = plan_publisher(description, limits, req, worker->max_am_header());
+    auto request_bytes = context->request_bytes();
+    plan = plan_publisher(description, limits, request_bytes, worker->max_am_header());
     source = Region::allocate(context->get(), plan.source_bytes);
     records.resize(plan.records_bytes);
     slots = std::make_unique<SourceSlot[]>(plan.slot_count);
     order.resize(plan.slot_count);
-    operations.allocate(this, plan, req);
+    operations.allocate(this, plan, request_bytes);
     grants.reserve(plan.slot_count);
     range_pullers.assign(plan.slot_count + 2,
                          0); // the grants outstanding span fewer ranges than this
@@ -373,126 +373,130 @@ void Pub::cancel_slot(std::uint32_t slot_index)
     }
 }
 
-void Pub::send_control(std::uint32_t row_index, OpKind kind, std::uint8_t type,
-                       std::span<const std::byte> b)
+void Pub::send_control(std::uint32_t row_index, OpKind kind, std::uint8_t message_id,
+                       std::span<const std::byte> encoded)
 {
-    auto &o = *operations.control(row_index, kind);
-    if(o.in_flight)
+    auto &operation = *operations.control(row_index, kind);
+    if(operation.in_flight)
         return;
-    auto h = operations.header(&o);
-    assert(b.size() <= h.size());
-    std::memcpy(h.data(), b.data(), b.size());
-    o.in_flight = true;
+    auto header = operations.header(&operation);
+    assert(encoded.size() <= header.size());
+    std::memcpy(header.data(), encoded.data(), encoded.size());
+    operation.in_flight = true;
     auto &row = rows[row_index];
     if(kind == OpKind::Ready || kind == OpKind::End)
         ++row.in_flight;
-    ucp_request_param_t p{};
-    p.op_attr_mask =
+    ucp_request_param_t params{};
+    params.op_attr_mask =
         UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK | UCP_OP_ATTR_FIELD_USER_DATA;
-    p.request = &o;
-    p.cb.send = send_cb;
-    p.user_data = &o;
-    auto *q = ucp_am_send_nbx(row.ep, type, h.data(), b.size(), nullptr, 0, &p);
-    if(!UCS_PTR_IS_PTR(q))
-        on_control(&o, UCS_PTR_STATUS(q));
+    params.request = &operation;
+    params.cb.send = send_cb;
+    params.user_data = &operation;
+    auto *request =
+        ucp_am_send_nbx(row.ep, message_id, header.data(), encoded.size(), nullptr, 0, &params);
+    if(!UCS_PTR_IS_PTR(request))
+        on_control(&operation, UCS_PTR_STATUS(request));
 }
 void Pub::send_ready(std::uint32_t row_index)
 {
-    auto b = wire::encode(wire::SessionMessage{rows[row_index].id});
-    send_control(row_index, OpKind::Ready, wire::Ready, b);
+    auto encoded = wire::encode(wire::SessionMessage{rows[row_index].id});
+    send_control(row_index, OpKind::Ready, wire::Ready, encoded);
 }
 void Pub::send_end(std::uint32_t row_index)
 {
     auto &row = rows[row_index];
-    wire::EndMessage m{row.id, row.sent, next_frame_index, row.reason, row.pull ? missing : 0};
-    auto b = wire::encode(m);
-    send_control(row_index, OpKind::End, wire::End, b);
+    wire::EndMessage end_message{row.id, row.sent, next_frame_index, row.reason,
+                                 row.pull ? missing : 0};
+    auto encoded = wire::encode(end_message);
+    send_control(row_index, OpKind::End, wire::End, encoded);
     row.end_sent = true;
 }
 
 void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int64_t now)
 {
     auto &row = rows[row_index];
-    auto &o = *operations.frame(slot_index, row_index);
-    auto *rec = records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride;
-    wire::FrameMessage f{};
-    f.session = row.id;
-    f.sequence = row.sent;
-    f.payload_bytes = slots[slot_index].payload_bytes;
-    f.packed = row.ring_bytes != 0; // the publisher places the frame, and says where
-    f.position =
-        f.packed ? place(row.sent_bytes, slots[slot_index].payload_bytes, row.ring_bytes) : 0;
-    f.index = wire::get64(rec);
-    f.timestamp_ns = wire::get64(rec + 8);
-    f.record_bytes = plan.sizes.padded_field_bytes;
-    std::memcpy(f.record.data(), rec + 16, f.record_bytes);
-    auto h = operations.header(&o);
-    auto hn = wire::encode_into(h, f);
-    if(!hn)
+    auto &operation = *operations.frame(slot_index, row_index);
+    auto *record = records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride;
+    wire::FrameMessage frame_message{};
+    frame_message.session = row.id;
+    frame_message.sequence = row.sent;
+    frame_message.payload_bytes = slots[slot_index].payload_bytes;
+    frame_message.packed = row.ring_bytes != 0; // the publisher places the frame, and says where
+    frame_message.position =
+        frame_message.packed
+            ? place(row.sent_bytes, slots[slot_index].payload_bytes, row.ring_bytes)
+            : 0;
+    frame_message.index = wire::get64(record);
+    frame_message.timestamp_ns = wire::get64(record + 8);
+    frame_message.record_bytes = plan.sizes.padded_field_bytes;
+    std::memcpy(frame_message.record.data(), record + 16, frame_message.record_bytes);
+    auto header = operations.header(&operation);
+    auto header_bytes = wire::encode_into(header, frame_message);
+    if(!header_bytes)
     {
         retire(row_index, wire::Protocol, true);
         return;
     }
-    o.sent_ns = now;
-    o.in_flight = true;
+    operation.sent_ns = now;
+    operation.in_flight = true;
     row.last_send_ns = now;
     ++row.sent;
     if(row.ring_bytes)
-        row.sent_bytes = f.position + slots[slot_index].payload_bytes;
+        row.sent_bytes = frame_message.position + slots[slot_index].payload_bytes;
     ++row.in_flight;
     ++slots[slot_index].sends;
-    ucp_request_param_t p{};
-    p.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
-                     UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMH |
-                     UCP_OP_ATTR_FIELD_MEMORY_TYPE | UCP_OP_ATTR_FIELD_FLAGS;
-    p.flags = row.gpu ? UCP_AM_SEND_FLAG_RNDV : 0; // an eager frame cannot land in GPU memory
-    p.request = &o;
-    p.cb.send = send_cb;
-    p.user_data = &o;
-    p.memh = source.memh();
-    p.memory_type = UCS_MEMORY_TYPE_HOST;
-    auto *q = ucp_am_send_nbx(row.ep, wire::Frame, h.data(), hn,
-                              source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
-                              slots[slot_index].payload_bytes, &p);
-    if(!UCS_PTR_IS_PTR(q))
-        on_send(&o, UCS_PTR_STATUS(q));
+    ucp_request_param_t params{};
+    params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
+                          UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_MEMH |
+                          UCP_OP_ATTR_FIELD_MEMORY_TYPE | UCP_OP_ATTR_FIELD_FLAGS;
+    params.flags = row.gpu ? UCP_AM_SEND_FLAG_RNDV : 0; // an eager frame cannot land in GPU memory
+    params.request = &operation;
+    params.cb.send = send_cb;
+    params.user_data = &operation;
+    params.memh = source.memh();
+    params.memory_type = UCS_MEMORY_TYPE_HOST;
+    auto *request = ucp_am_send_nbx(row.ep, wire::Frame, header.data(), header_bytes,
+                                    source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
+                                    slots[slot_index].payload_bytes, &params);
+    if(!UCS_PTR_IS_PTR(request))
+        on_send(&operation, UCS_PTR_STATUS(request));
 }
-void Pub::on_send(OpMeta *o, ucs_status_t st)
+void Pub::on_send(OpMeta *operation, ucs_status_t status)
 {
-    if(!o->in_flight)
+    if(!operation->in_flight)
         return;
-    o->in_flight = false;
-    std::uint32_t row_index = o->row;
-    std::uint32_t slot_index = o->slot;
+    operation->in_flight = false;
+    std::uint32_t row_index = operation->row;
+    std::uint32_t slot_index = operation->slot;
     auto &row = rows[row_index];
     if(row.in_flight)
         --row.in_flight;
     if(slot_index < plan.slot_count && slots[slot_index].sends)
         --slots[slot_index].sends;
-    auto t = now_ns() - o->sent_ns;
-    row.transfer_max_ns = std::max(row.transfer_max_ns, t);
-    row.transfer_sum_ns += t;
-    if(st != UCS_OK && st != UCS_ERR_CANCELED)
-        retire(row_index, st == UCS_ERR_REJECTED ? wire::Protocol : wire::Closing, true);
+    auto transfer_ns = now_ns() - operation->sent_ns;
+    row.transfer_max_ns = std::max(row.transfer_max_ns, transfer_ns);
+    row.transfer_sum_ns += transfer_ns;
+    if(status != UCS_OK && status != UCS_ERR_CANCELED)
+        retire(row_index, status == UCS_ERR_REJECTED ? wire::Protocol : wire::Closing, true);
 }
-void Pub::on_control(OpMeta *o, ucs_status_t st)
+void Pub::on_control(OpMeta *operation, ucs_status_t status)
 {
-    if(!o->in_flight)
+    if(!operation->in_flight)
         return;
-    o->in_flight = false;
-    auto row_index = o->row;
+    operation->in_flight = false;
+    auto row_index = operation->row;
     auto &row = rows[row_index];
-    switch(o->kind)
+    switch(operation->kind)
     {
         case OpKind::Ready:
         case OpKind::End:
             if(row.in_flight)
                 --row.in_flight;
-            if(st != UCS_OK && st != UCS_ERR_CANCELED && !row.closing)
+            if(status != UCS_OK && status != UCS_ERR_CANCELED && !row.closing)
                 retire(row_index, wire::Closing, true);
             return;
         case OpKind::Flush:
-            if(st != UCS_OK)
+            if(status != UCS_OK)
             {
                 row.forced = true;
                 row.flush_done = true;
@@ -516,7 +520,7 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     if(!row.used || row.closing)
         return;
     auto bit = std::uint64_t{1} << row_index;
-    bool held = ((every_mask | pull_mask) & bit) != 0;
+    bool held_device = ((every_mask | pull_mask) & bit) != 0;
     if(row.ready)
         ready_mask &= ~bit;
     // A puller that ends before its End: what was in its ring is missing, for no frame is sent
@@ -528,7 +532,7 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     pull_mask &= ~bit;
     if(!pull_mask && !started.load(std::memory_order_acquire))
         range_frames = 0;
-    if(failed && held)
+    if(failed && held_device)
         ++failed_every;
     row.ready = false;
     row.closing = true;
@@ -540,25 +544,26 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
 bool Pub::control_pass()
 {
     return control.drain(
-        [&](ControlEntry &e)
+        [&](ControlEntry &entry)
         {
-            if(!e.in.open)
+            if(!entry.in.open)
             {
-                int row_index = find_row(e.in.close.session);
+                int row_index = find_row(entry.in.close.session);
                 if(row_index < 0 || rows[row_index].close_reply)
                 {
-                    control.reply(e, {wire::UnknownSession});
+                    control.reply(entry, {wire::UnknownSession});
                     return;
                 }
-                rows[row_index].close_reply = &e;
+                rows[row_index].close_reply = &entry;
                 retire(row_index, wire::Closing, false);
                 return;
             }
-            const auto &m = *e.in.open;
+            const auto &open_message = *entry.in.open;
             wire::Status status = wire::Ok;
             std::uint32_t row_index = plan.row_count;
-            bool holds = m.every || m.range; // an every row or a puller: it can hold the device
-            if(m.instance_id != instance_id)
+            bool holds = open_message.every ||
+                         open_message.range; // an every row or a puller: it can hold the device
+            if(open_message.instance_id != instance_id)
                 status = wire::InstanceId;
             else if(finishing.load())
                 status = wire::Finished;
@@ -566,11 +571,12 @@ bool Pub::control_pass()
                 status = wire::EveryRefused;
             else if(holds && started.load(std::memory_order_acquire))
                 status = wire::Started; // an every row and a puller join before the first grant
-            else if(find_row(m.session) >= 0 ||
-                    (plan.sizes.opaque && m.ring_bytes < 2 * plan.sizes.frame_bytes))
+            else if(find_row(open_message.session) >= 0 ||
+                    (plan.sizes.opaque && open_message.ring_bytes < 2 * plan.sizes.frame_bytes))
                 status = wire::Malformed; // a packed ring holds a frame and its wrap at least
-            else if(m.range && (m.range % m.batch || m.range > m.depth ||
-                                (pull_mask && m.range != range_frames)))
+            else if(open_message.range && (open_message.range % open_message.batch ||
+                                           open_message.range > open_message.depth ||
+                                           (pull_mask && open_message.range != range_frames)))
                 status = wire::Range; // whole batches, within its ring, and the set's
             else
             {
@@ -585,7 +591,7 @@ bool Pub::control_pass()
             }
             if(status != wire::Ok)
             {
-                control.reply(e, {status});
+                control.reply(entry, {status});
                 return;
             }
             auto &row = rows[row_index];
@@ -594,42 +600,43 @@ bool Pub::control_pass()
             row.row = std::uint8_t(row_index);
             row.ordinal = ++ordinals;
             row.used = true;
-            row.every = m.every;
-            row.pull = m.range != 0;
-            row.ring_depth = m.depth;
-            row.ring_bytes = plan.sizes.opaque ? m.ring_bytes : 0;
-            row.gpu = m.gpu;
-            row.id = m.session;
+            row.every = open_message.every;
+            row.pull = open_message.range != 0;
+            row.ring_depth = open_message.depth;
+            row.ring_bytes = plan.sizes.opaque ? open_message.ring_bytes : 0;
+            row.gpu = open_message.gpu;
+            row.id = open_message.session;
             row.min_interval_ns =
-                std::int64_t(std::min<std::uint64_t>(m.min_interval_ns, INT64_MAX));
-            row.label.set({m.label.data(), m.label_bytes});
+                std::int64_t(std::min<std::uint64_t>(open_message.min_interval_ns, INT64_MAX));
+            row.label.set({open_message.label.data(), open_message.label_bytes});
             try
             {
-                row.ep = worker->endpoint({m.address.data(), m.address_bytes}, &row, ep_error);
+                row.ep = worker->endpoint({open_message.address.data(), open_message.address_bytes},
+                                          &row, ep_error);
             }
             catch(...)
             {
                 row.used = false;
-                control.reply(e, {wire::Endpoint});
+                control.reply(entry, {wire::Endpoint});
                 return;
             }
             // The subscriber registered its rings and handlers before Open: it is ready now.
             row.ready = true;
             row.transport.n = std::uint8_t(worker->transports(row.ep, row.transport.c));
             ready_mask |= std::uint64_t{1} << row_index;
-            if(m.every)
+            if(open_message.every)
                 every_mask |= std::uint64_t{1} << row_index;
-            if(m.range)
+            if(open_message.range)
             {
                 pull_mask |= std::uint64_t{1} << row_index;
-                range_frames = m.range;
+                range_frames = open_message.range;
             }
             send_ready(row_index);
             wire::Reply reply{wire::Ok};
-            auto a = worker->address();
-            reply.address_bytes = std::uint16_t(a.size());
-            std::memcpy(reply.address.data(), a.data(), a.size());
-            if(!control.reply(e, reply))
+            auto address = worker->address();
+            reply.address_bytes = std::uint16_t(address.size());
+            std::memcpy(reply.address.data(), address.data(), address.size());
+            if(!control.reply(entry, reply))
                 retire(row_index, wire::Closing,
                        false); // its caller gave up: nobody will use the session
         });
@@ -640,18 +647,18 @@ bool Pub::control_pass()
 // So did the puller of each one's frame index, and they were to have the last frame indices.
 void Pub::unissue_grants()
 {
-    std::lock_guard l(grants.m);
-    auto n = grants.size;
+    std::lock_guard lock(grants.m);
+    auto queued = grants.size;
     for(int slot_index; (slot_index = grants.take_locked()) >= 0;)
         slots[slot_index].held = false;
-    for(std::uint32_t g = 0; range_frames && g < n; ++g)
-        if(auto *p = puller(next_frame_index + slots_granted - slots_routed - 1 - g);
-           p && p->reserved)
-            --p->reserved;
-    slots_granted -= n;
+    for(std::uint32_t grant = 0; range_frames && grant < queued; ++grant)
+        if(auto *holder = puller(next_frame_index + slots_granted - slots_routed - 1 - grant);
+           holder && holder->reserved)
+            --holder->reserved;
+    slots_granted -= queued;
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
         if((ready_mask & every_mask) >> row_index & 1)
-            rows[row_index].reserved -= n;
+            rows[row_index].reserved -= queued;
 }
 
 bool Pub::route_pass(std::int64_t now)
@@ -693,7 +700,7 @@ bool Pub::route_pass(std::int64_t now)
                 if(pull_mask >> row_index & 1 && has_room(rows[row_index]))
                     to_puller = &rows[row_index];
             missing += range_frames && !to_puller;
-            std::uint64_t to = 0;
+            std::uint64_t recipients = 0;
             for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
             {
                 auto bit = std::uint64_t{1} << row_index;
@@ -701,26 +708,26 @@ bool Pub::route_pass(std::int64_t now)
                 if(!row.ready || row.closing)
                     continue;
                 if(every_mask & bit || &row == to_puller)
-                    to |= bit; // it joined before the first grant
+                    recipients |= bit; // it joined before the first grant
                 else if(!row.pull && row.sent - row.credited < row.ring_depth &&
                         row.in_flight == 0 && now - row.last_send_ns >= row.min_interval_ns &&
                         (!row.ring_bytes ||
                          place(row.sent_bytes, slot.payload_bytes, row.ring_bytes) +
                                  slot.payload_bytes - row.credited_bytes <=
                              row.ring_bytes))
-                    to |= bit;
+                    recipients |= bit;
             }
             for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
             {
                 auto bit = std::uint64_t{1} << row_index;
-                if(ready_mask & bit && !((every_mask | pull_mask) & bit) && !(to & bit))
+                if(ready_mask & bit && !((every_mask | pull_mask) & bit) && !(recipients & bit))
                 {
                     ++skipped;
                     ++rows[row_index].skipped;
                 }
             }
             for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-                if(to & (std::uint64_t{1} << row_index))
+                if(recipients & (std::uint64_t{1} << row_index))
                     send_frame(slot_index, row_index, now);
         }
         else
@@ -782,12 +789,13 @@ bool Pub::grant_pass()
         // The puller of the grant's frame index, which is the next one if no slot ahead of it is
         // cancelled. The device waits for that puller or, when none has room for the range, for
         // the one longest without a frame. With no puller left it does not wait.
-        auto *p = room && range_frames ? puller(next_frame_index + slots_granted - slots_routed)
-                                       : nullptr;
-        if(room && pull_mask && !(p && has_room(*p)))
+        auto *holder = room && range_frames
+                           ? puller(next_frame_index + slots_granted - slots_routed)
+                           : nullptr;
+        if(room && pull_mask && !(holder && has_room(*holder)))
         {
-            auto *slow = p;
-            for(std::uint32_t row_index = 0; !p && row_index < plan.row_count; ++row_index)
+            auto *slow = holder;
+            for(std::uint32_t row_index = 0; !holder && row_index < plan.row_count; ++row_index)
                 if(pull_mask >> row_index & 1 &&
                    !(slow && slow->last_send_ns <= rows[row_index].last_send_ns))
                     slow = &rows[row_index];
@@ -799,8 +807,8 @@ bool Pub::grant_pass()
         for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
             if((ready_mask & every_mask) & (std::uint64_t{1} << row_index))
                 ++rows[row_index].reserved;
-        if(p)
-            ++p->reserved;
+        if(holder)
+            ++holder->reserved;
         slots[slot_index].held = true;
         order[slots_granted % plan.slot_count] = slot_index;
         grants.push(slot_index);
@@ -826,60 +834,60 @@ bool Pub::retire_pass(std::int64_t now)
         bool late = now - row.close_started_ns > k_close_ns;
         if(row.ep && !row.close_started && late)
         {
-            auto *o = operations.control(row_index, OpKind::Close);
-            if(!o->in_flight)
+            auto *operation = operations.control(row_index, OpKind::Close);
+            if(!operation->in_flight)
             {
-                o->in_flight = true;
-                ucp_request_param_t p{};
-                p.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
-                                 UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_FLAGS;
-                p.request = o;
-                p.cb.send = send_cb;
-                p.user_data = o;
-                p.flags = UCP_EP_CLOSE_FLAG_FORCE;
+                operation->in_flight = true;
+                ucp_request_param_t params{};
+                params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
+                                      UCP_OP_ATTR_FIELD_USER_DATA | UCP_OP_ATTR_FIELD_FLAGS;
+                params.request = operation;
+                params.cb.send = send_cb;
+                params.user_data = operation;
+                params.flags = UCP_EP_CLOSE_FLAG_FORCE;
                 row.close_started = true;
                 row.forced = true;
-                auto *q = ucp_ep_close_nbx(row.ep, &p);
-                if(!UCS_PTR_IS_PTR(q))
-                    on_control(o, UCS_PTR_STATUS(q));
+                auto *request = ucp_ep_close_nbx(row.ep, &params);
+                if(!UCS_PTR_IS_PTR(request))
+                    on_control(operation, UCS_PTR_STATUS(request));
                 work = true;
             }
         }
         else if(row.ep && !row.close_started && !row.flush_started && row.in_flight == 0)
         {
-            auto *o = operations.control(row_index, OpKind::Flush);
-            if(!o->in_flight)
+            auto *operation = operations.control(row_index, OpKind::Flush);
+            if(!operation->in_flight)
             {
-                o->in_flight = true;
-                ucp_request_param_t p{};
-                p.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
-                                 UCP_OP_ATTR_FIELD_USER_DATA;
-                p.request = o;
-                p.cb.send = send_cb;
-                p.user_data = o;
+                operation->in_flight = true;
+                ucp_request_param_t params{};
+                params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
+                                      UCP_OP_ATTR_FIELD_USER_DATA;
+                params.request = operation;
+                params.cb.send = send_cb;
+                params.user_data = operation;
                 row.flush_started = true;
-                auto *q = ucp_ep_flush_nbx(row.ep, &p);
-                if(!UCS_PTR_IS_PTR(q))
-                    on_control(o, UCS_PTR_STATUS(q));
+                auto *request = ucp_ep_flush_nbx(row.ep, &params);
+                if(!UCS_PTR_IS_PTR(request))
+                    on_control(operation, UCS_PTR_STATUS(request));
                 work = true;
             }
         }
         else if(row.ep && row.flush_done && !row.close_started && !row.in_flight)
         {
-            auto *o = operations.control(row_index, OpKind::Close);
-            if(!o->in_flight)
+            auto *operation = operations.control(row_index, OpKind::Close);
+            if(!operation->in_flight)
             {
-                o->in_flight = true;
-                ucp_request_param_t p{};
-                p.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
-                                 UCP_OP_ATTR_FIELD_USER_DATA;
-                p.request = o;
-                p.cb.send = send_cb;
-                p.user_data = o;
+                operation->in_flight = true;
+                ucp_request_param_t params{};
+                params.op_attr_mask = UCP_OP_ATTR_FIELD_REQUEST | UCP_OP_ATTR_FIELD_CALLBACK |
+                                      UCP_OP_ATTR_FIELD_USER_DATA;
+                params.request = operation;
+                params.cb.send = send_cb;
+                params.user_data = operation;
                 row.close_started = true;
-                auto *q = ucp_ep_close_nbx(row.ep, &p);
-                if(!UCS_PTR_IS_PTR(q))
-                    on_control(o, UCS_PTR_STATUS(q));
+                auto *request = ucp_ep_close_nbx(row.ep, &params);
+                if(!UCS_PTR_IS_PTR(request))
+                    on_control(operation, UCS_PTR_STATUS(request));
                 work = true;
             }
         }
@@ -932,36 +940,46 @@ void Pub::timer_pass(std::int64_t now)
 }
 void Pub::publish_health()
 {
-    Observation o;
-    o.frames = next_frame_index;
-    o.skipped = skipped;
-    o.missing = missing;
-    o.failed_every = failed_every;
-    o.pressure_from = grants.empty() && blocked ? rows[blocked - 1].ordinal : 0;
+    Observation observation;
+    observation.frames = next_frame_index;
+    observation.skipped = skipped;
+    observation.missing = missing;
+    observation.failed_every = failed_every;
+    observation.pressure_from = grants.empty() && blocked ? rows[blocked - 1].ordinal : 0;
     for(std::uint32_t slot_index = 0; slot_index < plan.slot_count; ++slot_index)
     {
-        o.slots_free += !slots[slot_index].held && slots[slot_index].sends == 0;
-        o.slots_held += slots[slot_index].held;
+        observation.slots_free += !slots[slot_index].held && slots[slot_index].sends == 0;
+        observation.slots_held += slots[slot_index].held;
     }
-    o.memory_hooks = context->memory_hooks();
+    observation.memory_hooks = context->memory_hooks();
     // The frames a row can still be granted: rows of its tables and, in a packed ring, bytes.
-    auto room = [&](const PubRow &w) -> std::uint64_t
+    auto room = [&](const PubRow &row) -> std::uint64_t
     {
-        auto frames = w.ring_depth - std::min<std::uint64_t>(w.ring_depth, w.sent - w.credited);
-        if(!w.ring_bytes)
+        auto frames =
+            row.ring_depth - std::min<std::uint64_t>(row.ring_depth, row.sent - row.credited);
+        if(!row.ring_bytes)
             return frames;
-        auto fit = (w.ring_bytes - (w.sent_bytes - w.credited_bytes) + 1) / plan.sizes.frame_bytes;
+        auto fit =
+            (row.ring_bytes - (row.sent_bytes - row.credited_bytes) + 1) / plan.sizes.frame_bytes;
         return std::min(frames, fit ? fit - 1 : 0);
     };
-    for(const auto &w : rows)
-        if(w.used)
-            o.rows[o.count++] = {
-                w.ordinal, w.ring_depth,      std::uint32_t(room(w)),
-                w.every,   w.closing,         w.sent,
-                w.skipped, w.transfer_max_ns, w.sent ? w.transfer_sum_ns / std::int64_t(w.sent) : 0,
-                w.label,   w.transport,       w.pull,
-                w.passes};
-    health_copy.write(o);
+    for(const auto &row : rows)
+        if(row.used)
+            observation.rows[observation.count++] = {
+                row.ordinal,
+                row.ring_depth,
+                std::uint32_t(room(row)),
+                row.every,
+                row.closing,
+                row.sent,
+                row.skipped,
+                row.transfer_max_ns,
+                row.sent ? row.transfer_sum_ns / std::int64_t(row.sent) : 0,
+                row.label,
+                row.transport,
+                row.pull,
+                row.passes};
+    health_copy.write(observation);
 }
 void Pub::quarantine_owner()
 {
@@ -1011,63 +1029,64 @@ void Pub::shutdown()
 
 namespace TangoUcx
 {
-Slot::Slot(std::weak_ptr<transport::Pub> p, std::uint32_t i)
-    : state_(std::move(p)), index_(i), active_(true)
+Slot::Slot(std::weak_ptr<transport::Pub> pub, std::uint32_t index)
+    : state_(std::move(pub)), index_(index), active_(true)
 {
 }
-Slot::Slot(Slot &&o) noexcept
-    : state_(std::move(o.state_)), index_(o.index_), active_(std::exchange(o.active_, false))
+Slot::Slot(Slot &&other) noexcept
+    : state_(std::move(other.state_)), index_(other.index_),
+      active_(std::exchange(other.active_, false))
 {
 }
-Slot &Slot::operator=(Slot &&o) noexcept
+Slot &Slot::operator=(Slot &&other) noexcept
 {
-    if(this != &o)
+    if(this != &other)
     {
         if(active_)
-            if(auto p = state_.lock())
-                p->cancel_slot(index_);
-        state_ = std::move(o.state_);
-        index_ = o.index_;
-        active_ = std::exchange(o.active_, false);
+            if(auto pub = state_.lock())
+                pub->cancel_slot(index_);
+        state_ = std::move(other.state_);
+        index_ = other.index_;
+        active_ = std::exchange(other.active_, false);
     }
     return *this;
 }
 Slot::~Slot()
 {
     if(active_)
-        if(auto p = state_.lock())
-            p->cancel_slot(index_);
+        if(auto pub = state_.lock())
+            pub->cancel_slot(index_);
 }
 std::span<std::byte> Slot::payload()
 {
-    if(auto p = state_.lock())
-        return p->payload(index_);
+    if(auto pub = state_.lock())
+        return pub->payload(index_);
     return {};
 }
 std::span<std::byte> Slot::fields()
 {
-    if(auto p = state_.lock())
-        return p->fields(index_);
+    if(auto pub = state_.lock())
+        return pub->fields(index_);
     return {};
 }
-void Slot::publish(std::optional<std::uint64_t> t) &&
+void Slot::publish(std::optional<std::uint64_t> timestamp) &&
 {
     if(!active_)
         throw std::logic_error("slot already published");
-    if(auto p = state_.lock())
-        p->publish_slot(index_, t, {});
+    if(auto pub = state_.lock())
+        pub->publish_slot(index_, timestamp, {});
     active_ = false;
 }
-void Slot::publish_bytes(std::size_t bytes, std::optional<std::uint64_t> t) &&
+void Slot::publish_bytes(std::size_t bytes, std::optional<std::uint64_t> timestamp) &&
 {
     if(!active_)
         throw std::logic_error("slot already published");
-    if(auto p = state_.lock())
-        p->publish_slot(index_, t, bytes);
+    if(auto pub = state_.lock())
+        pub->publish_slot(index_, timestamp, bytes);
     active_ = false;
 }
-Publisher::Publisher(Description d, PublisherLimits l)
-    : p_(std::make_shared<transport::Pub>(std::move(d), l))
+Publisher::Publisher(Description description, PublisherLimits limits)
+    : p_(std::make_shared<transport::Pub>(std::move(description), limits))
 {
     p_->start();
 }
@@ -1085,12 +1104,12 @@ Publisher::~Publisher()
             p_.reset();
     }
 }
-std::optional<Slot> Publisher::acquire(Deadline d)
+std::optional<Slot> Publisher::acquire(Deadline deadline)
 {
     if(!p_ || p_->finishing.load())
         return {};
     int slot_index =
-        p_->grants.pop_until(d, [&] { return p_->finishing.load() || p_->stopping.load(); });
+        p_->grants.pop_until(deadline, [&] { return p_->finishing.load() || p_->stopping.load(); });
     if(slot_index < 0)
         return {};
     return Slot(p_, slot_index);
@@ -1113,27 +1132,31 @@ Health Publisher::health() const
 {
     if(!p_)
         return {};
-    auto o = p_->health_copy.read();
-    Health h{.frames = o.frames,
-             .skipped = o.skipped,
-             .failed_every = o.failed_every,
-             .pressure = o.pressure_from != 0,
-             .pressure_from = o.pressure_from,
-             .slots_free = o.slots_free,
-             .slots_held = o.slots_held,
-             .quarantined_bytes = transport::quarantine().total.load(),
-             .memory_hooks = o.memory_hooks,
-             .started = p_->started.load(std::memory_order_acquire)};
-    for(const auto &w : std::span(o.rows).first(o.count))
+    auto observation = p_->health_copy.read();
+    Health result{.frames = observation.frames,
+                  .skipped = observation.skipped,
+                  .failed_every = observation.failed_every,
+                  .pressure = observation.pressure_from != 0,
+                  .pressure_from = observation.pressure_from,
+                  .slots_free = observation.slots_free,
+                  .slots_held = observation.slots_held,
+                  .quarantined_bytes = transport::quarantine().total.load(),
+                  .memory_hooks = observation.memory_hooks,
+                  .started = p_->started.load(std::memory_order_acquire)};
+    for(const auto &row : std::span(observation.rows).first(observation.count))
     {
-        if(!w.retiring)
-            ++(w.every || w.pull ? h.every : h.latest); // a puller holds the device as every does
-        h.transfer_max_ns = std::max<std::uint64_t>(h.transfer_max_ns, w.transfer_max_ns);
-        h.transfer_mean_ns = std::max<std::uint64_t>(h.transfer_mean_ns, w.transfer_mean_ns);
-        if(w.transport.n && h.transport.find(w.transport.view()) == std::string::npos)
-            h.transport += (h.transport.empty() ? "" : ";") + std::string(w.transport.view());
+        if(!row.retiring)
+            ++(row.every || row.pull ? result.every
+                                     : result.latest); // a puller holds the device as every does
+        result.transfer_max_ns =
+            std::max<std::uint64_t>(result.transfer_max_ns, row.transfer_max_ns);
+        result.transfer_mean_ns =
+            std::max<std::uint64_t>(result.transfer_mean_ns, row.transfer_mean_ns);
+        if(row.transport.n && result.transport.find(row.transport.view()) == std::string::npos)
+            result.transport +=
+                (result.transport.empty() ? "" : ";") + std::string(row.transport.view());
     }
-    return h;
+    return result;
 }
 const Description &Publisher::description() const
 {
@@ -1145,33 +1168,35 @@ const Description &Publisher::description() const
 
 namespace TangoUcx::transport
 {
-std::string handle(Publisher &p, std::string_view document)
+std::string handle(Publisher &publisher, std::string_view document)
 {
     wire::Request request;
     auto status = wire::parse(document, request);
-    if(status != wire::Ok || !p.p_)
+    if(status != wire::Ok || !publisher.p_)
         return wire::format(wire::Reply{status != wire::Ok ? status : wire::Finished});
-    return wire::format(
-        p.p_->control.call(request, std::chrono::steady_clock::now() + std::chrono::seconds(3)));
+    return wire::format(publisher.p_->control.call(request, std::chrono::steady_clock::now() +
+                                                                std::chrono::seconds(3)));
 }
-std::string ucx_stream(const Publisher &p)
+std::string ucx_stream(const Publisher &publisher)
 {
-    if(!p.p_)
+    if(!publisher.p_)
         throw std::logic_error("moved publisher");
-    return wire::format(wire::StreamMessage{p.p_->instance_id, p.p_->description,
-                                            p.p_->limits.allow_every, p.p_->limits.max_sessions});
+    return wire::format(wire::StreamMessage{publisher.p_->instance_id, publisher.p_->description,
+                                            publisher.p_->limits.allow_every,
+                                            publisher.p_->limits.max_sessions});
 }
 // Formatted on the calling thread, from the loop's fixed Health copy.
-std::string ucx_sessions(const Publisher &p)
+std::string ucx_sessions(const Publisher &publisher)
 {
-    if(!p.p_)
+    if(!publisher.p_)
         throw std::logic_error("moved publisher");
-    auto o = p.p_->health_copy.read();
-    wire::SessionsMessage m{p.p_->instance_id, {}, o.missing};
-    for(const auto &w : std::span(o.rows).first(o.count))
-        m.sessions.push_back({w.ordinal, std::string(w.label.view()), w.every, w.retiring, w.depth,
-                              w.room, w.sent, w.skipped, std::uint64_t(w.transfer_max_ns) / 1000,
-                              std::string(w.transport.view()), w.pull, w.passes});
-    return wire::format(m);
+    auto observation = publisher.p_->health_copy.read();
+    wire::SessionsMessage sessions_message{publisher.p_->instance_id, {}, observation.missing};
+    for(const auto &row : std::span(observation.rows).first(observation.count))
+        sessions_message.sessions.push_back(
+            {row.ordinal, std::string(row.label.view()), row.every, row.retiring, row.depth,
+             row.room, row.sent, row.skipped, std::uint64_t(row.transfer_max_ns) / 1000,
+             std::string(row.transport.view()), row.pull, row.passes});
+    return wire::format(sessions_message);
 }
 } // namespace TangoUcx::transport
