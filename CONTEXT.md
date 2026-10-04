@@ -38,6 +38,12 @@ The part of a record the device defines: a fixed number of bytes, described by a
 dtype string that the library carries without interpreting.
 _Avoid_: extension, user data, custom metadata
 
+**Application text**:
+A text the device defines for one publisher instance, such as where a writer puts its
+files. It is part of the description, and the library carries it to every subscriber
+without interpreting it.
+_Avoid_: appendix, annotation, stream info
+
 **Frame index**:
 A frame's position in its publisher instance's publication order, starting at 0.
 Every subscription sees the same index for the same frame.
@@ -46,6 +52,7 @@ _Avoid_: frame number, frame id, event counter
 **Description**:
 What every frame of a publisher instance is: element type, shape, and the size and dtype
 of the application fields. An opaque stream's has no shape, and the most bytes a frame may have.
+It also holds the application text.
 _Avoid_: geometry, layout, schema, array terms
 
 **Instance ID**:

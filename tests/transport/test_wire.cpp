@@ -208,6 +208,31 @@ TEST_CASE("the UcxStream document matches its golden JSON and refuses what it ca
         CHECK(status(replace(doc, from, to)) == wire::Malformed);
 }
 
+TEST_CASE("UcxStream carries an application text unchanged and refuses one it would change")
+{
+    const std::string text = "{\"file\":\"scan_{index:04d}.h5\",\"note\":\"caf\xc3\xa9\n\"}";
+    wire::StreamMessage m{12648430, {Element::U16, {4}, 0, "", 0, text}, false, 1};
+    CHECK(transport::parse_ucx_stream(wire::format(m)).description.application_text == text);
+    // Every byte escaped is the longest a text gets in a document.
+    m.description.application_text.assign(wire::k_max_text, '\x01');
+    auto longest = wire::format(m);
+    CHECK(longest.size() <= wire::k_max_document);
+    CHECK(transport::parse_ucx_stream(longest).description.application_text ==
+          m.description.application_text);
+    wire::StreamMessage back;
+    m.description.application_text.assign(wire::k_max_text + 1, 'a');
+    CHECK(wire::parse(wire::format(m), back) == wire::Malformed);
+    CHECK(
+        wire::parse(replace(longest, "\"application_text\":\"", "\"application_text\":7,\"x\":\""),
+                    back) == wire::Malformed);
+    // A publisher without one leaves the key out, and a subscriber then reads an empty text.
+    m.description.application_text.clear();
+    CHECK(wire::format(m).find("application_text") == std::string::npos);
+    CHECK(transport::parse_ucx_stream(wire::format(m)).description.application_text.empty());
+    for(const auto &refused : {std::string(wire::k_max_text + 1, 'a'), std::string("\xff")})
+        CHECK_THROWS_AS(Publisher({Element::U8, {4}, 0, "", 0, refused}), std::invalid_argument);
+}
+
 // A 3.0 subscriber needs a shape, so it refuses an opaque stream before it sends an Open.
 TEST_CASE("an opaque stream's UcxStream has a maximum and no shape, and its Open asks for a ring")
 {

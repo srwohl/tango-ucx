@@ -14,8 +14,10 @@
 namespace TangoUcx::wire
 {
 inline constexpr std::uint8_t k_major = 3;
-inline constexpr std::uint8_t k_minor = 2; // 3.1: opaque streams; 3.2: pull delivery
+inline constexpr std::uint8_t k_minor = 2; // 3.1: opaque streams; 3.2: pull, application text
 inline constexpr std::size_t k_max_document = 16 * 1024;
+// An application text of this many bytes fits a document even when every byte is escaped.
+inline constexpr std::size_t k_max_text = 2048;
 inline constexpr std::size_t k_max_address = 4096;
 inline constexpr std::size_t k_max_label = 64;
 // The UCX commands' type descriptions; a client finds the commands by them.
@@ -115,6 +117,8 @@ std::string format(const SessionsMessage &);
 Status parse(std::string_view, Request &);
 bool parse(std::string_view, Reply &);
 Status parse(std::string_view, StreamMessage &);
+// Whether UcxStream carries a text unchanged. It must be UTF-8 and no longer than k_max_text.
+bool valid_text(std::string_view);
 std::string_view status_name(Status);
 
 // Data plane: fixed little-endian structs; the active-message id is the type.

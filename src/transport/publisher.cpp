@@ -188,6 +188,8 @@ Pub::Pub(Description description, PublisherLimits limits)
     // A maximum payload size makes this an opaque stream.
     if(this->description.max_payload_bytes)
         this->description.element = Element::Bytes;
+    if(!wire::valid_text(this->description.application_text))
+        throw std::invalid_argument("the application text is not UTF-8 or is over 2,048 bytes");
 }
 Pub::~Pub()
 {

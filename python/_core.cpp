@@ -130,6 +130,7 @@ py::dict description_dict(const Description &description)
     result["field_bytes"] = description.field_bytes;
     result["field_dtype"] = description.field_dtype;
     result["max_payload_bytes"] = description.max_payload_bytes; // nonzero: an opaque stream
+    result["application_text"] = description.application_text;
     return result;
 }
 

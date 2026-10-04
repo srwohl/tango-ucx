@@ -44,6 +44,7 @@ struct Description
     std::uint32_t field_bytes = 0;
     std::string field_dtype;
     std::uint64_t max_payload_bytes = 0; // nonzero, with an empty shape: an opaque stream
+    std::string application_text; // the device's own, in UTF-8. Subscribers get it unchanged.
 };
 struct PublisherLimits
 {

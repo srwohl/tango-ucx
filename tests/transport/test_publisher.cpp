@@ -36,6 +36,17 @@ TEST_CASE("every and latest subscriptions observe the same published frame")
     publisher.finish();
 }
 
+TEST_CASE("a subscription's description has the publisher's application text")
+{
+    auto description = test::small_description();
+    description.application_text = "scan_{index:04d}.h5";
+    Publisher publisher(description, test::small_limits());
+    auto subscription = test::subscribe(publisher, false);
+    CHECK(subscription.description().application_text == "scan_{index:04d}.h5");
+    subscription.close(test::deadline());
+    publisher.finish();
+}
+
 TEST_CASE("an Open whose session id a row already holds is refused")
 {
     Publisher publisher(test::small_description(), test::small_limits());

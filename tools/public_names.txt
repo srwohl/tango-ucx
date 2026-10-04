@@ -11,6 +11,7 @@ Description::shape
 Description::field_bytes
 Description::field_dtype
 Description::max_payload_bytes
+Description::application_text
 PublisherLimits
 PublisherLimits::budget
 PublisherLimits::max_sessions

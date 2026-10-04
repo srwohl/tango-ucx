@@ -202,7 +202,15 @@ std::string format(const StreamMessage &m)
               {"field_dtype", d.field_dtype},
               {"allow_every", m.allow_every},
               {"max_sessions", m.max_sessions}});
+    if(!d.application_text.empty())
+        j["application_text"] = d.application_text;
     return dump(j);
+}
+bool valid_text(std::string_view text)
+{
+    // A byte that is not UTF-8 is replaced when the text is dumped, so it reads back changed.
+    return text.size() <= k_max_text &&
+           json::parse(dump(json(std::string(text)))).get<std::string>() == text;
 }
 std::string format(const SessionsMessage &m)
 {
@@ -229,7 +237,7 @@ std::string format(const SessionsMessage &m)
 Status parse(std::string_view doc, StreamMessage &m)
 {
     auto j = parse_json(doc);
-    std::string_view name, element, dtype;
+    std::string_view name, element, dtype, text;
     if(auto st = check_interface(j, name); st != Ok)
         return st;
     m = {};
@@ -249,6 +257,9 @@ Status parse(std::string_view doc, StreamMessage &m)
                       m.description.max_payload_bytes
                 : shape != j.end() && shape->is_array() && !shape->empty() && shape->size() <= 8);
     auto e = std::find(k_element_names.begin(), k_element_names.end(), element);
+    // A publisher without an application text leaves the key out.
+    ok = ok &&
+         (!j.contains("application_text") || string_key(j, "application_text", k_max_text, text));
     if(!ok || e == k_element_names.end())
         return Malformed;
     for(const auto &extent : opaque ? json::array() : *shape)
@@ -260,6 +271,7 @@ Status parse(std::string_view doc, StreamMessage &m)
     m.description.element = Element(e - k_element_names.begin());
     m.description.field_bytes = std::uint32_t(field_bytes);
     m.description.field_dtype = dtype;
+    m.description.application_text = text;
     m.max_sessions = std::uint32_t(sessions);
     return Ok;
 }
