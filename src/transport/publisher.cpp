@@ -112,7 +112,6 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     void timer_pass(std::int64_t);
     void publish_health();
     void retire(std::uint32_t, wire::Reason, bool failed = false);
-    void send_ready(std::uint32_t);
     void send_end(std::uint32_t);
     void send_frame(std::uint32_t, std::uint32_t, std::int64_t);
     void send_control(std::uint32_t, OpKind, std::uint8_t, std::span<const std::byte>);
@@ -399,11 +398,6 @@ void Pub::send_control(std::uint32_t row_index, OpKind kind, std::uint8_t messag
     if(!UCS_PTR_IS_PTR(request))
         on_control(&operation, UCS_PTR_STATUS(request));
 }
-void Pub::send_ready(std::uint32_t row_index)
-{
-    auto encoded = wire::encode(wire::SessionMessage{rows[row_index].id});
-    send_control(row_index, OpKind::Ready, wire::Ready, encoded);
-}
 void Pub::send_end(std::uint32_t row_index)
 {
     auto &row = rows[row_index];
@@ -633,7 +627,8 @@ bool Pub::control_pass()
                 pull_mask |= std::uint64_t{1} << row_index;
                 range_frames = open_message.range;
             }
-            send_ready(row_index);
+            auto encoded = wire::encode(wire::SessionMessage{row.id});
+            send_control(row_index, OpKind::Ready, wire::Ready, encoded);
             wire::Reply reply{wire::Ok};
             auto address = worker->address();
             reply.address_bytes = std::uint16_t(address.size());
