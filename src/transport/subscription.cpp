@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
+#include "idle.h"
 #include "tables.h"
 
 #include <algorithm>
@@ -13,6 +14,8 @@ namespace TangoUcx::transport
 namespace
 {
 constexpr std::int64_t k_end_grace_ns = 2'000'000'000LL, k_quarantine_ns = 1'000'000'000LL;
+// The longest the loop waits before another pass, and the longest while a GPU event is pending.
+constexpr std::int64_t k_wait_ns = 1'000'000LL, k_event_wait_ns = 100'000LL;
 std::int64_t now_ns()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -274,7 +277,7 @@ void Sub::run()
             context->destroy();
         return;
     }
-    unsigned idle = 0;
+    Idle idle;
     while(!close.load(std::memory_order_acquire))
     {
         auto now = now_ns();
@@ -326,11 +329,18 @@ void Sub::run()
             publish_health();
         }
         quiet_turns = work ? 0 : quiet_turns + 1;
-        idle = work ? 0 : idle + 1;
-        if(idle > 64)
+        if(idle.due(work, now) && begun) // the reply to Open has no fd: poll until the start
         {
-            idle = 0;
-            std::this_thread::yield();
+            // A released batch signals its fd. A released batch's GPU event and a partial batch's
+            // max_wait have none, so they shorten the wait.
+            auto wait_ns = k_wait_ns;
+            if(std::ranges::any_of(rings->event_wait, [](std::uint64_t word) { return word != 0; }))
+                wait_ns = k_event_wait_ns;
+            if(first_landed_ns)
+                wait_ns =
+                    std::min(wait_ns, std::int64_t(plan.max_wait_ns) - (now - first_landed_ns));
+            if(Idle::wait(*worker, rings->released.fd.fd(), wait_ns))
+                quiet_turns += 64; // a wait is as quiet as many turns of a loop that only polls
         }
     }
     finish_close();

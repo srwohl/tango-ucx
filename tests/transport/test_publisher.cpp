@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <ctime>
 #include <format>
 #include <thread>
 
@@ -353,5 +354,42 @@ TEST_CASE("End after finish follows the completion of every frame send")
     }
     CHECK_FALSE(sub.read(test::deadline()));
     CHECK(sub.outcome() == Outcome::End);
+    sub.close(test::deadline());
+}
+
+// Each frame is published after both loops have found no work for longer than they poll: it is
+// posted to a publisher loop that waits, and reaches a subscription loop that waits. So does the
+// release of its batch.
+TEST_CASE("frames published while the loops wait all arrive, in order")
+{
+    Publisher publisher(test::small_description(), test::small_limits(1));
+    auto sub = test::subscribe(publisher, true);
+    for(std::uint64_t i = 0; i < 50; ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        test::publish_one(publisher);
+        auto batch = sub.read(test::deadline());
+        REQUIRE(batch);
+        CHECK(batch->index(0) == i);
+    }
+    sub.close(test::deadline());
+}
+
+TEST_CASE("a publisher and a subscription with nothing to do take little CPU time")
+{
+    if(!transport::ucp::idle_waits())
+        return; // TANGO_UCX_IDLE=spin: the loops only poll, and take a core each
+    // Large frames make few slots, so a pass of the loop is short under a sanitizer too.
+    Publisher publisher({Element::U8, {1 << 20}, 0, {}}, test::small_limits(1));
+    auto sub = test::subscribe(publisher, true, {.budget = 16ull << 20});
+    publisher.ucx_start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100)); // the slots are granted
+    auto cpu = std::clock();
+    auto start = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::chrono::duration<double> wall = std::chrono::steady_clock::now() - start;
+    auto used = double(std::clock() - cpu) / CLOCKS_PER_SEC;
+    INFO("CPU time " << used << " s in " << wall.count() << " s");
+    CHECK(used < 0.5 * wall.count()); // two loops that only poll take two cores
     sub.close(test::deadline());
 }

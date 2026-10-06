@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
+#include "idle.h"
 #include "publisher_operations.h"
 #include "tables.h"
 
@@ -92,6 +93,9 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     HealthCopy<Observation> health_copy;
     std::jthread loop;
     std::atomic<bool> started{false}, finishing{false}, stopping{false};
+    // The loop is in its wait, or is about to be: a slot posted now signals wake to end it.
+    std::atomic<bool> parked{false};
+    EventFd wake;
     bool ended = false, quarantined = false, setup_ok = false;
     bool source_failed = false;
     std::promise<void> setup_done;
@@ -105,6 +109,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     void shutdown();
     void publish_slot(std::uint32_t, std::optional<std::uint64_t>, std::optional<std::size_t>);
     void cancel_slot(std::uint32_t);
+    void post(SourceSlot &);
     std::span<std::byte> payload(std::uint32_t);
     std::span<std::byte> fields(std::uint32_t);
     void *gpu_payload(std::uint32_t, GpuStream);
@@ -296,7 +301,7 @@ void Pub::run()
         shutdown(); // no session was opened, so this only releases what setup created
         return;
     }
-    unsigned idle = 0;
+    Idle idle;
     while(!stopping.load(std::memory_order_acquire))
     {
         auto now = now_ns();
@@ -310,11 +315,18 @@ void Pub::run()
             last_timer_ns = now;
             timer_pass(now);
         }
-        idle = work ? 0 : idle + 1;
-        if(idle > 64)
+        if(idle.due(work, now))
         {
-            idle = 0;
-            std::this_thread::yield();
+            // From here on a posted slot signals wake (post). The next slot to route may have
+            // been posted before that, or be waiting for its GPU event, which has no fd and is
+            // short: then the loop polls on. The wait is no longer than the timer's turn.
+            parked.store(true);
+            bool next_posted = slots_routed < slots_granted &&
+                               slots[order[slots_routed % plan.slot_count]].posted.load();
+            if(!next_posted)
+                Idle::wait(*worker, wake.fd(), k_timer_ns);
+            parked.store(false);
+            wake.clear();
         }
     }
     shutdown();
@@ -429,7 +441,7 @@ void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> ti
     slot.cancel = false;
     if(slot.gpu_accessed)
         gpu_runtime()->record(slot.event, slot.gpu_stream);
-    slot.posted.store(true, std::memory_order_release);
+    post(slot);
 }
 // Gives a slot back unpublished. It is still posted because the loop takes slots in grant order.
 void Pub::cancel_slot(std::uint32_t slot_index)
@@ -440,8 +452,17 @@ void Pub::cancel_slot(std::uint32_t slot_index)
         slot.cancel = true;
         if(slot.gpu_accessed)
             gpu_runtime()->record(slot.event, slot.gpu_stream);
-        slot.posted.store(true, std::memory_order_release);
+        post(slot);
     }
+}
+// Hands a slot to the loop, and ends the loop's wait. This thread stores posted and then loads
+// parked; the loop stores parked and then loads posted. All four are sequentially consistent, so
+// at least one of the two threads sees the other's store, and no wake is lost.
+void Pub::post(SourceSlot &slot)
+{
+    slot.posted.store(true);
+    if(parked.load())
+        wake.signal();
 }
 
 void Pub::send_control(std::uint32_t row_index, OpKind kind, std::uint8_t message_id,
