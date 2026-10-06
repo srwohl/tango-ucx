@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
@@ -16,6 +17,18 @@ void check(ucs_status_t s, const char *what)
 {
     if(s != UCS_OK)
         throw std::runtime_error(std::string(what) + ": " + ucs_status_string(s));
+}
+// TANGO_UCX_IDLE=spin makes every publisher's and subscription's loop poll without ever waiting,
+// which takes a core each: for a node that has the cores to give. Anything else, or unset, lets
+// a loop that finds no work wait for its next event (idle.h). It is read once in a process.
+bool idle_waits()
+{
+    static const bool waits = []
+    {
+        const char *mode = std::getenv("TANGO_UCX_IDLE");
+        return !mode || std::strcmp(mode, "spin") != 0;
+    }();
+    return waits;
 }
 Context::Context()
 {
@@ -40,6 +53,8 @@ Context::Context()
     ucp_params_t params{};
     params.field_mask = UCP_PARAM_FIELD_FEATURES;
     params.features = UCP_FEATURE_AM;
+    if(idle_waits())
+        params.features |= UCP_FEATURE_WAKEUP; // the workers' event fds
     st = ucp_init(&params, cfg, &context_);
     ucp_config_release(cfg);
     check(st, "ucp_init");
@@ -99,6 +114,15 @@ Worker::Worker(Context &context)
     address_bytes_ = a.address_length;
     max_am_header_ = a.max_am_header;
     ucp_worker_release_address(worker_, a.address);
+    if(idle_waits())
+    {
+        st = ucp_worker_get_efd(worker_, &event_fd_);
+        if(st != UCS_OK)
+        {
+            destroy();
+            check(st, "ucp_worker_get_efd");
+        }
+    }
 }
 Worker::~Worker()
 {

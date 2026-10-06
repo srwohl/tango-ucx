@@ -1,6 +1,7 @@
 # Phase 5 adds GPU source, opaque GPU receive and pinned host upload (NEXT.md).
 # Allowances also catch up completed pull and installed-consumer work measured before this build.
 # Pre-build counts were 6,099 library and 5,577 test lines, with 80 C++ and 33 Python names.
+# The hybrid idle of the loops (src/transport/idle.h) has the last four allowances.
 # The estimates come from prototypes/final_shape/fixed_tables_v2.md, section 10.
 # Phase 1 and 2 category splits were rebalanced from measured counts; combined totals stay cumulative.
 # Phase 3 allowances were raised to the measured counts when the phase was closed (2026-10-02).
@@ -561,3 +562,31 @@ phase = 5
 kind = "tests"
 lines = 10
 patterns = ["tests/transport/test_failure.cpp"]
+
+[[allowance]]
+name = "idle"
+phase = 5
+kind = "library"
+lines = 60
+patterns = ["src/transport/idle.h"]
+
+[[allowance]]
+name = "publisher"
+phase = 5
+kind = "library"
+lines = 20
+patterns = ["src/transport/publisher.cpp"]
+
+[[allowance]]
+name = "ucp"
+phase = 5
+kind = "library"
+lines = 35
+patterns = ["src/transport/ucp.h", "src/transport/ucp.cpp"]
+
+[[allowance]]
+name = "test_publisher"
+phase = 5
+kind = "tests"
+lines = 40
+patterns = ["tests/transport/test_publisher.cpp"]
