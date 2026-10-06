@@ -5,6 +5,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <memory.h>
+#include <tables.h>
 #include <transport.h>
 
 #include <chrono>
@@ -126,4 +127,52 @@ TEST_CASE("a GPU that does not exist and memory that is not there are refused by
     REQUIRE(cudaGetDevice(&current) == cudaSuccess);
     CHECK(current == 0);
     rt.release(rt.allocate(0, k_bytes));
+}
+
+TEST_CASE("a source event rejected by CUDA fails publishing and quarantines its allocation")
+{
+    auto before = quarantine().total.load();
+    CUdevice gpu = 0;
+    CUcontext other = nullptr;
+    CUstream stream = nullptr;
+    (void)runtime();
+    // Initialize the caller's primary context before creating an unrelated CUDA context.
+    auto event = runtime().make_event(0);
+    runtime().destroy_event(event);
+    REQUIRE(cuDeviceGet(&gpu, 0) == CUDA_SUCCESS);
+    REQUIRE(cuCtxCreate(&other, 0, gpu) == CUDA_SUCCESS);
+    REQUIRE(cuStreamCreate(&stream, 0) == CUDA_SUCCESS);
+    REQUIRE(cuCtxPopCurrent(nullptr) == CUDA_SUCCESS);
+    {
+        PublisherLimits limits;
+        limits.budget = 8ull << 20;
+        limits.max_sessions = 1;
+        limits.allow_every = true;
+        limits.gpu = 0;
+        Publisher publisher({Element::U8, {128}}, limits);
+        auto pending = prepare(parse_ucx_stream(ucx_stream(publisher)), true);
+        auto deadline = [] { return Deadline::clock::now() + std::chrono::seconds(5); };
+        auto reply = handle(publisher, pending.open_message());
+        auto sub = std::move(pending).start(reply, deadline(),
+                                            [&publisher](std::string_view doc, Deadline)
+                                            {
+                                                wire::Reply reply;
+                                                return wire::parse(handle(publisher, doc), reply) &&
+                                                       reply.status == wire::Ok;
+                                            });
+        publisher.ucx_start();
+        auto slot = publisher.acquire(deadline());
+        REQUIRE(slot);
+        (void)slot->gpu_payload({stream});
+        std::move(*slot).publish(); // cudaEventRecord fails for the unrelated context's stream
+        CHECK_FALSE(sub.read(deadline()));
+        CHECK(sub.outcome() == Outcome::Failed);
+        for(auto until = deadline();
+            publisher.health().failure.empty() && Deadline::clock::now() < until;)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        CHECK_THAT(publisher.health().failure, ContainsSubstring("GPU source event failed"));
+        CHECK_FALSE(publisher.acquire(deadline()));
+    }
+    CHECK(quarantine().total > before);
+    REQUIRE(cuCtxDestroy(other) == CUDA_SUCCESS);
 }

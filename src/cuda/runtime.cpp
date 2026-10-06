@@ -70,7 +70,20 @@ class CudaRuntime final : public GpuRuntime
     {
         Selected on(a.gpu);
         if(a.base && on.status == cudaSuccess)
-            (void)cudaFree(a.base);
+        {
+            if(a.pinned)
+                (void)cudaFreeHost(a.base);
+            else
+                (void)cudaFree(a.base);
+        }
+    }
+    Allocation allocate_pinned(int gpu, std::size_t bytes) override
+    {
+        Selected on(gpu);
+        check(on.status, "cudaSetDevice", gpu);
+        void *base = nullptr;
+        check(cudaHostAlloc(&base, bytes, cudaHostAllocPortable), "cudaHostAlloc", gpu);
+        return {base, bytes, gpu, true};
     }
     GpuEvent make_event(int gpu) override
     {

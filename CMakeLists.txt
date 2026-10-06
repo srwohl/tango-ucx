@@ -15,7 +15,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(CUDAToolkit QUIET)
-option(TANGO_UCX_CUDA "Build CUDA receive support when the toolkit is available" ${CUDAToolkit_FOUND})
+option(TANGO_UCX_CUDA "Build CUDA source and receive support when the toolkit is available" ${CUDAToolkit_FOUND})
 set(TANGO_UCX_SANITIZERS "" CACHE STRING "Comma-separated -fsanitize list")
 
 find_package(Threads REQUIRED)

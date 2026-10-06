@@ -86,6 +86,12 @@ std::span<const std::byte> Batch::payload(std::size_t i) const
         return {payload_ + i * frame_bytes_, frame_bytes_};
     return {payload_ + (placements_[2 * i] - placements_[0]), std::size_t(placements_[2 * i + 1])};
 }
+std::size_t Batch::payload_bytes(std::size_t i) const
+{
+    if(i >= frames_ || !payload_)
+        throw std::out_of_range("batch frame");
+    return placements_ ? std::size_t(placements_[2 * i + 1]) : frame_bytes_;
+}
 const void *Batch::payload() const
 {
     if(placements_)
@@ -107,8 +113,9 @@ Batch Batch::copy() const
     auto c = std::make_shared<Copy>();
     if(placements_)
         c->placements.assign(placements_, placements_ + 2 * frames_);
-    c->payload.resize(placements_ ? payload(frames_ - 1).data() + payload(frames_ - 1).size() - payload_
-                               : frames_ * frame_bytes_);
+    c->payload.resize(placements_ ? placements_[2 * (frames_ - 1)] - placements_[0] +
+                                        payload_bytes(frames_ - 1)
+                                  : frames_ * frame_bytes_);
     c->records.resize(frames_ * record_stride_);
     if(gpu())
         transport::gpu_runtime()->copy_to_host(c->payload.data(), payload_, c->payload.size());
@@ -129,7 +136,8 @@ Batch Batch::copy() const
 // queued on the stream, and the loop frees the batch once that event is done.
 std::shared_ptr<void> transport::begin_gpu_view(const Batch &b, GpuStream stream)
 {
-    if(!b.gpu() || b.first_ == ~std::uint32_t{0} || b.rings_->batches[b.first_].viewed)
+    if(!b.rings_ || b.rings_->plan.event_gpu < 0 || b.first_ == ~std::uint32_t{0} ||
+       b.rings_->batches[b.first_].viewed)
         throw std::logic_error("gpu_view needs a GPU batch; a batch has one GPU view");
     auto &row = b.rings_->batches[b.first_];
     row.viewed = true;
@@ -145,14 +153,48 @@ std::shared_ptr<void> transport::begin_gpu_view(const Batch &b, GpuStream stream
 }
 GpuView Batch::gpu_view(GpuStream stream) &&
 {
+    if(!gpu())
+        throw std::logic_error("gpu_view needs a GPU batch; a batch has one GPU view");
     GpuView view;
     view.hold_ = transport::begin_gpu_view(*this, stream);
     view.batch_ = std::move(*this);
     return view;
 }
+void Batch::release_after(GpuStream stream)
+{
+    if(!rings_ || gpu() || rings_->plan.event_gpu < 0)
+        throw std::logic_error("release_after needs pinned host receive");
+    auto hold = transport::begin_gpu_view(*this, stream);
+}
+const void *transport::gpu_payload(const Batch &b, std::size_t i)
+{
+    (void)b.payload_bytes(i);
+    if(!b.gpu())
+        throw std::logic_error("gpu_view needs a GPU batch");
+    return b.payload_ +
+           (b.placements_ ? b.placements_[2 * i] - b.placements_[0] : i * b.frame_bytes_);
+}
+GpuView &GpuView::operator=(GpuView &&other) noexcept
+{
+    if(this != &other)
+    {
+        hold_.reset(); // record the old event before posting the old batch for release
+        batch_ = std::move(other.batch_);
+        hold_ = std::move(other.hold_);
+    }
+    return *this;
+}
 const void *GpuView::payload() const
 {
     return batch_.payload();
+}
+const void *GpuView::payload(std::size_t i) const
+{
+    return transport::gpu_payload(batch_, i);
+}
+std::size_t GpuView::payload_bytes(std::size_t i) const
+{
+    return batch_.payload_bytes(i);
 }
 const void *GpuView::records() const
 {

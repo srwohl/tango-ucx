@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "memory.h"
 #include "publisher_operations.h"
+#include "tables.h"
 #include "transport.h"
 #include "wire.h"
 
@@ -122,6 +123,8 @@ PublisherPlan plan_publisher(const Description &d, const PublisherLimits &l, std
 {
     PublisherPlan p;
     p.sizes = sizes_of(d);
+    if(l.gpu < -1 || (l.gpu >= 0 && !registered_gpu))
+        throw std::invalid_argument("GPU source needs a GPU runtime and a non-negative GPU number");
     if(l.max_sessions < 1 || l.max_sessions > k_max_sessions)
         throw std::invalid_argument("max_sessions must be 1 to 64");
     if(request > 1024)
@@ -131,7 +134,7 @@ PublisherPlan plan_publisher(const Description &d, const PublisherLimits &l, std
     p.row_count = l.max_sessions;
     p.op_stride = std::uint32_t(align(add({request, sizeof(OpMeta), p.sizes.header_bytes}), 64));
     auto per = add({p.sizes.frame_bytes, p.sizes.record_stride, mul(p.row_count, p.op_stride),
-                    sizeof(std::uint64_t) + sizeof(std::uint16_t)});
+                    sizeof(std::uint64_t) + sizeof(std::uint16_t), l.gpu >= 0 ? 64ull : 0ull});
     auto fixed = add({k_pub_fixed, PublisherOperations::control_bytes(p.row_count, p.op_stride),
                       k_region_charge});
     auto fits = l.budget > fixed ? (l.budget - fixed) / per : 0;
@@ -160,11 +163,13 @@ SubscriptionPlan plan_subscription(const Offer &o, bool every, const Subscriptio
         throw std::invalid_argument("batch must be at least one");
     if(options.label.size() > 64)
         throw std::invalid_argument("label exceeds 64 bytes");
-    if(options.gpu >= 0 && !registered_gpu)
+    if(options.gpu < -1 || options.pinned < -1 || (options.gpu >= 0 && options.pinned >= 0))
+        throw std::invalid_argument(
+            "choose GPU receive or pinned host receive, with one GPU number");
+    if((options.gpu >= 0 || options.pinned >= 0) && !registered_gpu)
         throw std::invalid_argument("GPU receive needs a GPU runtime: link tango-ucx-cuda");
     p.gpu = options.gpu >= 0;
-    if(p.gpu && p.sizes.opaque)
-        throw std::invalid_argument("a GPU subscription cannot receive an opaque stream");
+    p.event_gpu = p.gpu ? options.gpu : options.pinned;
     if(!(options.max_rate >= 0) || (every && options.max_rate > 0))
         throw std::invalid_argument("max_rate must be 0 or more, and applies to latest only");
     p.batch_size = options.batch;
@@ -173,7 +178,8 @@ SubscriptionPlan plan_subscription(const Offer &o, bool every, const Subscriptio
     auto per = add({p.sizes.frame_bytes, p.sizes.record_stride, p.op_stride, 64, 12});
     auto fixed = add({k_sub_fixed, mul(3, p.op_stride), k_region_charge});
     auto fits = options.budget > fixed ? (options.budget - fixed) / per : 0;
-    auto depth = std::min<std::uint64_t>(fits, p.gpu ? k_max_gpu_depth : k_max_depth);
+    auto cap = p.event_gpu >= 0 ? k_max_gpu_depth : k_max_depth;
+    auto depth = std::min<std::uint64_t>(fits, cap);
     if(p.sizes.opaque)
     {
         // A packed ring: the budget less the tables. They are sized for frames of 1/256 of the
@@ -181,7 +187,7 @@ SubscriptionPlan plan_subscription(const Offer &o, bool every, const Subscriptio
         per = add({per - p.sizes.frame_bytes, 2 * sizeof(std::uint64_t)});
         auto room = options.budget > fixed ? options.budget - fixed : 0;
         depth = std::min({room / add({per, p.sizes.frame_bytes / 256, 1}), room / mul(8, per),
-                          std::uint64_t{k_max_depth}});
+                          std::uint64_t{cap}});
         depth -= depth % p.batch_size;
         p.payload_bytes = room - depth * per;
         if(depth < 2ull * p.batch_size || p.payload_bytes < mul(3, p.sizes.frame_bytes))
@@ -326,5 +332,50 @@ void register_gpu_runtime(GpuRuntime &r)
 GpuRuntime *gpu_runtime() noexcept
 {
     return registered_gpu;
+}
+std::shared_ptr<void> gpu_storage(int gpu, std::size_t bytes, bool pinned_host,
+                                  std::span<GpuEvent> events)
+{
+    struct Storage final : Owner
+    {
+        GpuRuntime *runtime = gpu_runtime();
+        Allocation memory;
+        std::vector<GpuEvent> events;
+        ~Storage()
+        {
+            for(auto event : events)
+                runtime->destroy_event(event);
+            runtime->release(memory);
+        }
+    };
+    auto storage = std::unique_ptr<Storage>(new Storage);
+    storage->events.reserve(events.size());
+    storage->memory = pinned_host ? storage->runtime->allocate_pinned(gpu, bytes)
+                                  : storage->runtime->allocate(gpu, bytes);
+    for(auto &event : events)
+        storage->events.push_back(event = storage->runtime->make_event(gpu));
+    auto *base = storage->memory.base;
+    auto *owner = storage.release();
+    return std::shared_ptr<void>(
+        base,
+        [owner](void *)
+        {
+            // The transport loop may already have closed. Wait briefly for normal outstanding
+            // work; retain storage when completion cannot be established.
+            auto deadline = Deadline::clock::now() + std::chrono::seconds(1);
+            for(auto event : owner->events)
+            {
+                GpuEventState state;
+                while((state = owner->runtime->query(event)) == GpuEventState::Pending &&
+                      Deadline::clock::now() < deadline)
+                    std::this_thread::yield();
+                if(state != GpuEventState::Done)
+                {
+                    quarantine().keep(*owner, owner->memory.bytes);
+                    return;
+                }
+            }
+            delete owner;
+        });
 }
 } // namespace TangoUcx::transport

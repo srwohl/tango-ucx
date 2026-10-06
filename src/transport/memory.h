@@ -31,6 +31,7 @@ struct SubscriptionPlan
     std::uint64_t payload_bytes = 0, records_bytes = 0, recv_ops_bytes = 0, charge = 0,
                   max_wait_ns = 0;
     bool gpu = false;
+    int event_gpu = -1; // GPU receive or pinned host upload completion
 };
 
 Sizes sizes_of(const Description &);
@@ -82,5 +83,10 @@ class Region
 };
 std::uint64_t pinned_bytes() noexcept;
 struct GpuRuntime;
+struct GpuEvent;
 GpuRuntime *gpu_runtime() noexcept; // the registered one; null when none is linked
+// The owner retains allocation and events together. Its last release checks outstanding work,
+// including after the subscription or publisher has closed; failed work is quarantined.
+std::shared_ptr<void> gpu_storage(int gpu, std::size_t bytes, bool pinned,
+                                  std::span<GpuEvent> events);
 } // namespace TangoUcx::transport

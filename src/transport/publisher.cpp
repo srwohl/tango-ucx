@@ -19,6 +19,9 @@ struct SourceSlot
     bool cancel = false, held = false;
     std::uint64_t timestamp = 0, payload_bytes = 0;
     std::uint32_t sends = 0;
+    bool gpu_accessed = false;
+    GpuStream gpu_stream;
+    GpuEvent event;
 };
 struct PubRow
 {
@@ -56,6 +59,7 @@ struct Observation
     std::uint64_t frames = 0, skipped = 0, missing = 0;
     std::uint32_t failed_every = 0, pressure_from = 0, slots_free = 0, slots_held = 0, count = 0;
     bool memory_hooks = true;
+    bool source_failed = false;
     std::array<RowObservation, 64> rows{};
 };
 struct Pub final : Owner, std::enable_shared_from_this<Pub>
@@ -67,6 +71,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::unique_ptr<ucp::Context> context;
     std::unique_ptr<ucp::Worker> worker;
     Region source;
+    std::shared_ptr<void> source_storage; // keeps GPU writes safe when a slot outlives Publisher
     std::vector<std::byte> records;
     PublisherOperations operations;
     std::unique_ptr<SourceSlot[]> slots;
@@ -88,6 +93,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::jthread loop;
     std::atomic<bool> started{false}, finishing{false}, stopping{false};
     bool ended = false, quarantined = false, setup_ok = false;
+    bool source_failed = false;
     std::promise<void> setup_done;
     std::shared_ptr<Pub> self_keep;
     explicit Pub(Description, PublisherLimits);
@@ -101,6 +107,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     void cancel_slot(std::uint32_t);
     std::span<std::byte> payload(std::uint32_t);
     std::span<std::byte> fields(std::uint32_t);
+    void *gpu_payload(std::uint32_t, GpuStream);
     std::uint64_t id_for(std::uint32_t) const;
     int find_row(std::uint64_t) const;
     bool has_room(const PubRow &, std::uint64_t frames = 1, std::uint64_t grants = 1) const;
@@ -244,9 +251,19 @@ void Pub::setup()
     worker = std::make_unique<ucp::Worker>(*context);
     auto request_bytes = context->request_bytes();
     plan = plan_publisher(description, limits, request_bytes, worker->max_am_header());
-    source = Region::allocate(context->get(), plan.source_bytes);
     records.resize(plan.records_bytes);
     slots = std::make_unique<SourceSlot[]>(plan.slot_count);
+    if(limits.gpu >= 0)
+    {
+        std::vector<GpuEvent> events(plan.slot_count);
+        source_storage = gpu_storage(limits.gpu, plan.source_bytes, false, events);
+        for(std::size_t i = 0; i < events.size(); ++i)
+            slots[i].event = events[i];
+        source =
+            Region::adopt(context->get(), source_storage, plan.source_bytes, UCS_MEMORY_TYPE_CUDA);
+    }
+    else
+        source = Region::allocate(context->get(), plan.source_bytes);
     order.resize(plan.slot_count);
     operations.allocate(this, plan, request_bytes);
     grants.reserve(plan.slot_count);
@@ -363,10 +380,23 @@ PubRow *Pub::puller(std::uint64_t frame_index)
 }
 std::span<std::byte> Pub::payload(std::uint32_t slot_index)
 {
+    if(limits.gpu >= 0)
+        throw std::logic_error("a GPU source slot uses gpu_payload on its GPU stream");
     if(slot_index >= plan.slot_count)
         throw std::out_of_range("source slot");
     return {source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
             std::size_t(plan.sizes.frame_bytes)};
+}
+void *Pub::gpu_payload(std::uint32_t slot_index, GpuStream stream)
+{
+    if(limits.gpu < 0 || stopping.load())
+        throw std::logic_error("gpu_payload needs an active GPU source slot");
+    auto &slot = slots[slot_index];
+    if(slot.gpu_accessed && slot.gpu_stream.handle != stream.handle)
+        throw std::logic_error("all writes to a source slot use its GPU stream");
+    slot.gpu_stream = stream;
+    slot.gpu_accessed = true;
+    return source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes);
 }
 std::span<std::byte> Pub::fields(std::uint32_t slot_index)
 {
@@ -381,6 +411,8 @@ void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> ti
 {
     if(slot_index >= plan.slot_count)
         return;
+    if(stopping.load())
+        throw std::logic_error("the publisher has closed");
     if(bytes.has_value() != plan.sizes.opaque)
         throw std::logic_error(plan.sizes.opaque ? "an opaque stream publishes with publish_bytes"
                                                  : "publish_bytes needs an opaque stream");
@@ -388,11 +420,15 @@ void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> ti
         throw std::invalid_argument(std::format("a frame of {} bytes; an opaque frame has 1 to {}",
                                                 *bytes, plan.sizes.frame_bytes));
     auto &slot = slots[slot_index];
+    if(limits.gpu >= 0 && !slot.gpu_accessed)
+        throw std::logic_error("a GPU source slot needs gpu_payload before publishing");
     slot.payload_bytes = bytes.value_or(plan.sizes.frame_bytes);
     slot.timestamp = timestamp.value_or(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                             std::chrono::system_clock::now().time_since_epoch())
                                             .count());
     slot.cancel = false;
+    if(slot.gpu_accessed)
+        gpu_runtime()->record(slot.event, slot.gpu_stream);
     slot.posted.store(true, std::memory_order_release);
 }
 // Gives a slot back unpublished. It is still posted because the loop takes slots in grant order.
@@ -402,6 +438,8 @@ void Pub::cancel_slot(std::uint32_t slot_index)
     {
         auto &slot = slots[slot_index];
         slot.cancel = true;
+        if(slot.gpu_accessed)
+            gpu_runtime()->record(slot.event, slot.gpu_stream);
         slot.posted.store(true, std::memory_order_release);
     }
 }
@@ -479,10 +517,10 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     ++row.in_flight;
     ++slot.sends;
     // An eager frame cannot land in GPU memory.
-    auto params = prepare(operation, row.gpu ? UCP_AM_SEND_FLAG_RNDV : 0);
+    auto params = prepare(operation, row.gpu || limits.gpu >= 0 ? UCP_AM_SEND_FLAG_RNDV : 0);
     params.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
     params.memh = source.memh();
-    params.memory_type = UCS_MEMORY_TYPE_HOST;
+    params.memory_type = limits.gpu >= 0 ? UCS_MEMORY_TYPE_CUDA : UCS_MEMORY_TYPE_HOST;
     complete_if_done(operation,
                      ucp_am_send_nbx(row.ep, wire::Frame, header.data(), header_bytes,
                                      source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
@@ -699,6 +737,22 @@ bool Pub::route_pass(std::int64_t now)
         auto &slot = slots[slot_index];
         if(!slot.posted.load(std::memory_order_acquire))
             break;
+        if(slot.gpu_accessed)
+        {
+            auto state = gpu_runtime()->query(slot.event);
+            if(state == GpuEventState::Pending)
+                break;
+            if(state == GpuEventState::Failed)
+            {
+                source_failed = true;
+                finishing.store(true);
+                slot.cancel = true;
+                for(std::uint32_t i = 0; i < plan.row_count; ++i)
+                    if(rows[i].used && !rows[i].closing)
+                        retire(i, wire::Protocol, true);
+            }
+            slot.gpu_accessed = false;
+        }
         slot.posted.store(false, std::memory_order_relaxed);
         slot.held = false;
         // The puller this frame goes to. A cancelled slot uses no frame index, so every later
@@ -921,6 +975,7 @@ void Pub::publish_health()
     observation.skipped = skipped;
     observation.missing = missing;
     observation.failed_every = failed_every;
+    observation.source_failed = source_failed;
     observation.pressure_from = grants.empty() && blocked ? rows[blocked - 1].ordinal : 0;
     for(const auto &slot : std::span(slots.get(), plan.slot_count))
     {
@@ -997,7 +1052,7 @@ void Pub::shutdown()
 
 namespace TangoUcx
 {
-Slot::Slot(std::weak_ptr<transport::Pub> pub, std::uint32_t index)
+Slot::Slot(std::shared_ptr<transport::Pub> pub, std::uint32_t index)
     : state_(std::move(pub)), index_(index), active_(true)
 {
 }
@@ -1011,7 +1066,7 @@ Slot &Slot::operator=(Slot &&other) noexcept
     if(this != &other)
     {
         if(active_)
-            if(auto pub = state_.lock())
+            if(auto pub = state_)
                 pub->cancel_slot(index_);
         state_ = std::move(other.state_);
         index_ = other.index_;
@@ -1022,18 +1077,18 @@ Slot &Slot::operator=(Slot &&other) noexcept
 Slot::~Slot()
 {
     if(active_)
-        if(auto pub = state_.lock())
+        if(auto pub = state_)
             pub->cancel_slot(index_);
 }
 std::span<std::byte> Slot::payload()
 {
-    if(auto pub = state_.lock())
+    if(auto pub = active_ ? state_ : nullptr; pub && !pub->stopping.load())
         return pub->payload(index_);
     return {};
 }
 std::span<std::byte> Slot::fields()
 {
-    if(auto pub = state_.lock())
+    if(auto pub = active_ ? state_ : nullptr; pub && !pub->stopping.load())
         return pub->fields(index_);
     return {};
 }
@@ -1041,17 +1096,31 @@ void Slot::publish(std::optional<std::uint64_t> timestamp) &&
 {
     if(!active_)
         throw std::logic_error("slot already published");
-    if(auto pub = state_.lock())
+    if(auto pub = state_)
         pub->publish_slot(index_, timestamp, {});
     active_ = false;
+    state_.reset();
+}
+void *Slot::gpu_payload(GpuStream stream)
+{
+    if(!active_ || !state_)
+        throw std::logic_error("gpu_payload needs an active GPU source slot");
+    return state_->gpu_payload(index_, stream);
+}
+std::size_t Slot::payload_bytes() const
+{
+    if(!active_ || !state_)
+        throw std::logic_error("payload_bytes needs an active source slot");
+    return state_->plan.sizes.frame_bytes;
 }
 void Slot::publish_bytes(std::size_t bytes, std::optional<std::uint64_t> timestamp) &&
 {
     if(!active_)
         throw std::logic_error("slot already published");
-    if(auto pub = state_.lock())
+    if(auto pub = state_)
         pub->publish_slot(index_, timestamp, bytes);
     active_ = false;
+    state_.reset();
 }
 Publisher::Publisher(Description description, PublisherLimits limits)
     : p_(std::make_shared<transport::Pub>(std::move(description), limits))
@@ -1113,6 +1182,8 @@ Health Publisher::health() const
                   .quarantined_bytes = transport::quarantine().total.load(),
                   .memory_hooks = observation.memory_hooks,
                   .started = p_->started.load(std::memory_order_acquire)};
+    if(observation.source_failed)
+        result.failure = "a GPU source event failed; its memory cannot be reused";
     for(const auto &row : std::span(observation.rows).first(observation.count))
     {
         if(!row.retiring)

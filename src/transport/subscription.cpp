@@ -51,19 +51,6 @@ std::string status_text(wire::Status s)
             return "malformed or refused control message";
     }
 }
-// The GPU ring and its rows' events: the last holder of the rings releases them, on any thread.
-struct GpuRing
-{
-    GpuRuntime *runtime = gpu_runtime();
-    Allocation memory;
-    std::vector<GpuEvent> events;
-    ~GpuRing()
-    {
-        for(auto e : events)
-            runtime->destroy_event(e);
-        runtime->release(memory);
-    }
-};
 void send_cb(void *, ucs_status_t st, void *arg)
 {
     auto *o = static_cast<SubOpMeta *>(arg);
@@ -216,14 +203,12 @@ void Sub::setup()
     rings->batches = std::vector<BatchRow>(plan.ring_depth);
     if(plan.sizes.opaque)
         rings->placements.assign(2ull * plan.ring_depth, 0);
-    if(plan.gpu)
+    if(plan.event_gpu >= 0)
     {
-        auto ring = std::make_shared<GpuRing>();
-        ring->events.reserve(plan.ring_depth);
-        ring->memory = ring->runtime->allocate(options.gpu, plan.payload_bytes);
-        for(auto &row : rings->batches)
-            ring->events.push_back(row.event = ring->runtime->make_event(options.gpu));
-        rings->storage = std::shared_ptr<void>(ring, ring->memory.base);
+        std::vector<GpuEvent> events(plan.ring_depth);
+        rings->storage = gpu_storage(plan.event_gpu, plan.payload_bytes, !plan.gpu, events);
+        for(std::size_t i = 0; i < events.size(); ++i)
+            rings->batches[i].event = events[i];
     }
     else
         rings->storage = std::shared_ptr<void>(new std::byte[plan.payload_bytes], [](void *p)
@@ -596,7 +581,7 @@ void Sub::release_pass()
         else
             release_batch(std::uint32_t(k));
     }
-    for(std::uint32_t w = 0; plan.gpu && w < rings->event_wait.size(); ++w)
+    for(std::uint32_t w = 0; plan.event_gpu >= 0 && w < rings->event_wait.size(); ++w)
         for(auto bits = rings->event_wait[w]; bits; bits &= bits - 1)
         {
             auto k = w * 64 + std::uint32_t(std::countr_zero(bits));

@@ -17,6 +17,7 @@ PublisherLimits::budget
 PublisherLimits::max_sessions
 PublisherLimits::allow_every
 PublisherLimits::pressure_timeout
+PublisherLimits::gpu
 Publisher
 Publisher::ucx_start
 Publisher::acquire
@@ -25,6 +26,8 @@ Publisher::health
 Publisher::description
 Slot
 Slot::payload
+Slot::payload_bytes
+Slot::gpu_payload
 Slot::fields
 Slot::publish
 Slot::publish_bytes
@@ -41,6 +44,7 @@ SubscriptionOptions::batch
 SubscriptionOptions::max_wait
 SubscriptionOptions::max_rate
 SubscriptionOptions::gpu
+SubscriptionOptions::pinned
 SubscriptionOptions::allow_gpu_over_tcp
 SubscriptionOptions::label
 Subscription
@@ -54,6 +58,8 @@ Batch
 Batch::frames
 Batch::index
 Batch::payload
+Batch::payload_bytes
+Batch::release_after
 Batch::records
 Batch::gpu
 Batch::copy
@@ -63,6 +69,7 @@ GpuStream
 GpuStream::handle
 GpuView
 GpuView::payload
+GpuView::payload_bytes
 GpuView::records
 GpuView::frames
 every

@@ -1,3 +1,6 @@
+# Phase 5 adds GPU source, opaque GPU receive and pinned host upload (NEXT.md).
+# Allowances also catch up completed pull and installed-consumer work measured before this build.
+# Pre-build counts were 6,099 library and 5,577 test lines, with 80 C++ and 33 Python names.
 # The estimates come from prototypes/final_shape/fixed_tables_v2.md, section 10.
 # Phase 1 and 2 category splits were rebalanced from measured counts; combined totals stay cumulative.
 # Phase 3 allowances were raised to the measured counts when the phase was closed (2026-10-02).
@@ -11,10 +14,10 @@
 # Per-file entries are allowances, not targets.
 
 [project]
-active_phase = 4
-line_ceiling = 11000
-public_name_limit = 79
-python_name_limit = 32
+active_phase = 5
+line_ceiling = 13000
+public_name_limit = 87
+python_name_limit = 36
 
 [phases."1"]
 library = 4000
@@ -413,3 +416,148 @@ phase = 4
 kind = "tests"
 lines = 150
 patterns = ["python/tests/*.py"]
+
+[phases."5"]
+library = 6500
+tests = 6400
+total = 12900
+
+[[allowance]]
+name = "batch"
+phase = 5
+kind = "library"
+lines = 10
+patterns = ["src/transport/batch.cpp"]
+
+[[allowance]]
+name = "gpu_tests"
+phase = 5
+kind = "tests"
+lines = 280
+patterns = ["tests/gpu/**"]
+
+[[allowance]]
+name = "memory"
+phase = 5
+kind = "library"
+lines = 60
+patterns = ["src/transport/memory.cpp", "src/transport/memory.h"]
+
+[[allowance]]
+name = "public_headers"
+phase = 5
+kind = "library"
+lines = 20
+patterns = ["include/tango-ucx/tango.h", "include/tango-ucx/ucx.h", "src/transport/transport.h"]
+
+[[allowance]]
+name = "publisher"
+phase = 5
+kind = "library"
+lines = 140
+patterns = ["src/transport/publisher.cpp"]
+
+[[allowance]]
+name = "python_package"
+phase = 5
+kind = "library"
+lines = 60
+patterns = ["python/tango_ucx/*.py"]
+
+[[allowance]]
+name = "python_tests"
+phase = 5
+kind = "tests"
+lines = 90
+patterns = ["python/tests/*.py"]
+
+[[allowance]]
+name = "tables"
+phase = 5
+kind = "library"
+lines = 10
+patterns = ["src/transport/tables.h"]
+
+[[allowance]]
+name = "tango_subscribe"
+phase = 5
+kind = "library"
+lines = 10
+patterns = ["src/tango/subscribe.cpp"]
+
+[[allowance]]
+name = "tango_tests"
+phase = 5
+kind = "tests"
+lines = 30
+patterns = ["tests/tango/**"]
+
+[[allowance]]
+name = "test_opaque"
+phase = 5
+kind = "tests"
+lines = 20
+patterns = ["tests/transport/test_opaque.cpp"]
+
+[[allowance]]
+name = "test_plan"
+phase = 5
+kind = "tests"
+lines = 30
+patterns = ["tests/transport/test_plan.cpp"]
+
+[[allowance]]
+name = "test_publisher"
+phase = 5
+kind = "tests"
+lines = 10
+patterns = ["tests/transport/test_publisher.cpp"]
+
+[[allowance]]
+name = "test_subscription"
+phase = 5
+kind = "tests"
+lines = 60
+patterns = ["tests/transport/test_subscription.cpp"]
+
+[[allowance]]
+name = "test_wire"
+phase = 5
+kind = "tests"
+lines = 60
+patterns = ["tests/transport/test_wire.cpp"]
+
+[[allowance]]
+name = "wire"
+phase = 5
+kind = "library"
+lines = 50
+patterns = ["src/transport/wire.cpp", "src/transport/wire.h"]
+
+[[allowance]]
+name = "publisher_operations"
+phase = 5
+kind = "library"
+lines = 110
+patterns = ["src/transport/publisher_operations.h"]
+
+[[allowance]]
+name = "install_tests"
+phase = 5
+kind = "tests"
+lines = 10
+patterns = ["tests/install/consumer.cpp"]
+
+[[allowance]]
+name = "test_pull"
+phase = 5
+kind = "tests"
+lines = 380
+patterns = ["tests/transport/test_pull.cpp"]
+
+[[allowance]]
+name = "test_failure"
+phase = 5
+kind = "tests"
+lines = 10
+patterns = ["tests/transport/test_failure.cpp"]

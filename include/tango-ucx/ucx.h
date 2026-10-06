@@ -52,6 +52,7 @@ struct PublisherLimits
     std::uint32_t max_sessions = 8;
     bool allow_every = false;
     std::chrono::milliseconds pressure_timeout{0};
+    int gpu = -1; // source payloads on this GPU; records remain in host memory
 };
 struct SubscriptionOptions
 {
@@ -62,6 +63,7 @@ struct SubscriptionOptions
     int gpu = -1;
     bool allow_gpu_over_tcp = false;
     std::string label;
+    int pinned = -1; // pinned host receive for uploads on this GPU; exclusive with gpu
 };
 struct Health
 {
@@ -91,6 +93,7 @@ std::string ucx_stream(const Publisher &);
 std::string ucx_sessions(const Publisher &);
 // A GPU batch's one hold: when its last copy ends, the batch's event is recorded on the stream.
 std::shared_ptr<void> begin_gpu_view(const Batch &, GpuStream);
+const void *gpu_payload(const Batch &, std::size_t);
 } // namespace transport
 
 class Slot
@@ -104,14 +107,17 @@ class Slot
     ~Slot();
     std::span<std::byte> payload();
     std::span<std::byte> fields();
+    // Queue all writes on this stream before publishing or cancelling the slot.
+    void *gpu_payload(GpuStream);
+    std::size_t payload_bytes() const; // capacity of the source slot
     void publish(std::optional<std::uint64_t> timestamp_ns = {}) &&;
     // An opaque frame of 1 to max_payload_bytes bytes; a refused length leaves the slot held.
     void publish_bytes(std::size_t bytes, std::optional<std::uint64_t> timestamp_ns = {}) &&;
 
   private:
     friend class Publisher;
-    Slot(std::weak_ptr<transport::Pub>, std::uint32_t);
-    std::weak_ptr<transport::Pub> state_;
+    Slot(std::shared_ptr<transport::Pub>, std::uint32_t);
+    std::shared_ptr<transport::Pub> state_;
     std::uint32_t index_ = 0;
     bool active_ = false;
 };
@@ -158,15 +164,18 @@ class Batch
     std::size_t frames() const;
     std::uint64_t index(std::size_t frame) const;
     std::span<const std::byte> payload(std::size_t frame) const; // one frame's, in host memory
+    std::size_t payload_bytes(std::size_t frame) const;
     const void *payload() const; // the packed array; an opaque batch has none
     const void *records() const;
     bool gpu() const;
     Batch copy() const;
     GpuView gpu_view(GpuStream) &&; // one per batch; the view takes the batch
+    void release_after(GpuStream);  // pinned host: call after queueing the last upload read
 
   private:
     friend class Subscription;
     friend std::shared_ptr<void> transport::begin_gpu_view(const Batch &, GpuStream);
+    friend const void *transport::gpu_payload(const Batch &, std::size_t);
     Batch(std::shared_ptr<transport::Rings>, std::uint32_t);
     struct Copy;
     std::shared_ptr<transport::Rings> rings_;
@@ -181,7 +190,14 @@ class Batch
 class GpuView
 {
   public:
+    GpuView() = default;
+    GpuView(GpuView &&) noexcept = default;
+    GpuView &operator=(GpuView &&) noexcept;
+    GpuView(const GpuView &) = delete;
+    GpuView &operator=(const GpuView &) = delete;
     const void *payload() const;
+    const void *payload(std::size_t frame) const;
+    std::size_t payload_bytes(std::size_t frame) const;
     const void *records() const;
     std::size_t frames() const;
 

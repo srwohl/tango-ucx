@@ -67,11 +67,13 @@ struct Allocation
     void *base = nullptr;
     std::size_t bytes = 0;
     int gpu = -1;
+    bool pinned = false;
 };
 // What the transport needs of a GPU; tango-ucx-cuda implements it and registers itself.
 struct GpuRuntime
 {
     virtual Allocation allocate(int gpu, std::size_t bytes) = 0;
+    virtual Allocation allocate_pinned(int gpu, std::size_t bytes) = 0;
     virtual void release(Allocation) = 0;
     virtual GpuEvent make_event(int gpu) = 0;
     virtual void destroy_event(GpuEvent) = 0;
