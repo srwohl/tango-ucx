@@ -56,6 +56,12 @@ namespace
 std::string peer_transport()
 {
     auto tls = GENERATE(as<std::string>{}, "all", "tcp");
+    // UCX's CMA probe overwrites its iovec. The sanitizer's syscall interceptor then
+    // rereads that overwritten descriptor and reports memory the syscall never touched.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+    if(tls == "all")
+        tls = "^cma";
+#endif
     ::setenv("TANGO_UCX_UCX_TLS", tls.c_str(), 1);
     return tls;
 }

@@ -305,6 +305,12 @@ TEST_CASE("a puller killed with SIGKILL: the frames not yet sent to it go to the
           "left, which ends Failed with the count of those it held")
 {
     auto tls = GENERATE(as<std::string>{}, "all", "tcp");
+    // As in test_failure: the CMA reachability probe overwrites its own iovec, which
+    // the sanitizer's syscall interceptor incorrectly rereads after completion.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+    if(tls == "all")
+        tls = "^cma";
+#endif
     ::setenv("TANGO_UCX_UCX_TLS", tls.c_str(), 1);
     test::Forked child;
     if(child.pid == 0)
