@@ -13,7 +13,7 @@ from ._async import AsyncSubscription
 _MAJOR = 3
 _MARKER = re.compile(r"^tango-ucx/([0-9]+) (open|close)$")
 _BUDGET = re.compile(r"^\s*([0-9]+)\s*(B|KiB|MiB|GiB)\s*$", re.IGNORECASE)
-_MEMORY = re.compile(r"^cuda:(0|[1-9][0-9]*)$")
+_MEMORY = re.compile(r"^(cuda|pinned):(0|[1-9][0-9]*)$")
 _UNITS = {"b": 1, "kib": 1024, "mib": 1024**2, "gib": 1024**3}
 _SYNC = {"wait": True}
 
@@ -113,8 +113,8 @@ def _subscribe(
     if memory != "host":
         match = _MEMORY.fullmatch(memory) if isinstance(memory, str) else None
         if not match:
-            raise ValueError("memory must be 'host' or 'cuda:N', N being the GPU's number")
-        gpu["gpu"] = int(match.group(1))
+            raise ValueError("memory must be 'host', 'cuda:N' or 'pinned:N', N being the GPU's number")
+        gpu["gpu" if match.group(1) == "cuda" else "pinned"] = int(match.group(2))
     if not isinstance(label, str):
         raise ValueError("label must be a string")
 
@@ -275,6 +275,10 @@ class Batch:
     def gpu_view(self, stream=None):
         return GpuView(self._native.gpu_view(stream))
 
+    def release_after(self, stream=None):
+        """Pinned host receive: record completion after queueing the last upload read."""
+        self._native.release_after(stream)
+
 
 class GpuView:
     def __init__(self, native):
@@ -286,11 +290,36 @@ class GpuView:
     def __dlpack_device__(self):
         return self._native.device
 
+    def payload(self, frame):
+        """One frame's bytes, with DLPack and a pointer for external CUDA adapters."""
+        return _GpuPayload(self._native, frame)
+
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, traceback):
         self._native.close()
+
+
+class _GpuPayload:
+    def __init__(self, native, frame):
+        self._native = native
+        self._frame = frame
+        native.payload_bytes(frame)  # validate while the view is open
+
+    @property
+    def ptr(self):
+        return self._native.pointer(self._frame)
+
+    @property
+    def nbytes(self):
+        return self._native.payload_bytes(self._frame)
+
+    def __dlpack__(self, stream=None, max_version=None, dl_device=None, copy=None):
+        return self._native.dlpack(stream, max_version, dl_device, copy, self._frame)
+
+    def __dlpack_device__(self):
+        return self._native.device
 
 
 class Subscription(AsyncSubscription):

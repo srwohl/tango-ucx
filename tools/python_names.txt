@@ -38,6 +38,9 @@ frames
 gpu
 copy
 gpu_view
+release_after
+ptr
+nbytes
 __dlpack__
 __dlpack_device__
 last_index

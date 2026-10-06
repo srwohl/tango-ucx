@@ -8,6 +8,7 @@
 #include <dlpack/dlpack.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 #include <algorithm>
 #include <chrono>
@@ -216,8 +217,8 @@ py::object numpy_field_dtype(const py::module_ &numpy, const std::string &spelli
     return numpy.attr("dtype")(spelling);
 }
 
-void validate_dtype_alignment(py::handle dtype, std::uintptr_t record_address,
-                              std::uint64_t offset, std::uint64_t record_stride,
+void validate_dtype_alignment(py::handle dtype, std::uintptr_t record_address, std::uint64_t offset,
+                              std::uint64_t record_stride,
                               std::vector<std::uint64_t> &array_strides)
 {
     const auto alignment = dtype.attr("alignment").cast<std::uint64_t>();
@@ -415,6 +416,7 @@ class PythonBatch
     {
         return std::make_shared<PythonBatch>(batch_.copy(), description_);
     }
+    void release_after(py::handle stream);
 
   private:
     friend class PythonGpuView;
@@ -436,6 +438,10 @@ std::optional<GpuStream> gpu_stream(py::handle stream)
     if(value <= 0)
         throw py::buffer_error("stream must be None, -1, 1, 2 or a CUDA stream's pointer");
     return GpuStream{value == 1 ? nullptr : reinterpret_cast<void *>(value)};
+}
+void PythonBatch::release_after(py::handle stream)
+{
+    batch_.release_after(gpu_stream(stream).value_or(GpuStream{}));
 }
 
 // One DLPack export. The managed-tensor deleter destroys it: the hold ends before the batch.
@@ -465,9 +471,13 @@ class PythonGpuView
     }
 
     py::capsule dlpack(py::handle stream, py::handle max_version, py::handle dl_device,
-                       py::handle copy)
+                       py::handle copy, std::optional<std::size_t> frame)
     {
         const PythonBatch &batch = require_open();
+        if(frame)
+            (void)batch.batch_.payload_bytes(*frame);
+        else if(batch.description_.max_payload_bytes)
+            throw py::buffer_error("an opaque GPU batch exports each frame with payload(i)");
         // The unversioned capsule cannot say read-only, and the receive ring is.
         if(max_version.is_none() || max_version.cast<std::pair<int, int>>().first < 1)
             throw py::buffer_error("a GPU view exports DLPack 1.0: pass max_version=(1, 0)");
@@ -486,37 +496,61 @@ class PythonGpuView
         auto e = std::make_unique<Export>();
         e->batch = batch_;
         e->hold = hold_;
-        e->shape.push_back(checked_ssize(batch.frames()));
-        for(auto extent : batch.description_.shape)
-            e->shape.push_back(checked_ssize(extent));
+        if(frame)
+            e->shape.push_back(checked_ssize(batch.batch_.payload_bytes(*frame)));
+        else
+        {
+            e->shape.push_back(checked_ssize(batch.frames()));
+            for(auto extent : batch.description_.shape)
+                e->shape.push_back(checked_ssize(extent));
+        }
         e->strides.assign(e->shape.size(), 1); // in elements
         for(std::size_t i = e->shape.size() - 1; i > 0; --i)
             e->strides[i - 1] = e->strides[i] * e->shape[i];
-        const auto dtype = payload_dtype(batch.description_.element);
+        const auto dtype = payload_dtype(frame ? Element::U8 : batch.description_.element);
         const auto code = dtype.kind() == 'u' ? kDLUInt : dtype.kind() == 'i' ? kDLInt : kDLFloat;
         e->managed.version = {1, 0};
         e->managed.manager_ctx = e.get();
         e->managed.deleter = [](DLManagedTensorVersioned *m)
         { delete static_cast<Export *>(m->manager_ctx); };
         e->managed.flags = DLPACK_FLAG_BITMASK_READ_ONLY;
-        e->managed.dl_tensor = {const_cast<void *>(batch.batch_.payload()),
-                                {kDLCUDA, batch.gpu_},
-                                std::int32_t(e->shape.size()),
-                                {std::uint8_t(code), std::uint8_t(dtype.itemsize() * 8), 1},
-                                e->shape.data(),
-                                e->strides.data(),
-                                0};
+        e->managed.dl_tensor = {
+            const_cast<void *>(frame ? transport::gpu_payload(batch.batch_, *frame)
+                                     : batch.batch_.payload()),
+            {kDLCUDA, batch.gpu_},
+            std::int32_t(e->shape.size()),
+            {std::uint8_t(code), std::uint8_t(dtype.itemsize() * 8), 1},
+            e->shape.data(),
+            e->strides.data(),
+            0};
         // A consumer renames the capsule and owns the deleter; an abandoned capsule calls it here.
-        py::capsule capsule(&e->managed, "dltensor_versioned", [](PyObject *abandoned) {
-            if(PyCapsule_IsValid(abandoned, "dltensor_versioned"))
-            {
-                auto *m = static_cast<DLManagedTensorVersioned *>(
-                    PyCapsule_GetPointer(abandoned, "dltensor_versioned"));
-                m->deleter(m);
-            }
-        });
+        py::capsule capsule(&e->managed, "dltensor_versioned",
+                            [](PyObject *abandoned)
+                            {
+                                if(PyCapsule_IsValid(abandoned, "dltensor_versioned"))
+                                {
+                                    auto *m = static_cast<DLManagedTensorVersioned *>(
+                                        PyCapsule_GetPointer(abandoned, "dltensor_versioned"));
+                                    m->deleter(m);
+                                }
+                            });
         (void)e.release();
         return capsule;
+    }
+
+    std::uintptr_t pointer(std::size_t frame)
+    {
+        const auto &batch = require_open();
+        const void *ptr = transport::gpu_payload(batch.batch_, frame);
+        if(!stream_)
+            stream_ = GpuStream{};
+        if(!hold_)
+            hold_ = transport::begin_gpu_view(batch.batch_, *stream_);
+        return reinterpret_cast<std::uintptr_t>(ptr);
+    }
+    std::size_t payload_bytes(std::size_t frame) const
+    {
+        return require_open().batch_.payload_bytes(frame);
     }
 
     void close()
@@ -720,7 +754,7 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle ucx_stream_json, p
                                                    py::handle budget, py::handle batch,
                                                    py::handle max_wait_seconds, py::handle max_rate,
                                                    py::handle allow_gpu_over_tcp, py::handle label,
-                                                   int gpu, std::uint32_t range)
+                                                   int gpu, std::uint32_t range, int pinned)
 {
     const auto document = require_string(ucx_stream_json, "ucx_stream_json");
     const bool delivery_every = require_bool(every, "every");
@@ -732,7 +766,8 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle ucx_stream_json, p
     options.batch = static_cast<std::uint32_t>(batch_size);
 
     const double max_wait = require_seconds(max_wait_seconds, "max_wait_seconds");
-    const std::chrono::duration<double, std::micro> max_wait_us = std::chrono::duration<double>(max_wait);
+    const std::chrono::duration<double, std::micro> max_wait_us =
+        std::chrono::duration<double>(max_wait);
     if(max_wait_us.count() > std::numeric_limits<std::int64_t>::max())
         throw std::invalid_argument("max_wait_seconds is outside the supported range");
     options.max_wait = std::chrono::microseconds(static_cast<std::int64_t>(max_wait_us.count()));
@@ -744,6 +779,7 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle ucx_stream_json, p
     options.allow_gpu_over_tcp = require_bool(allow_gpu_over_tcp, "allow_gpu_over_tcp");
     options.label = require_string(label, "label");
     options.gpu = gpu;
+    options.pinned = pinned;
 
     auto offer = transport::parse_ucx_stream(document);
     std::optional<transport::PendingSubscription> pending;
@@ -772,15 +808,17 @@ PYBIND11_MODULE(_core, module)
             "payload", [](const std::shared_ptr<PythonBatch> &batch, std::size_t frame)
             { return batch->payload(batch, frame); }, py::arg("frame"))
         .def("copy", &PythonBatch::copy)
+        .def("release_after", &PythonBatch::release_after, py::arg("stream") = py::none())
         .def(
-            "gpu_view",
-            [](const std::shared_ptr<PythonBatch> &batch, py::handle stream)
+            "gpu_view", [](const std::shared_ptr<PythonBatch> &batch, py::handle stream)
             { return std::make_shared<PythonGpuView>(batch, stream); },
             py::arg("stream") = py::none());
 
     py::class_<PythonGpuView, std::shared_ptr<PythonGpuView>>(module, "GpuView")
         .def("dlpack", &PythonGpuView::dlpack, py::arg("stream"), py::arg("max_version"),
-             py::arg("dl_device"), py::arg("copy"))
+             py::arg("dl_device"), py::arg("copy"), py::arg("frame") = py::none())
+        .def("pointer", &PythonGpuView::pointer, py::arg("frame"))
+        .def("payload_bytes", &PythonGpuView::payload_bytes, py::arg("frame"))
         .def_property_readonly("device", &PythonGpuView::device)
         .def("close", &PythonGpuView::close);
 
@@ -801,5 +839,5 @@ PYBIND11_MODULE(_core, module)
     module.def("prepare", &prepare, py::arg("ucx_stream_json"), py::arg("every"), py::arg("budget"),
                py::arg("batch"), py::arg("max_wait_seconds"), py::arg("max_rate"),
                py::arg("allow_gpu_over_tcp"), py::arg("label"), py::arg("gpu") = -1,
-               py::arg("range") = 0); // a range makes it a puller
+               py::arg("range") = 0, py::arg("pinned") = -1); // a range makes it a puller
 }

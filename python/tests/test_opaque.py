@@ -70,10 +70,15 @@ def test_a_frame_over_the_maximum_is_refused_by_the_device_and_uses_no_frame_ind
         assert bytes(batch.payload(0)) == b"x"
 
 
-def test_a_gpu_subscription_to_an_opaque_stream_is_refused(server):
+def test_gpu_and_pinned_host_receive_are_exclusive_for_an_opaque_stream(server):
+    from tango_ucx import _core
+
     proxy, _ = _opaque(server[1], [("tag", "<u8")])
-    with pytest.raises(ValueError, match="GPU"):  # no runtime here, or no opaque GPU batches
-        tango_ucx.every(proxy, budget="16MiB", memory="cuda:0")
+    with pytest.raises(ValueError, match="choose GPU receive or pinned host receive"):
+        _core.prepare(
+            proxy.read_attribute("UcxStream").value,
+            True, 16 << 20, 1, 0.01, 0.0, False, "", gpu=0, pinned=0,
+        )
 
 
 # What DECTRIS detectors send (SIMPLON stream, and HDF5's bitshuffle filter): "bs32-lz4<" is

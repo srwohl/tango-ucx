@@ -113,8 +113,9 @@ class Core:
         self.calls = []
         self.pending = Pending(proxy)
 
-    def prepare(self, *args):
+    def prepare(self, *args, **kwargs):
         self.calls.append(args)
+        self.keywords = kwargs
         return self.pending
 
 
@@ -152,9 +153,9 @@ def test_budget_must_be_positive_and_use_supported_units(budget):
         tango_ucx.every("sys/test/1", budget=budget)
 
 
-@pytest.mark.parametrize("memory", ["cuda", "cuda:", "cuda:-1", "cuda:01", "gpu:0", 0, None])
+@pytest.mark.parametrize("memory", ["cuda", "cuda:", "cuda:-1", "cuda:01", "pinned", "pinned:-1", "pinned:01", "gpu:0", 0, None])
 def test_memory_must_be_host_or_a_numbered_cuda_gpu(memory):
-    with pytest.raises(ValueError, match="memory must be 'host' or 'cuda:N'"):
+    with pytest.raises(ValueError, match="memory must be 'host', 'cuda:N' or 'pinned:N'"):
         tango_ucx.every("sys/test/1", memory=memory)
 
 
@@ -196,6 +197,16 @@ def test_latest_discovers_marked_commands_and_keeps_the_passed_proxy(monkeypatch
     assert proxy.calls[-1][2] == "close document"
     assert proxy.calls[-1][3]["timeout"] == 3.0
     assert sub.fd == 9
+
+
+@pytest.mark.parametrize("factory", [tango_ucx.every, tango_ucx.latest, tango_ucx.pull])
+def test_pinned_host_memory_passes_its_gpu_number_to_preparation(monkeypatch, factory):
+    proxy, _, _, _ = install_tango(monkeypatch)
+    core = install_core(monkeypatch, proxy)
+    args = (proxy, 4) if factory is tango_ucx.pull else (proxy,)
+    sub = factory(*args, memory="pinned:2")
+    assert core.keywords == ({"range": 4, "pinned": 2} if factory is tango_ucx.pull else {"pinned": 2})
+    sub.close()
 
 
 def test_device_name_constructs_one_proxy_and_every_uses_default_latest_rate(monkeypatch):

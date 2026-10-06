@@ -4,6 +4,8 @@
 import gc
 import time
 
+import numpy as np
+
 import pytest
 
 import tango_ucx
@@ -124,3 +126,56 @@ def test_a_gpu_view_refuses_what_it_cannot_export(subscription):
         cupy.from_dlpack(view)
     del batch, view
     assert _held(subscription, 4)  # a view that exported nothing records no event
+
+
+def test_opaque_gpu_frames_export_bytes_and_a_pointer_for_external_adapters(server):
+    from test_opaque import _opaque, _publish
+
+    proxy, dtype = _opaque(server[1], [("tag", "<u8")])
+    frames = [np.arange(n, dtype=np.uint8) for n in (1, 129, 513)]
+    with tango_ucx.every(proxy, budget="16MiB", batch=3, max_wait=1, memory="cuda:0") as sub:
+        for i, frame in enumerate(frames):
+            _publish(proxy, np.array((i,), dtype=dtype), frame)
+        batch = sub.read(timeout=5)
+        assert batch.frames == 3
+        stream = cupy.cuda.Stream(non_blocking=True)
+        with stream, batch.gpu_view(stream=stream.ptr) as view:
+            with pytest.raises(BufferError, match="each frame"):
+                cupy.from_dlpack(view)
+            with pytest.raises(IndexError):
+                view.payload(3)
+            payload = view.payload(1)
+            assert payload.nbytes == 129 and payload.ptr > 0
+            tensor = cupy.from_dlpack(payload)
+            assert tensor.dtype == cupy.uint8 and tensor.shape == (129,)
+            assert tensor.data.ptr == payload.ptr
+            assert np.array_equal(cupy.asnumpy(tensor), frames[1])
+        copied = batch.copy()
+        assert np.array_equal(copied.payload(2), frames[2])
+        del batch, view
+        gc.collect()
+        assert sub.health()["slots_held"] == 3
+        del tensor, payload
+        assert _held(sub, 0)
+
+
+def test_pinned_host_receive_has_cuda_page_locking_and_upload_completion(server):
+    import tango
+
+    with tango_ucx.every(server[1], batch=4, memory="pinned:0", max_wait=1) as sub:
+        assert tango.DeviceProxy(server[1]).command_inout("Publish", 4) == 4
+        batch = sub.read(timeout=5)
+        assert not batch.gpu
+        source = batch.array
+        attrs = cupy.cuda.runtime.pointerGetAttributes(source.ctypes.data)
+        assert attrs.type == 1  # cudaMemoryTypeHost
+        stream = cupy.cuda.Stream(non_blocking=True)
+        output = cupy.empty(source.shape, dtype=source.dtype)
+        with stream:
+            cupy.cuda.runtime.memcpyAsync(output.data.ptr, source.ctypes.data, source.nbytes,
+                                         cupy.cuda.runtime.memcpyHostToDevice, stream.ptr)
+            batch.release_after(stream=stream.ptr)
+        del source, batch
+        stream.synchronize()
+        assert _held(sub, 0)
+        assert cupy.asnumpy(output[:, 0]).tolist() == [0, 1, 2, 3]
