@@ -8,6 +8,11 @@ detector's compressed frames unchanged and each with its own length, are Phase 4
 ([`NEXT.md`](NEXT.md)). Pull delivery shares one UCX stream among a set of pullers, a range
 of frames at a time.
 
+CUDA support also carries opaque frames into GPU memory, provides pinned host receive for
+asynchronous uploads, and publishes from GPU source slots.
+Runnable [GPU examples](../tango-ucx-gpu-examples/README.md) live in a separate application
+project, with TCP and RDMA profiles and a two-node Slurm launcher.
+
 Library and test source must remain under the line ceiling in `budget.toml`, which also
 records the estimates and per-file allowances.
 
@@ -31,6 +36,6 @@ pixi run check
 pixi run count
 ```
 
-Use `pixi run -e gpu configure` and `pixi run -e gpu test-gpu` for the CUDA
+Use `pixi run -e gpu test-gpu` for the CUDA
 environment. `tools/count.py` and `tools/check.py` run from the first commit,
 before implementation files are added.
