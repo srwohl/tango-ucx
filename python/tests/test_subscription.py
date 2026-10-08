@@ -255,6 +255,34 @@ def test_batches_expose_read_only_views_and_copy_to_independent_arrays(monkeypat
     assert np.shares_memory(copied.array, batch.array) is False
 
 
+def test_cached_records_preserve_and_isolate_nested_dtype_metadata():
+    from tango_ucx.subscription import Batch
+
+    nested = np.dtype([("tag", "u1"), (("value_title", "value"), "<u8")], align=True)
+    dtype = np.dtype([
+        ("index", "<u8"), (("angle_title", "angle"), ">f8"),
+        ("nested", nested), ("samples", ">u4", (2,)),
+    ], align=True)
+    records = np.zeros(2, dtype=dtype)
+    batch = Batch(NativeBatch(np.zeros((2, 1), dtype=np.uint8), records))
+    first = batch.records
+    assert first.dtype == dtype
+    assert first.dtype.isalignedstruct
+    assert first.dtype.fields["nested"][0].isalignedstruct
+    assert first.dtype.fields["nested"][0].fields["value"][1] == 8
+    assert first.dtype.fields["angle"][2] == "angle_title"
+    assert first.dtype.fields["angle"][0].byteorder == ">"
+    assert first.dtype.fields["samples"][0].subdtype[0].byteorder == ">"
+    first.dtype.fields["nested"][0].names = ("changed_tag", "changed_value")
+    first.dtype.names = ("changed_index", "changed_angle", "changed_nested", "changed_samples")
+    subsequent = batch.records
+    assert subsequent.dtype == dtype
+    assert subsequent.dtype.fields["nested"][0].fields["value"][2] == "value_title"
+    assert subsequent.strides == records.strides
+    assert np.shares_memory(subsequent, first)
+    assert not subsequent.flags.writeable
+
+
 def test_iteration_raises_failed_after_delivered_batches(monkeypatch):
     proxy, _, _, _ = install_tango(monkeypatch)
     core = install_core(monkeypatch, proxy)

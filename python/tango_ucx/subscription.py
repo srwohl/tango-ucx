@@ -245,6 +245,7 @@ def pull(
 class Batch:
     def __init__(self, native):
         self._native = native
+        self._records = None
 
     @property
     def array(self):
@@ -257,9 +258,12 @@ class Batch:
 
     @property
     def records(self):
-        records = self._native.records
-        records.setflags(write=False)
-        return records
+        """Read-only host records view, backed by cached storage for this batch."""
+        if self._records is None:
+            records = self._native.records
+            records.setflags(write=False)
+            self._records = records
+        return self._records.view(dtype=self._records.dtype.newbyteorder("|"))
 
     @property
     def frames(self):

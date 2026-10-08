@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
+import gc
 import struct
+import weakref
 
 import numpy as np
 import pytest
@@ -68,6 +70,82 @@ def test_a_frame_over_the_maximum_is_refused_by_the_device_and_uses_no_frame_ind
         batch = subscription.read(timeout=5)
         assert batch.records["index"].tolist() == [0]
         assert bytes(batch.payload(0)) == b"x"
+
+
+def test_cached_records_keep_their_storage_and_outlive_the_batch_and_subscription(server):
+    proxy, dtype = _opaque(server[1], [("tag", "<u8"), ("shape", "<u4", (2,))])
+    with tango_ucx.every(proxy, budget="16MiB", batch=2, max_wait=1.0) as subscription:
+        for tag in (100, 101):
+            _publish(proxy, np.array((tag, (2, 3)), dtype=dtype), b"x")
+        batch = subscription.read(timeout=5)
+        assert batch.frames == 2
+        records = batch.records
+        assert batch.records is not records
+        assert np.shares_memory(batch.records, records)
+        assert np.shares_memory(records, batch._native.records)
+        assert not records.flags.writeable
+        with pytest.raises(ValueError):
+            records.setflags(write=True)
+        copied = batch.copy()
+        copied_records = copied.records
+        assert np.shares_memory(copied.records, copied_records)
+        assert np.array_equal(copied_records, records)
+        assert not np.shares_memory(copied_records, records)
+        reference = weakref.ref(batch)
+        del batch, copied
+        gc.collect()
+        assert reference() is None
+        assert subscription.health()["slots_held"] == 2
+
+    del subscription
+    gc.collect()
+    assert records["tag"].tolist() == [100, 101]
+    assert records["shape"].tolist() == [[2, 3], [2, 3]]
+    assert np.array_equal(copied_records, records)
+    assert not copied_records.flags.writeable
+
+
+def test_cached_records_return_independent_array_descriptors(server):
+    proxy, dtype = _opaque(
+        server[1], [("tag", "<u8"), ("nested", [("value", "<u8")]),
+                    ("array", [("entry", ">u4")], (2,))]
+    )
+    with tango_ucx.every(proxy, budget="16MiB", batch=2, max_wait=1.0) as subscription:
+        for tag in (100, 101):
+            _publish(proxy, np.array((tag, (200,), [(3,), (4,)]), dtype=dtype), b"x")
+        batch = subscription.read(timeout=5)
+        original = batch.records
+        changed = batch.records
+        changed.shape = (1, 2)
+        changed.dtype = np.dtype("u1")
+        subsequent = batch.records
+        assert subsequent.shape == original.shape == (2,)
+        assert subsequent.dtype == original.dtype
+        assert subsequent["tag"].tolist() == [100, 101]
+        assert np.shares_memory(subsequent, changed)
+        assert not subsequent.flags.writeable
+        renamed = batch.records
+        renamed.dtype.fields["nested"][0].names = ("changed_value",)
+        renamed.dtype.fields["array"][0].subdtype[0].names = ("changed_entry",)
+        renamed.dtype.names = ("changed_index", "changed_timestamp", "changed_tag",
+                               "changed_nested", "changed_array")
+        subsequent = batch.records
+        assert subsequent.dtype == original.dtype
+        assert subsequent.dtype.fields["nested"][0].names == ("value",)
+        assert subsequent.dtype.fields["array"][0].subdtype[0].names == ("entry",)
+        assert subsequent.dtype.fields["array"][0].subdtype[0].fields["entry"][0].byteorder == ">"
+        assert subsequent["nested"]["value"].tolist() == [200, 200]
+        assert subsequent["array"]["entry"].tolist() == [[3, 4], [3, 4]]
+
+
+def test_cached_records_still_validate_alignment_on_first_access(server):
+    proxy, dtype = _opaque(server[1], [("tag", "u1"), ("value", "<u8")])
+    with tango_ucx.every(proxy, budget="16MiB", max_wait=0.01) as subscription:
+        _publish(proxy, np.array((1, 2), dtype=dtype), b"x")
+        batch = subscription.read(timeout=5)
+        for attempt in range(2):
+            with pytest.raises(ValueError, match="alignment is incompatible"):
+                batch.records
 
 
 def test_gpu_and_pinned_host_receive_are_exclusive_for_an_opaque_stream(server):
