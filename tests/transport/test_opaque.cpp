@@ -179,7 +179,8 @@ TEST_CASE("frames of every size sent at once arrive whole and in sequence, each 
     auto sub = test::subscribe(publisher, true, options(32ull << 20));
     ::unsetenv("TANGO_UCX_UCX_TLS");
     ::unsetenv("TANGO_UCX_UCX_MAX_EAGER_RAILS");
-    // One eager packet, eager fragments and rendezvous, in no order; the frame starts with its seed.
+    // One eager packet, eager fragments and rendezvous, in no order; the frame starts with
+    // its seed.
     auto bytes = [](std::uint64_t i)
     {
         const std::size_t most[] = {512, 512, 512, 16'000, 16'000, 200'000, 200'000, k_max};
@@ -430,7 +431,7 @@ TEST_CASE("an opaque batch is one run of bytes, cut where the packed ring wraps,
     for(std::size_t i = 0; i < 4; ++i)
         CHECK(test::is_opaque_frame(*copy, i, bytes(copy->index(i)), copy->index(i)));
     CHECK(copy->payload(3).data() == copy->payload(0).data() + bytes(copy->index(0)) +
-                                       bytes(copy->index(1)) + bytes(copy->index(2)));
+                                         bytes(copy->index(1)) + bytes(copy->index(2)));
 }
 
 TEST_CASE("a publisher that sends more bytes than were credited, a frame placed on another or "
@@ -469,11 +470,13 @@ TEST_CASE("a publisher that sends more bytes than were credited, a frame placed 
         std::uint64_t at;
         bool packed = true;
     };
-    for(const auto &[name, sent] : std::initializer_list<std::pair<const char *, std::vector<Sent>>>{
+    for(const auto &[name, sent] :
+        std::initializer_list<std::pair<const char *, std::vector<Sent>>>{
             {"no byte left for the frame before it", {{1, 100, 0}}},
             {"on the frame before it", {{0, 1000, 0}, {1, 100, 500}}},
             {"not directly after the frame before it", {{0, 1000, 0}, {1, 100, 1001}}},
-            {"no byte left before a later frame that arrived first", {{2, 100, 1000}, {0, 1000, 0}}},
+            {"no byte left before a later frame that arrived first",
+             {{2, 100, 1000}, {0, 1000, 0}}},
             {"on a later frame that arrived first", {{1, 100, 1000}, {0, 1001, 0}}},
             {"over the maximum", {{0, max + 1, 0}}},
             {"no bytes", {{0, 0, 0}}},

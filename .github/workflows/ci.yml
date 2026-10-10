@@ -14,4 +14,3 @@ jobs:
           pixi-version: v0.75.0
           cache: true
       - run: pixi run check
-      - run: pixi run count

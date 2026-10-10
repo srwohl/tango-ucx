@@ -3,7 +3,6 @@
 A bulk data plane for Tango devices. Tango carries discovery and control. UCX carries
 frames and reports a peer that dies, so the publisher can reclaim everything a dead
 subscriber held.
-This is the clean-slate vocabulary; it becomes the root `CONTEXT.md` of the new tree.
 
 ## Language
 

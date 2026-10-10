@@ -32,6 +32,7 @@ flowchart LR
             PUB["<b>Publisher</b><br/>loop thread, control table,<br/>session rows, grants<br/><code>publisher.cpp</code>"]
             SRC[("Source ring<br/>and records")]
             PLOW["<b>UCX worker and endpoints</b><br/><code>ucp.cpp, memory.cpp, wire.cpp</code>"]
+            PGPU["<b>GPU runtime</b>, optional<br/><code>src/cuda/runtime.cpp</code>"]
         end
     end
 
@@ -52,6 +53,7 @@ flowchart LR
     CMD -- "JSON documents" --> PUB
     PUB --- SRC
     PUB --- PLOW
+    PGPU --- PUB
     PLOW == "UCX: Ready, Frame, End" ==> SLOW
     SLOW == "UCX: Credit" ==> PLOW
     SLOW --- SUB
@@ -406,6 +408,10 @@ stateDiagram-v2
 Slots are routed in the order they were granted, so a slot posted early waits for the ones
 granted before it.
 
+A GPU source slot is written through `gpu_payload` on one GPU stream. Publishing or cancelling
+it records an event on that stream, and the slot is not routed until the event completes. An
+event that fails finishes the publisher and ends its sessions with End (protocol).
+
 ## 9. Receive slot states
 
 One slot of a subscription's receive ring. The sequence picks the slot.
@@ -427,13 +433,14 @@ stateDiagram-v2
     Landed --> InBatch: assembled and queued
     InBatch --> Released: last view gone
     InBatch --> Released: latest, replaced before it was read
-    InBatch --> EventWait: GPU view ended
+    InBatch --> EventWait: GPU view ended, or release_after
     EventWait --> Released: event completed
     Released --> Free: every earlier sequence released, so Credit covers it
 ```
 
-A GPU event that fails leaves its slots held: they are never credited, the subscription fails,
-and its receive ring goes to quarantine.
+`release_after` is for pinned host receive: the batch's slots wait for the uploads queued on
+the GPU stream. A GPU event that fails leaves its slots held: they are never credited, the
+subscription fails, and its receive ring goes to quarantine.
 
 ## 10. Public types
 
@@ -452,6 +459,8 @@ classDiagram
     }
     class Slot {
         payload() span~byte~
+        gpu_payload(GpuStream) pointer
+        payload_bytes() size_t
         fields() span~byte~
         publish(timestamp_ns)
         publish_bytes(bytes, timestamp_ns)
@@ -468,16 +477,23 @@ classDiagram
         frames() size_t
         index(frame) uint64
         payload(frame) span~byte~
+        payload_bytes(frame) size_t
         payload() pointer
         records() pointer
         gpu() bool
         copy() Batch
         gpu_view(GpuStream) GpuView
+        release_after(GpuStream)
     }
     class GpuView {
         payload() pointer
+        payload(frame) pointer
+        payload_bytes(frame) size_t
         records() pointer
         frames() size_t
+    }
+    class GpuStream {
+        pointer handle
     }
     class Description {
         Element element
@@ -492,6 +508,7 @@ classDiagram
         uint32 max_sessions
         bool allow_every
         milliseconds pressure_timeout
+        int gpu
     }
     class SubscriptionOptions {
         uint64 budget
@@ -501,6 +518,7 @@ classDiagram
         int gpu
         bool allow_gpu_over_tcp
         string label
+        int pinned
     }
     class Health {
         frames, skipped
@@ -539,6 +557,8 @@ classDiagram
     Subscription ..> Health
     Subscription --> Description : from UcxStream
     Batch ..> GpuView : gpu_view
+    Slot ..> GpuStream : gpu_payload
+    Batch ..> GpuStream : gpu_view, release_after
     tango_h ..> Publisher : attach
     tango_h ..> Subscription : every, latest, pull
     tango_h ..> SubscriptionOptions
@@ -568,6 +588,7 @@ classDiagram
         posted, cancel, held
         payload_bytes, timestamp
         sends
+        GPU stream, GPU event
     }
     class PubRow {
         session
@@ -617,13 +638,14 @@ classDiagram
     }
     class GpuRuntime {
         <<interface>>
-        allocate, release
+        allocate, allocate_pinned, release
+        make_event, destroy_event
         record, query
         copy_to_host
     }
 
     Publisher *-- Pub
-    Slot ..> Pub : weak
+    Slot o-- Pub : shared
     Pub *-- "slot_count" SourceSlot
     Pub *-- "max_sessions" PubRow : session rows
     Pub *-- PublisherOperations
@@ -631,6 +653,7 @@ classDiagram
     ControlTable *-- "8" ControlEntry
     Pub *-- Region : source ring
     Pub *-- Worker
+    Pub ..> GpuRuntime : GPU source ring
 
     Subscription *-- Sub
     Sub o-- Rings : shared
@@ -638,7 +661,7 @@ classDiagram
     Rings *-- "ring_depth" BatchRow
     Sub *-- Region : receive ring
     Sub *-- Worker
-    Rings ..> GpuRuntime : GPU ring
+    Rings ..> GpuRuntime : GPU or pinned ring
 
     Owner <|-- Pub
     Owner <|-- Sub

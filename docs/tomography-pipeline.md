@@ -58,7 +58,7 @@ In the order the pipeline's build order reaches them. None is needed for its fir
 | A puller's range that need not be a whole number of batches | A scan of 2,100 frames cannot be a range with a batch of 16. Whole scans to several reconstruction GPUs is a pull set | The pipeline picks a batch that divides the scan, or sets the batch to one |
 | A way to skip a whole range | A detector cannot be held. Every applies pressure; latest skips single frames, which leaves a scan with holes | The reconstruction device keeps an every subscription, reads everything and discards the scans it has no room for. That costs the transfer of every discarded frame and no change here |
 
-## What this branch already has for it
+## What the library already has for it
 
 - The loops wait when there is no work (`src/transport/idle.h`). The prototype's four devices
   each kept a core busy polling.
