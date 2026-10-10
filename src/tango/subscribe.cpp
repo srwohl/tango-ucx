@@ -35,7 +35,7 @@ Commands discover(Tango::DeviceProxy &proxy)
             other = major;
             continue;
         }
-        std::string *name = c.in_type_desc == wire::k_open_marker ? &found.open
+        std::string *name = c.in_type_desc == wire::k_open_marker    ? &found.open
                             : c.in_type_desc == wire::k_close_marker ? &found.close
                                                                      : nullptr;
         if(!name)

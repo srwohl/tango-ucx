@@ -55,4 +55,3 @@ _build-tsan = { cmd = "cmake --build build-tsan", depends-on = ["_configure-tsan
 # UCX's CMA reachability probe, so CMA is left out. Python is not run: it is not instrumented.
 test-tsan = { cmd = "ctest --test-dir build-tsan -L 'unit|ucx|tango' --output-on-failure", depends-on = ["_build-tsan"], env = { TSAN_OPTIONS = "die_after_fork=0 second_deadlock_stack=1", UCX_TLS = "^cma" } }
 check = "python tools/check.py"
-count = "python tools/count.py"

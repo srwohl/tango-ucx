@@ -6,13 +6,14 @@ from __future__ import annotations
 import ast
 import re
 import sys
-import tomllib
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
 CPP_SUFFIXES = {".h", ".hpp", ".cc", ".cpp", ".cxx", ".cu", ".cuh", ".inl"}
+PUBLIC_NAME_LIMIT = 87
+PYTHON_NAME_LIMIT = 36
 
 
 def words(value: str) -> list[str]:
@@ -233,20 +234,10 @@ def check_layering() -> list[str]:
 
 
 def main() -> int:
-    try:
-        with (ROOT / "budget.toml").open("rb") as budget_file:
-            budget = tomllib.load(budget_file)
-    except (OSError, tomllib.TOMLDecodeError) as error:
-        print(f"budget configuration error: {error}", file=sys.stderr)
-        return 2
-
-    limits = budget["project"]
     cpp = cpp_declared_names(public_header_text())
     python = python_declared_names(ROOT / "python/tango_ucx")
-    errors = check_names("C++", "tools/public_names.txt", cpp, limits["public_name_limit"])
-    errors += check_names(
-        "Python", "tools/python_names.txt", python, limits["python_name_limit"]
-    )
+    errors = check_names("C++", "tools/public_names.txt", cpp, PUBLIC_NAME_LIMIT)
+    errors += check_names("Python", "tools/python_names.txt", python, PYTHON_NAME_LIMIT)
     errors.extend(check_layering())
     if errors:
         for error in errors:
@@ -254,8 +245,8 @@ def main() -> int:
         return 1
 
     print(
-        f"architecture checks passed: {len(cpp)} C++ names (limit {limits['public_name_limit']}), "
-        f"{len(python)} Python names (limit {limits['python_name_limit']})"
+        f"architecture checks passed: {len(cpp)} C++ names (limit {PUBLIC_NAME_LIMIT}), "
+        f"{len(python)} Python names (limit {PYTHON_NAME_LIMIT})"
     )
     return 0
 
