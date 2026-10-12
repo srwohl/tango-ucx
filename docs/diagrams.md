@@ -26,7 +26,7 @@ flowchart LR
     subgraph DP["Device process"]
         DC["<b>Device code</b><br/>acquires a slot, fills it, publishes"]
         subgraph DTA["Tango adapter"]
-            CMD["<b>UCX commands</b> Open, Close<br/><b>Attributes</b> UcxStream, UcxSessions,<br/>UcxPublished, UcxSkipped,<br/>UcxPressure, UcxFailedEvery<br/><code>src/tango/device.cpp</code>"]
+            CMD["<b>UCX commands</b> Open, Close<br/><b>Attributes</b> UcxStream, UcxSessions, UcxTopology,<br/>UcxPublished, UcxSkipped,<br/>UcxPressure, UcxFailedEvery<br/><code>src/tango/device.cpp</code>"]
         end
         subgraph DTR["Transport"]
             PUB["<b>Publisher</b><br/>loop thread, control table,<br/>session rows, grants<br/><code>publisher.cpp</code>"]
