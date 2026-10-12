@@ -148,6 +148,9 @@ void install_ucx_attributes(std::vector<Tango::Attr *> &list)
         "The UCX stream: a tango-ucx-stream JSON document");
     add(list, new DocumentAttr("UcxSessions", transport::ucx_sessions),
         "The sessions, sampled with Health: a tango-ucx-sessions JSON document");
+    add(list, new DocumentAttr("UcxTopology", transport::ucx_topology),
+        "Publisher topology sampled on its progress thread: CPU, NUMA, ring and network devices "
+        "as JSON");
     add(list,
         new HealthAttr<U64>("UcxPublished", Tango::DEV_ULONG64,
                             [](const Health &h) { return U64(h.frames); }),

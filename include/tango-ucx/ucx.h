@@ -52,7 +52,9 @@ struct PublisherLimits
     std::uint32_t max_sessions = 8;
     bool allow_every = false;
     std::chrono::milliseconds pressure_timeout{0};
-    int gpu = -1; // source payloads on this GPU; records remain in host memory
+    int gpu = -1;          // source payloads on this GPU; records remain in host memory
+    int progress_cpu = -1; // -1 inherits affinity; otherwise reserve this physical core in-process
+    std::string net_devices; // UCX NET_DEVICES selector; empty inherits environment/defaults
 };
 struct SubscriptionOptions
 {
@@ -63,7 +65,21 @@ struct SubscriptionOptions
     int gpu = -1;
     bool allow_gpu_over_tcp = false;
     std::string label;
-    int pinned = -1; // pinned host receive for uploads on this GPU; exclusive with gpu
+    int pinned = -1;       // pinned host receive for uploads on this GPU; exclusive with gpu
+    int progress_cpu = -1; // -1 inherits affinity; otherwise reserve this physical core in-process
+    std::string net_devices; // UCX NET_DEVICES selector; empty inherits environment/defaults
+};
+struct NetworkDevice
+{
+    std::string name;
+    int numa_node = -1; // unknown when sysfs does not provide locality
+};
+struct Topology
+{
+    int cpu = -1, numa_node = -1;
+    int ring_numa_node = -1;                // sampled host pages: -1 unknown (also CUDA), -2 mixed
+    std::string allowed_cpus, sibling_cpus; // Linux CPU lists; siblings include cpu itself
+    std::vector<NetworkDevice> network_devices; // selected endpoint devices, deduplicated
 };
 struct Health
 {
@@ -76,6 +92,7 @@ struct Health
     bool memory_hooks = true;
     bool started = false; // a publisher's: ucx_start was called
     std::string transport, failure;
+    Topology topology; // sampled on the progress thread, at setup and once a second
 };
 
 class Publisher;

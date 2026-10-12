@@ -113,7 +113,7 @@ def _start_fixture_device():
 HEALTH_KEYS = {
     "frames", "skipped", "every", "latest", "failed_every", "pressure", "pressure_from",
     "slots_free", "slots_held", "last_index", "transfer_max_ns", "transfer_mean_ns",
-    "quarantined_bytes", "memory_hooks", "started", "transport", "failure",
+    "quarantined_bytes", "memory_hooks", "started", "transport", "failure", "topology",
 }
 
 

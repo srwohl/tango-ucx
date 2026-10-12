@@ -102,6 +102,8 @@ def _subscribe(
     memory,
     allow_gpu_over_tcp,
     label,
+    progress_cpu,
+    net_devices,
     range=0,
 ):
     budget = _budget_bytes(budget)
@@ -109,14 +111,26 @@ def _subscribe(
         raise ValueError("batch must be a positive integer")
     max_wait = _seconds(max_wait, "max_wait")
     max_rate = 0.0 if max_rate is None else _seconds(max_rate, "max_rate")
-    gpu = {"range": range} if range else {}
+    native_options = {"range": range} if range else {}
     if memory != "host":
         match = _MEMORY.fullmatch(memory) if isinstance(memory, str) else None
         if not match:
             raise ValueError("memory must be 'host', 'cuda:N' or 'pinned:N', N being the GPU's number")
-        gpu["gpu" if match.group(1) == "cuda" else "pinned"] = int(match.group(2))
+        native_options["gpu" if match.group(1) == "cuda" else "pinned"] = int(match.group(2))
     if not isinstance(label, str):
         raise ValueError("label must be a string")
+    if (
+        isinstance(progress_cpu, bool)
+        or not isinstance(progress_cpu, int)
+        or not -1 <= progress_cpu <= 2147483647
+    ):
+        raise ValueError("progress_cpu must be -1 or a non-negative CPU number in the supported range")
+    if progress_cpu != -1:
+        native_options["progress_cpu"] = progress_cpu
+    if not isinstance(net_devices, str) or "\0" in net_devices:
+        raise ValueError("net_devices must be a string without NUL")
+    if net_devices:
+        native_options["net_devices"] = net_devices
 
     tango = _tango()
     proxy = _device_proxy(device, tango)
@@ -136,7 +150,7 @@ def _subscribe(
         max_rate,
         allow_gpu_over_tcp,
         label,
-        **gpu,
+        **native_options,
     )
     open_reply = _command(proxy, open_name, pending.open_message(), tango)
 
@@ -176,6 +190,8 @@ def every(
     memory="host",
     allow_gpu_over_tcp=False,
     label="",
+    progress_cpu=-1,
+    net_devices="",
 ):
     return _subscribe(
         device,
@@ -187,6 +203,8 @@ def every(
         memory=memory,
         allow_gpu_over_tcp=allow_gpu_over_tcp,
         label=label,
+        progress_cpu=progress_cpu,
+        net_devices=net_devices,
     )
 
 
@@ -200,6 +218,8 @@ def latest(
     memory="host",
     allow_gpu_over_tcp=False,
     label="",
+    progress_cpu=-1,
+    net_devices="",
 ):
     return _subscribe(
         device,
@@ -211,6 +231,8 @@ def latest(
         memory=memory,
         allow_gpu_over_tcp=allow_gpu_over_tcp,
         label=label,
+        progress_cpu=progress_cpu,
+        net_devices=net_devices,
     )
 
 
@@ -224,6 +246,8 @@ def pull(
     memory="host",
     allow_gpu_over_tcp=False,
     label="",
+    progress_cpu=-1,
+    net_devices="",
 ):
     """A puller of the device's set, which takes `range` frames at each of its turns."""
     if isinstance(range, bool) or not isinstance(range, int) or range < 1:
@@ -238,6 +262,8 @@ def pull(
         memory=memory,
         allow_gpu_over_tcp=allow_gpu_over_tcp,
         label=label,
+        progress_cpu=progress_cpu,
+        net_devices=net_devices,
         range=range,
     )
 

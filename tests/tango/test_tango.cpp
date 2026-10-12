@@ -217,8 +217,8 @@ TEST_CASE("the UCX attributes describe the stream and its sessions")
     CHECK(offer.description.field_dtype == "<u8");
     CHECK(offer.limits.allow_every);
     CHECK(offer.limits.max_sessions == 2);
-    for(auto name :
-        {"UcxStream", "UcxSessions", "UcxPublished", "UcxSkipped", "UcxPressure", "UcxFailedEvery"})
+    for(auto name : {"UcxStream", "UcxSessions", "UcxTopology", "UcxPublished", "UcxSkipped",
+                     "UcxPressure", "UcxFailedEvery"})
         CHECK_FALSE(proxy.attribute_query(name).description.empty());
 
     auto sub = every(proxy, {.label = "archiver"});

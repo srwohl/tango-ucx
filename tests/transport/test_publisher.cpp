@@ -5,7 +5,9 @@
 
 #include <atomic>
 #include <ctime>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <thread>
 
 using namespace TangoUcx;
@@ -391,5 +393,23 @@ TEST_CASE("a publisher and a subscription with nothing to do take little CPU tim
     auto used = double(std::clock() - cpu) / CLOCKS_PER_SEC;
     INFO("CPU time " << used << " s in " << wall.count() << " s");
     CHECK(used < 0.5 * wall.count()); // two loops that only poll take two cores
+    sub.close(test::deadline());
+}
+
+// What a thread list and a profile show, and what tells a loop's CPU time from the device's.
+TEST_CASE("the publisher's loop and the subscription's loop are named")
+{
+    Publisher publisher(test::small_description(), test::small_limits(1));
+    auto sub = test::subscribe(publisher, true);
+    int publisher_loops = 0, subscription_loops = 0;
+    for(const auto &task : std::filesystem::directory_iterator("/proc/self/task"))
+    {
+        std::string name;
+        std::getline(std::ifstream(task.path() / "comm"), name);
+        publisher_loops += name == "tango-ucx-pub";
+        subscription_loops += name == "tango-ucx-sub";
+    }
+    CHECK(publisher_loops == 1);
+    CHECK(subscription_loops == 1);
     sub.close(test::deadline());
 }

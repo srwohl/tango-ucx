@@ -27,15 +27,16 @@ wire::Request close_request(std::uint64_t session)
 
 TEST_CASE("IndexRing keeps FIFO order across its wrap, and its fd is readable while it holds one")
 {
-    IndexRing ring;
+    IndexRing ring(IndexRing::Fd::Lazy);
     ring.reserve(3);
-    CHECK_FALSE(readable(ring.fd.fd()));
+    CHECK_FALSE(readable(ring.watch()));
     for(std::uint32_t i = 0; i < 4; ++i)
     {
         ring.push(i);
         ring.push(i + 10);
         CHECK(readable(ring.fd.fd()));
         CHECK(ring.try_pop() == int(i));
+        CHECK(readable(ring.fd.fd())); // removing one index leaves the ring's fd readable
         CHECK(ring.try_pop() == int(i + 10));
         CHECK_FALSE(readable(ring.fd.fd()));
         CHECK(ring.try_pop() == -1);
@@ -67,6 +68,145 @@ TEST_CASE("IndexRing waits without a deadline, leaving the lock to the thread th
             ring.push(7);
         });
     CHECK(ring.pop_until(Deadline::max(), [&] { return ++checks, false; }) == 7);
+}
+
+TEST_CASE("a grant ring needs no fd to wake an acquire or signal that it has finished")
+{
+    IndexRing ring(IndexRing::Fd::None);
+    ring.reserve(1);
+    CHECK(ring.fd.fd() == -1);
+    std::jthread producer(
+        [&]
+        {
+            std::this_thread::sleep_for(20ms);
+            ring.push(7);
+        });
+    CHECK(ring.pop_until(test::deadline(), [] { return false; }) == 7);
+    std::atomic<bool> finished{false};
+    std::jthread finisher(
+        [&]
+        {
+            std::this_thread::sleep_for(20ms);
+            finished = true;
+            ring.signal();
+        });
+    CHECK(ring.pop_until(test::deadline(), [&] { return finished.load(); }) == -1);
+}
+
+// A subscription's delivered batches: read sleeps on the queue, and only fd() makes it polled.
+TEST_CASE("a Lazy ring writes no fd until it is watched, and then is readable while it holds one")
+{
+    IndexRing ring(IndexRing::Fd::Lazy);
+    ring.reserve(2);
+    ring.push(1);
+    CHECK_FALSE(readable(ring.fd.fd()));
+    CHECK(ring.try_pop() == 1);
+    ring.push(2);
+    CHECK(readable(ring.watch())); // what was queued before the watch counts
+    ring.push(3);
+    CHECK(ring.try_pop() == 2);
+    CHECK(readable(ring.fd.fd()));
+    CHECK(ring.try_pop() == 3);
+    CHECK_FALSE(readable(ring.fd.fd()));
+    ring.signal();
+    CHECK(readable(ring.fd.fd())); // an outcome, for a caller that polls
+}
+
+TEST_CASE("a Lazy ring that was signalled before it is watched is readable from the watch")
+{
+    IndexRing ring(IndexRing::Fd::Lazy);
+    ring.reserve(1);
+    ring.signal();
+    CHECK(readable(ring.watch()));
+}
+
+// A loop's wait for what another thread does: a posted slot, a released batch.
+TEST_CASE("a Wake writes its fd only for a loop that has parked")
+{
+    Wake wake;
+    wake.notify();
+    CHECK_FALSE(readable(wake.fd()));
+    wake.park();
+    CHECK_FALSE(readable(wake.fd()));
+    wake.notify();
+    CHECK(readable(wake.fd()));
+    wake.unpark();
+    CHECK_FALSE(readable(wake.fd()));
+    wake.notify();
+    CHECK_FALSE(readable(wake.fd()));
+}
+
+// An acquire or a read that comes after the end must not take the wake of one that waits, and
+// nor must a clear: that one would sleep to its deadline. The window is short, so many rounds.
+TEST_CASE(
+    "a caller that comes after a signal, and a clear, leave the wake to the caller that waits")
+{
+    std::uint32_t delay = 1;
+    for(int round = 0; round < 4000; ++round)
+    {
+        IndexRing ring;
+        ring.reserve(2);
+        std::atomic<bool> ended{false}, woken{false};
+        auto done = [&] { return ended.load(); };
+        auto start = std::chrono::steady_clock::now();
+        std::jthread waiter(
+            [&]
+            {
+                (void)ring.pop_until(start + 2s, done);
+                woken = std::chrono::steady_clock::now() - start < 1s;
+            });
+        delay = delay * 1664525u + 1013904223u; // the waiter is at a different point each round
+        for(auto until = start + std::chrono::microseconds(delay >> 24);
+            std::chrono::steady_clock::now() < until;)
+        {
+        }
+        ended = true;
+        ring.signal();
+        if(round % 2)
+            ring.clear();
+        else
+            CHECK(ring.pop_until(start + 2s, done) == -1);
+        waiter.join();
+        REQUIRE(woken);
+    }
+}
+
+TEST_CASE("a signal wakes every caller that waits for an index, and a pop that does not wait "
+          "leaves the wake to them")
+{
+    IndexRing ring(IndexRing::Fd::None);
+    ring.reserve(2);
+    std::atomic<bool> ended{false};
+    std::atomic<int> returned{0};
+    {
+        std::jthread first(
+            [&]
+            { returned += ring.pop_until(test::deadline(), [&] { return ended.load(); }) == -1; });
+        std::jthread second(
+            [&]
+            { returned += ring.pop_until(test::deadline(), [&] { return ended.load(); }) == -1; });
+        std::this_thread::sleep_for(50ms); // both wait
+        ended = true;
+        ring.signal();
+        CHECK(ring.try_pop() == -1); // takes no index, and no wake either
+    }
+    CHECK(returned == 2);
+    // A caller that comes after the end is told without a signal of its own.
+    auto start = std::chrono::steady_clock::now();
+    CHECK(ring.pop_until(test::deadline(), [&] { return ended.load(); }) == -1);
+    CHECK(std::chrono::steady_clock::now() - start < 1s);
+}
+
+TEST_CASE("a deadline that has passed still gives an index that is queued, and never waits")
+{
+    IndexRing ring(IndexRing::Fd::None);
+    ring.reserve(1);
+    ring.push(5);
+    auto past = std::chrono::steady_clock::now() - 1s;
+    CHECK(ring.pop_until(past, [] { return false; }) == 5);
+    auto start = std::chrono::steady_clock::now();
+    CHECK(ring.pop_until(past, [] { return false; }) == -1);
+    CHECK(std::chrono::steady_clock::now() - start < 1s);
 }
 
 TEST_CASE("ControlTable returns the loop's reply to the caller that posted the request")
@@ -143,6 +283,15 @@ TEST_CASE("HealthCopy never makes the loop wait for a thread reading it")
     CHECK(copy.read() == 1);
     copy.write(3);
     CHECK(copy.read() == 3);
+}
+
+// Two RDMA rails. Health is where a run shows that it used both.
+TEST_CASE("a subscription keeps the lanes of two rails whole")
+{
+    constexpr std::string_view lanes = "rc_mlx5/mlx5_2:1,rc_mlx5/mlx5_3:1";
+    decltype(Sub::transport) kept;
+    kept.set(lanes);
+    CHECK(kept.view() == lanes);
 }
 
 TEST_CASE("Quarantine keeps every owner it is given and counts their bytes")

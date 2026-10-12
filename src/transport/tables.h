@@ -3,6 +3,7 @@
 #pragma once
 
 #include "memory.h"
+#include "moodycamel/blockingconcurrentqueue.h"
 #include "transport.h"
 #include "ucp.h"
 #include "wire.h"
@@ -11,7 +12,6 @@
 #include <array>
 #include <atomic>
 #include <bit>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <future>
@@ -28,13 +28,16 @@ namespace TangoUcx::transport
 {
 struct EventFd
 {
-    int value = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    int value;
     ~EventFd()
     {
         if(value >= 0)
             ::close(value);
     }
-    EventFd() = default;
+    explicit EventFd(bool enabled = true)
+        : value(enabled ? eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK) : -1)
+    {
+    }
     EventFd(const EventFd &) = delete;
     EventFd &operator=(const EventFd &) = delete;
     int fd() const noexcept
@@ -43,11 +46,15 @@ struct EventFd
     }
     void signal() noexcept
     {
+        if(value < 0)
+            return;
         std::uint64_t n = 1;
         (void)::write(value, &n, sizeof(n));
     }
     void clear() noexcept
     {
+        if(value < 0)
+            return;
         std::uint64_t n;
         while(::read(value, &n, sizeof(n)) > 0)
         {
@@ -55,84 +62,217 @@ struct EventFd
     }
 };
 
-// Near the clock's range limit (Deadline::max() is "no deadline"), glibc refuses the timeout and
-// libstdc++ reports it as not reached, so cv.wait_until spins holding the mutex. Wait untimed.
-template <class Ready>
-bool wait_until(std::condition_variable &cv, std::unique_lock<std::mutex> &l, Deadline d,
-                Ready ready)
+// Deadline::max() is "no deadline", and so is anything near the clock's range limit: wait untimed.
+inline bool no_deadline(Deadline d)
 {
-    if(d > Deadline::clock::now() + std::chrono::hours(24 * 365 * 100))
+    return d > Deadline::clock::now() + std::chrono::hours(24 * 365 * 100);
+}
+// The semaphore's and the queue's timed waits are on the wall clock: the C library this is built
+// with has no other. A wait that ends early, as when that clock is set forward, is taken up again
+// here and in IndexRing::pop_until, which ask the steady clock. A clock set back can still hold a
+// wait past its deadline.
+inline bool wait_until(moodycamel::LightweightSemaphore &semaphore, Deadline d)
+{
+    if(no_deadline(d))
+        return semaphore.wait();
+    for(;;)
     {
-        cv.wait(l, ready);
-        return true;
+        auto left =
+            std::chrono::duration_cast<std::chrono::microseconds>(d - Deadline::clock::now());
+        if(left.count() <= 0) // the semaphore takes a negative time as no deadline at all
+            return semaphore.tryWait();
+        if(semaphore.wait(left.count()))
+            return true;
     }
-    return cv.wait_until(l, d, ready);
 }
 
+// What ends a loop's wait when another thread has made work for it. The loop calls park, looks
+// once more for the work, waits on fd() and calls unpark; the other thread makes the work and
+// then calls notify. The loop stores parked and then loads the work; the other thread stores the
+// work and then loads parked. All four are sequentially consistent, so at least one of the two
+// sees the other's store, and no wake is lost. A notify makes no system call unless the loop has
+// parked.
+struct Wake
+{
+    void park()
+    {
+        parked.store(true);
+    }
+    void unpark()
+    {
+        parked.store(false);
+        event.clear();
+    }
+    void notify()
+    {
+        if(parked.load())
+            event.signal();
+    }
+    int fd() const noexcept
+    {
+        return event.fd();
+    }
+
+  private:
+    EventFd event;
+    std::atomic<bool> parked{false};
+};
+
+// The indices one thread hands another: slots granted, batches delivered, batches released. The
+// queue is lock-free, so a push and a pop never wait for each other, and a caller that waits for
+// an index sleeps on the queue's semaphore. An fd is written only for someone who polls it.
 struct IndexRing
 {
-    std::mutex m;
-    std::condition_variable cv;
-    std::vector<std::uint32_t> v;
-    std::uint32_t head = 0, size = 0;
-    EventFd fd;
+    // What the fd is for.
+    //   None   there is none: the consumer only ever waits in pop_until, or asks every turn.
+    //   Lazy   readable while the ring holds an index, from the first time watch asks for the
+    //          fd. Until then a push and a pop make no system call.
+    enum class Fd
+    {
+        None,
+        Lazy
+    };
+    explicit IndexRing(Fd mode = Fd::None) : fd(mode != Fd::None) {}
+    // The most indices the ring holds at once. The queue grows if it is given more. Its blocks
+    // are made here for two threads that push, the loop and one that signals, so that neither
+    // allocates as indices go round; a block the queue makes later is freed when it empties.
     void reserve(std::uint32_t n)
     {
-        v.assign(n, 0);
+        q = moodycamel::BlockingConcurrentQueue<std::uint32_t>(n, 0, 2);
     }
     void push(std::uint32_t x)
     {
-        std::lock_guard l(m);
-        v[(head + size++) % v.size()] = x;
-        fd.signal();
-        cv.notify_one();
-    }
-    void post(std::uint32_t x)
-    {
-        push(x);
-    }
-    int take_locked()
-    {
-        if(!size)
-            return -1;
-        auto x = v[head];
-        head = (head + 1) % v.size();
-        --size;
-        if(!size)
-            fd.clear();
-        return int(x);
+        if(level.load())
+        {
+            std::lock_guard l(m);
+            q.enqueue(x);
+            if(count.fetch_add(1) == 0)
+                fd.signal();
+        }
+        else
+        {
+            q.enqueue(x);
+            count.fetch_add(1);
+            // This thread adds to count and then loads level; watch stores level and then loads
+            // count. Both are sequentially consistent, so one of the two sees the other.
+            if(level.load())
+            {
+                std::lock_guard l(m);
+                if(count.load())
+                    fd.signal();
+            }
+        }
     }
     int try_pop()
     {
-        std::lock_guard l(m);
-        return take_locked();
+        if(count.load(std::memory_order_acquire) == 0)
+            return -1; // a loop asks every turn
+        std::uint32_t x;
+        std::uint32_t wakes = 0;
+        int taken_index = -1;
+        while(taken_index < 0 && q.try_dequeue(x))
+            if(x == k_woken)
+                ++wakes; // meant for a caller that waits in pop_until
+            else
+                taken_index = taken(x);
+        for(; wakes; --wakes)
+            q.enqueue(k_woken);
+        return taken_index;
     }
+    // An index, or -1 once `done` says so or the deadline has passed. `done` is asked before each
+    // wait and after each signal, and never while the caller sleeps.
     template <class Done> int pop_until(Deadline d, Done done)
     {
-        std::unique_lock l(m);
-        wait_until(cv, l, d, [&] { return size || done(); });
-        return take_locked();
+        for(;;)
+        {
+            // try_pop leaves a wake in the queue: it is for a caller that already waits, which
+            // would sleep on if this one took it.
+            if(int index = try_pop(); index >= 0)
+                return index;
+            // This thread adds to waiting and then asks done; signal is called after what done
+            // reads has changed, and then loads waiting. So one of the two sees the other.
+            waiting.fetch_add(1);
+            std::uint32_t x = k_woken;
+            bool ended = done(), got = false;
+            auto left = d - Deadline::clock::now();
+            if(!ended && no_deadline(d))
+            {
+                q.wait_dequeue(x);
+                got = true;
+            }
+            else if(!ended && left > left.zero()) // a negative time is no deadline to the queue
+                got = q.wait_dequeue_timed(x, left);
+            waiting.fetch_sub(1);
+            if(got && x != k_woken)
+                return taken(x);
+            // A timed wait may end early (wait_until, above): only the steady clock says so.
+            if(ended || (!got && Deadline::clock::now() >= d))
+                return -1;
+        }
     }
-    bool empty()
+    // Sequentially consistent, for a loop that asks after Wake::park.
+    bool empty() const
     {
-        std::lock_guard l(m);
-        return size == 0;
+        return count.load() == 0;
     }
     void clear()
     {
         std::lock_guard l(m);
-        head = size = 0;
-        fd.clear();
+        std::uint32_t wakes = 0;
+        for(std::uint32_t x; q.try_dequeue(x);)
+            wakes += x == k_woken;
+        count.store(0);
+        if(level.load())
+            fd.clear();
+        for(; wakes; --wakes)
+            q.enqueue(k_woken); // still owed to a caller that waits
     }
+    // Ends the wait of every caller in pop_until, so that each asks `done` again, and makes a
+    // polled fd readable.
     void signal()
     {
-        std::lock_guard l(m);
-        fd.signal();
-        cv.notify_all();
+        raised.store(true);
+        for(auto sleepers = waiting.load(); sleepers; --sleepers)
+            q.enqueue(k_woken);
+        if(level.load())
+        {
+            std::lock_guard l(m);
+            fd.signal();
+        }
     }
+    // The fd, for a caller that will poll it: from here on it is readable while the ring holds an
+    // index, and after a signal.
+    int watch()
+    {
+        std::lock_guard l(m);
+        if(!level.exchange(true) && (count.load() || raised.load()))
+            fd.signal();
+        return fd.fd();
+    }
+    EventFd fd;
+
+  private:
+    // Not an index: it ends a wait, so that the waiter asks why it was woken.
+    static constexpr std::uint32_t k_woken = ~std::uint32_t{0};
+    int taken(std::uint32_t x)
+    {
+        if(level.load())
+        {
+            std::lock_guard l(m);
+            if(count.fetch_sub(1) == 1)
+                fd.clear();
+        }
+        else
+            count.fetch_sub(1);
+        return int(x);
+    }
+    moodycamel::BlockingConcurrentQueue<std::uint32_t> q;
+    std::atomic<std::uint32_t> count{0}, waiting{0}; // indices queued; callers in pop_until
+    std::atomic<bool> level{false}, raised{false};
+    std::mutex m; // of a polled fd only: its writes and reads follow count in one order
 };
 
-// The loop writes a fixed copy and never waits on a thread reading it.
+// The loop tries to publish a copy and never waits on a thread reading it.
 template <class T> struct HealthCopy
 {
     mutable std::mutex m;
@@ -230,12 +370,13 @@ struct ControlEntry
     std::atomic<std::uint8_t> state{Free};
     wire::Request in;
     wire::Reply out;
+    // Signalled once for each reply that reaches Replied. A caller sleeps at once: the loop
+    // answers in its own time.
+    moodycamel::LightweightSemaphore replied{0, 0};
 };
 struct ControlTable
 {
     std::array<ControlEntry, 8> entries{};
-    std::mutex m;
-    std::condition_variable cv;
     ControlEntry *claim()
     {
         for(auto &e : entries)
@@ -253,11 +394,7 @@ struct ControlTable
             return {wire::Busy};
         e->in = request;
         e->state.store(ControlEntry::Posted, std::memory_order_release);
-        cv.notify_all();
-        std::unique_lock l(m);
-        if(!wait_until(
-               cv, l, d,
-               [&] { return e->state.load(std::memory_order_acquire) == ControlEntry::Replied; }))
+        if(!wait_until(e->replied, d))
         {
             // Not taken yet: nothing else will free the entry. Taken: the loop frees it.
             std::uint8_t expected = ControlEntry::Posted;
@@ -266,7 +403,7 @@ struct ControlTable
             expected = ControlEntry::Taken;
             if(e->state.compare_exchange_strong(expected, ControlEntry::Abandoned))
                 return {wire::Timeout};
-            cv.wait(l, [&] { return e->state.load() == ControlEntry::Replied; });
+            e->replied.wait(); // replied meanwhile: its signal must not reach the next caller
         }
         auto out = e->out;
         e->state.store(ControlEntry::Free, std::memory_order_release);
@@ -277,6 +414,10 @@ struct ControlTable
         bool any = false;
         for(auto &e : entries)
         {
+            // Control requests are rare beside frames. A failed compare-exchange still
+            // takes the cache line exclusively, so leave inactive entries as plain reads.
+            if(e.state.load(std::memory_order_acquire) != ControlEntry::Posted)
+                continue;
             std::uint8_t p = ControlEntry::Posted;
             if(e.state.compare_exchange_strong(p, ControlEntry::Taken))
             {
@@ -292,15 +433,11 @@ struct ControlTable
         e.out = r;
         std::uint8_t t = ControlEntry::Taken;
         bool delivered = e.state.compare_exchange_strong(t, ControlEntry::Replied);
-        if(!delivered)
+        if(delivered)
+            e.replied.signal();
+        else
             e.state.store(ControlEntry::Free);
-        std::lock_guard l(m); // a caller between its check and its wait must not miss this
-        cv.notify_all();
         return delivered;
-    }
-    void wake()
-    {
-        cv.notify_all();
     }
 };
 
@@ -329,7 +466,8 @@ struct Rings
     std::vector<std::byte> records;
     std::vector<std::uint64_t> placements; // an opaque stream's frames: position, length
     std::vector<BatchRow> batches;
-    IndexRing released;
+    IndexRing released; // the loop asks every turn, and parks on wake to wait
+    Wake wake;
     std::vector<std::uint64_t> busy, landed, returned, event_wait;
     void bit_set(std::vector<std::uint64_t> &, std::uint32_t);
     void bit_clear(std::vector<std::uint64_t> &, std::uint32_t);
@@ -338,6 +476,12 @@ struct Rings
     std::byte *record(std::uint32_t k)
     {
         return records.data() + std::uint64_t(k) * plan.sizes.record_stride;
+    }
+    // A batch's owner gives it back, on whatever thread it is: the loop frees its frames.
+    void release(std::uint32_t batch)
+    {
+        released.push(batch);
+        wake.notify();
     }
     // Frame k is not directly after frame k - 1: it starts at the front of a packed ring.
     bool wraps(std::uint32_t k) const
@@ -365,7 +509,7 @@ struct Sub final : Owner
     std::array<std::byte, 4096> own_address{};
     std::uint16_t own_address_bytes = 0;
     std::array<std::byte, 24> credit_header{};
-    IndexRing queue;
+    IndexRing queue{IndexRing::Fd::Lazy}; // read sleeps on the queue; fd() makes it polled
     std::atomic<bool> stop{false}, close{false};
     bool ready = false, failed = false, quarantined = false, fenced = false, gap = false;
     wire::EndMessage end{};
@@ -377,11 +521,14 @@ struct Sub final : Owner
     std::uint32_t receiving = 0, quiet_turns = 0;
     std::int64_t first_landed_ns = 0, last_landed_ns = 0, end_at_ns = 0;
     std::array<char, 256> failure{};
-    std::array<char, 32> transport{};
-    std::uint8_t transport_bytes = 0;
+    Text<64> transport; // every lane, as a publisher's row keeps them: two RDMA rails take 35
     std::atomic<int> outcome{0};
     mutable std::mutex health_mutex;
     Health observation;
+    std::int64_t last_health_ns = 0;
+    int last_health_outcome = 0;
+    Topology topology;
+    std::int64_t last_topology_ns = 0;
     std::promise<void> setup_done;
     std::promise<std::string> started;
     std::promise<wire::Reply> reply_promise;
@@ -412,7 +559,7 @@ struct Sub final : Owner
     void decide(std::int64_t);
     void release_pass();
     void credit_pass();
-    void publish_health();
+    void publish_health(std::int64_t);
     void finish_close();
     void quarantine_owner();
     void release_batch(std::uint32_t);

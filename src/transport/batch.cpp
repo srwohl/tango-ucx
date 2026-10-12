@@ -44,7 +44,7 @@ Batch &Batch::operator=(Batch &&o) noexcept
     if(this != &o)
     {
         if(rings_ && first_ != ~std::uint32_t{0})
-            rings_->released.post(first_);
+            rings_->release(first_);
         rings_ = std::move(o.rings_);
         copy_ = std::move(o.copy_);
         first_ = std::exchange(o.first_, ~std::uint32_t{0});
@@ -62,7 +62,7 @@ Batch &Batch::operator=(Batch &&o) noexcept
 Batch::~Batch()
 {
     if(rings_ && first_ != ~std::uint32_t{0})
-        rings_->released.post(first_);
+        rings_->release(first_);
 }
 std::size_t Batch::frames() const
 {

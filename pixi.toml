@@ -54,4 +54,8 @@ _build-tsan = { cmd = "cmake --build build-tsan", depends-on = ["_configure-tsan
 # The fork tests start threads in the child, and TSan's process_vm_readv interceptor faults in
 # UCX's CMA reachability probe, so CMA is left out. Python is not run: it is not instrumented.
 test-tsan = { cmd = "ctest --test-dir build-tsan -L 'unit|ucx|tango' --output-on-failure", depends-on = ["_build-tsan"], env = { TSAN_OPTIONS = "die_after_fork=0 second_deadlock_stack=1", UCX_TLS = "^cma" } }
+# An optimized build with frame pointers and symbols, so perf can attribute time to each loop. The
+# build type is given here: configure leaves it to CMAKE_ARGS, which not every environment sets.
+_configure-profile = { cmd = "cmake $CMAKE_ARGS -GNinja -S . -B build-profile -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTANGO_UCX_PROFILING=ON" }
+build-profile = { cmd = "cmake --build build-profile", depends-on = ["_configure-profile"] }
 check = "python tools/check.py"

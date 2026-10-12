@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 #include "idle.h"
 #include "tables.h"
+#include "topology.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <format>
+#include <pthread.h>
 #include <stdexcept>
 
 namespace TangoUcx::transport
@@ -196,7 +198,7 @@ void Sub::start_loop()
 }
 void Sub::setup()
 {
-    context = std::make_unique<ucp::Context>();
+    context = std::make_unique<ucp::Context>(options.net_devices);
     worker = std::make_unique<ucp::Worker>(*context);
     req = context->request_bytes();
     plan = plan_subscription(offer, every, options, req);
@@ -253,11 +255,15 @@ void Sub::setup()
     worker->set_am(wire::Frame, on_frame, this);
     worker->set_am(wire::Ready, on_ready, this);
     worker->set_am(wire::End, on_end, this);
+    publish_health(now_ns());
 }
 void Sub::run()
 {
+    pthread_setname_np(pthread_self(), "tango-ucx-sub"); // as the publisher's loop is named
+    ProgressCore core;
     try
     {
+        core.pin(options.progress_cpu);
         setup();
         setup_done.set_value();
     }
@@ -306,9 +312,12 @@ void Sub::run()
             }
             if(ready && !failed) // Ready may arrive before start, and an endpoint still fail
             {
+                transport.n = std::uint8_t(worker->transports(ep, transport.c));
+                topology.network_devices = endpoint_network_devices(ep);
+                last_topology_ns = 0;
+                publish_health(now);
                 started.set_value("");
                 started_sent = true;
-                transport_bytes = std::uint8_t(worker->transports(ep, transport));
                 work = true;
             }
             else if(failed || std::chrono::steady_clock::now() >= start_by)
@@ -326,7 +335,7 @@ void Sub::run()
             work |= assemble(now);
             credit_pass();
             decide(now);
-            publish_health();
+            publish_health(now);
         }
         quiet_turns = work ? 0 : quiet_turns + 1;
         if(idle.due(work, now) && begun) // the reply to Open has no fd: poll until the start
@@ -339,8 +348,11 @@ void Sub::run()
             if(first_landed_ns)
                 wait_ns =
                     std::min(wait_ns, std::int64_t(plan.max_wait_ns) - (now - first_landed_ns));
-            if(Idle::wait(*worker, rings->released.fd.fd(), wait_ns))
+            // A batch released from here on ends the wait; one released before is seen now.
+            rings->wake.park();
+            if(rings->released.empty() && Idle::wait(*worker, rings->wake.fd(), wait_ns))
                 quiet_turns += 64; // a wait is as quiet as many turns of a loop that only polls
+            rings->wake.unpark();
         }
     }
     finish_close();
@@ -633,15 +645,31 @@ void Sub::credit_pass()
         send_credit(c);
     }
 }
-void Sub::publish_health()
+void Sub::publish_health(std::int64_t now)
 {
+    auto current_outcome = outcome.load(std::memory_order_relaxed);
+    // Health is a sampled observation, as on the publisher. Keep setup, Ready and outcome
+    // changes immediate, without locking and counting ring bits on every progress turn.
+    if(last_topology_ns && last_health_ns && now - last_health_ns < k_wait_ns &&
+       current_outcome == last_health_outcome)
+        return;
+    last_health_ns = now;
+    last_health_outcome = current_outcome;
+    bool sample = !last_topology_ns || now - last_topology_ns >= 1'000'000'000LL;
+    if(sample)
+    {
+        last_topology_ns = now;
+        sample_topology(topology, plan.gpu ? nullptr : receive.base(), receive.bytes());
+    }
     std::lock_guard l(health_mutex);
     observation.frames = frames;
     observation.skipped = skipped;
     observation.last_index = last_index == UINT64_MAX ? 0 : last_index;
-    observation.slots_free = plan.ring_depth - rings->bit_count(rings->busy);
     observation.slots_held = rings->bit_count(rings->busy);
+    observation.slots_free = plan.ring_depth - observation.slots_held;
     observation.memory_hooks = context->memory_hooks();
+    if(sample)
+        observation.topology = topology;
 }
 void Sub::cancel_receives()
 {
@@ -897,7 +925,7 @@ std::optional<Outcome> Subscription::outcome() const
 }
 int Subscription::fd() const
 {
-    return s_ ? s_->queue.fd.fd() : -1;
+    return s_ ? s_->queue.watch() : -1;
 }
 const Description &Subscription::description() const
 {
@@ -939,7 +967,7 @@ Health Subscription::health() const
     std::lock_guard l(s_->health_mutex);
     auto h = s_->observation;
     h.failure = s_->failure.data();
-    h.transport.assign(s_->transport.data(), s_->transport_bytes);
+    h.transport = s_->transport.view();
     h.quarantined_bytes = transport::quarantine().total.load();
     return h;
 }

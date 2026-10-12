@@ -155,6 +155,22 @@ py::dict health_dict(const Health &health)
     result["started"] = health.started;
     result["transport"] = health.transport;
     result["failure"] = health.failure;
+    py::dict topology;
+    topology["cpu"] = health.topology.cpu;
+    topology["numa_node"] = health.topology.numa_node;
+    topology["ring_numa_node"] = health.topology.ring_numa_node;
+    topology["allowed_cpus"] = health.topology.allowed_cpus;
+    topology["sibling_cpus"] = health.topology.sibling_cpus;
+    py::list devices;
+    for(const auto &device : health.topology.network_devices)
+    {
+        py::dict entry;
+        entry["name"] = device.name;
+        entry["numa_node"] = device.numa_node;
+        devices.append(std::move(entry));
+    }
+    topology["network_devices"] = std::move(devices);
+    result["topology"] = std::move(topology);
     return result;
 }
 
@@ -754,7 +770,8 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle ucx_stream_json, p
                                                    py::handle budget, py::handle batch,
                                                    py::handle max_wait_seconds, py::handle max_rate,
                                                    py::handle allow_gpu_over_tcp, py::handle label,
-                                                   int gpu, std::uint32_t range, int pinned)
+                                                   int gpu, std::uint32_t range, int pinned,
+                                                   int progress_cpu, py::handle net_devices)
 {
     const auto document = require_string(ucx_stream_json, "ucx_stream_json");
     const bool delivery_every = require_bool(every, "every");
@@ -780,6 +797,8 @@ std::shared_ptr<PythonPendingSubscription> prepare(py::handle ucx_stream_json, p
     options.label = require_string(label, "label");
     options.gpu = gpu;
     options.pinned = pinned;
+    options.progress_cpu = progress_cpu;
+    options.net_devices = require_string(net_devices, "net_devices");
 
     auto offer = transport::parse_ucx_stream(document);
     std::optional<transport::PendingSubscription> pending;
@@ -839,5 +858,6 @@ PYBIND11_MODULE(_core, module)
     module.def("prepare", &prepare, py::arg("ucx_stream_json"), py::arg("every"), py::arg("budget"),
                py::arg("batch"), py::arg("max_wait_seconds"), py::arg("max_rate"),
                py::arg("allow_gpu_over_tcp"), py::arg("label"), py::arg("gpu") = -1,
-               py::arg("range") = 0, py::arg("pinned") = -1); // a range makes it a puller
+               py::arg("range") = 0, py::arg("pinned") = -1, py::arg("progress_cpu") = -1,
+               py::arg("net_devices") = ""); // a range makes it a puller
 }

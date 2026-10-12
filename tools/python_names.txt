@@ -18,6 +18,8 @@ max_rate
 memory
 allow_gpu_over_tcp
 label
+progress_cpu
+net_devices
 
 # Subscription, and the callbacks helper it returns
 read

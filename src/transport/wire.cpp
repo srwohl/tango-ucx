@@ -236,6 +236,18 @@ std::string format(const SessionsMessage &m)
                  {"missing", m.missing},
                  {"sessions", std::move(sessions)}});
 }
+std::string format(const Topology &topology)
+{
+    auto devices = json::array();
+    for(const auto &device : topology.network_devices)
+        devices.push_back(json{{"name", device.name}, {"numa_node", device.numa_node}});
+    return dump({{"cpu", topology.cpu},
+                 {"numa_node", topology.numa_node},
+                 {"ring_numa_node", topology.ring_numa_node},
+                 {"allowed_cpus", topology.allowed_cpus},
+                 {"sibling_cpus", topology.sibling_cpus},
+                 {"network_devices", std::move(devices)}});
+}
 Status parse(std::string_view doc, StreamMessage &m)
 {
     auto j = parse_json(doc);

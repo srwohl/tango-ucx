@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 
 add_library(tango-ucx-transport STATIC
-    wire.cpp memory.cpp ucp.cpp publisher.cpp subscription.cpp batch.cpp)
+    wire.cpp memory.cpp ucp.cpp topology.cpp publisher.cpp subscription.cpp batch.cpp)
 # UCX's package has no target for libucm. A named one keeps this build's path to it out of
 # the exported targets; the package's config finds it again.
 find_library(UCX_UCM_LIBRARY NAMES ucm HINTS "${ucx_DIR}/../.." REQUIRED)

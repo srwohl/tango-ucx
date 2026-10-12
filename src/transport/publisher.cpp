@@ -3,12 +3,14 @@
 #include "idle.h"
 #include "publisher_operations.h"
 #include "tables.h"
+#include "topology.h"
 
 #include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstring>
 #include <format>
+#include <pthread.h>
 #include <stdexcept>
 #include <utility>
 
@@ -38,6 +40,7 @@ struct PubRow
     std::int64_t min_interval_ns = 0, last_send_ns = 0, blocked_since_ns = 0;
     std::int64_t transfer_max_ns = 0, transfer_sum_ns = 0;
     Text<64> label, transport;
+    std::vector<NetworkDevice> network_devices;
     bool used = false, ready = false, every = false, closing = false, end_due = false,
          end_sent = false, gpu = false, pull = false;
     bool flush_started = false, flush_done = false, close_started = false, close_done = false;
@@ -88,14 +91,15 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::uint64_t slots_granted = 0, slots_routed = 0, next_frame_index = 0, skipped = 0;
     std::int64_t last_timer_ns = 0;
     std::uint32_t scan = 0, failed_every = 0, blocked = 0, ordinals = 0;
-    IndexRing grants;
+    IndexRing grants{IndexRing::Fd::None}; // acquire sleeps on the queue; nobody polls a grant fd
     ControlTable control;
     HealthCopy<Observation> health_copy;
+    Topology topology;
+    HealthCopy<Topology> topology_copy;
+    std::int64_t last_topology_ns = 0;
     std::jthread loop;
     std::atomic<bool> started{false}, finishing{false}, stopping{false};
-    // The loop is in its wait, or is about to be: a slot posted now signals wake to end it.
-    std::atomic<bool> parked{false};
-    EventFd wake;
+    Wake wake; // a posted slot ends the loop's wait
     bool ended = false, quarantined = false, setup_ok = false;
     bool source_failed = false;
     std::promise<void> setup_done;
@@ -236,7 +240,6 @@ Pub::~Pub()
 void Pub::stop()
 {
     stopping = true;
-    control.wake();
     if(loop.joinable())
         loop.join();
 }
@@ -252,7 +255,7 @@ void Pub::start()
 }
 void Pub::setup()
 {
-    context = std::make_unique<ucp::Context>();
+    context = std::make_unique<ucp::Context>(limits.net_devices);
     worker = std::make_unique<ucp::Worker>(*context);
     auto request_bytes = context->request_bytes();
     plan = plan_publisher(description, limits, request_bytes, worker->max_am_header());
@@ -280,12 +283,17 @@ void Pub::setup()
         rows[row_index].row = std::uint8_t(row_index);
     }
     worker->set_am(wire::Credit, on_credit, this);
+    publish_health(); // placement is available even before the first session opens
     setup_ok = true;
 }
 void Pub::run()
 {
+    // What a thread list and a profile show: it tells the loop's CPU time from the device's.
+    pthread_setname_np(pthread_self(), "tango-ucx-pub");
+    ProgressCore core;
     try
     {
+        core.pin(limits.progress_cpu);
         setup();
         setup_done.set_value();
     }
@@ -317,16 +325,15 @@ void Pub::run()
         }
         if(idle.due(work, now))
         {
-            // From here on a posted slot signals wake (post). The next slot to route may have
+            // From here on a posted slot ends the wait (post). The next slot to route may have
             // been posted before that, or be waiting for its GPU event, which has no fd and is
             // short: then the loop polls on. The wait is no longer than the timer's turn.
-            parked.store(true);
+            wake.park();
             bool next_posted = slots_routed < slots_granted &&
                                slots[order[slots_routed % plan.slot_count]].posted.load();
             if(!next_posted)
                 Idle::wait(*worker, wake.fd(), k_timer_ns);
-            parked.store(false);
-            wake.clear();
+            wake.unpark();
         }
     }
     shutdown();
@@ -455,14 +462,12 @@ void Pub::cancel_slot(std::uint32_t slot_index)
         post(slot);
     }
 }
-// Hands a slot to the loop, and ends the loop's wait. This thread stores posted and then loads
-// parked; the loop stores parked and then loads posted. All four are sequentially consistent, so
-// at least one of the two threads sees the other's store, and no wake is lost.
+// Hands a slot to the loop, and ends the loop's wait. The store is sequentially consistent, as
+// Wake asks.
 void Pub::post(SourceSlot &slot)
 {
     slot.posted.store(true);
-    if(parked.load())
-        wake.signal();
+    wake.notify();
 }
 
 void Pub::send_control(std::uint32_t row_index, OpKind kind, std::uint8_t message_id,
@@ -708,6 +713,8 @@ bool Pub::control_pass()
             // The subscriber set up its ring and handlers before it sent Open, so it is ready now.
             row.ready = true;
             row.transport.n = std::uint8_t(worker->transports(row.ep, row.transport.c));
+            row.network_devices = endpoint_network_devices(row.ep);
+            last_topology_ns = 0;
             ready_mask |= std::uint64_t{1} << row_index;
             if(open_message.every)
                 every_mask |= std::uint64_t{1} << row_index;
@@ -732,9 +739,9 @@ bool Pub::control_pass()
 // that every subscriptions and pullers reserved for them is released.
 void Pub::unissue_grants()
 {
-    std::lock_guard lock(grants.m);
-    auto queued = grants.size;
-    for(int slot_index; (slot_index = grants.take_locked()) >= 0;)
+    // The grants the device has not taken. It may take one meanwhile: that one stays granted.
+    std::uint32_t queued = 0;
+    for(int slot_index; (slot_index = grants.try_pop()) >= 0; ++queued)
         slots[slot_index].held = false;
     // The grants in the ring are the newest, so they would have had the last frame indices.
     auto newest = next_frame_index + slots_granted - slots_routed - 1;
@@ -991,6 +998,20 @@ void Pub::timer_pass(std::int64_t now)
 }
 void Pub::publish_health()
 {
+    auto now = now_ns();
+    if(!last_topology_ns || now - last_topology_ns >= 1'000'000'000LL)
+    {
+        last_topology_ns = now;
+        sample_topology(topology, limits.gpu >= 0 ? nullptr : source.base(), source.bytes());
+        topology.network_devices.clear();
+        for(const auto &row : rows)
+            if(row.used)
+                for(const auto &device : row.network_devices)
+                    if(!std::ranges::any_of(topology.network_devices, [&](const auto &known)
+                                            { return known.name == device.name; }))
+                        topology.network_devices.push_back(device);
+        topology_copy.write(topology);
+    }
     Observation observation;
     observation.frames = next_frame_index;
     observation.skipped = skipped;
@@ -1202,7 +1223,8 @@ Health Publisher::health() const
                   .slots_held = observation.slots_held,
                   .quarantined_bytes = transport::quarantine().total.load(),
                   .memory_hooks = observation.memory_hooks,
-                  .started = p_->started.load(std::memory_order_acquire)};
+                  .started = p_->started.load(std::memory_order_acquire),
+                  .topology = p_->topology_copy.read()};
     if(observation.source_failed)
         result.failure = "a GPU source event failed; its memory cannot be reused";
     for(const auto &row : std::span(observation.rows).first(observation.count))
@@ -1260,5 +1282,9 @@ std::string ucx_sessions(const Publisher &publisher)
              row.room, row.sent, row.skipped, std::uint64_t(row.transfer_max_ns) / 1000,
              std::string(row.transport.view()), row.pull, row.passes});
     return wire::format(sessions_message);
+}
+std::string ucx_topology(const Publisher &publisher)
+{
+    return wire::format(publisher.health().topology);
 }
 } // namespace TangoUcx::transport

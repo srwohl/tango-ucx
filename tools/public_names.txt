@@ -18,6 +18,8 @@ PublisherLimits::max_sessions
 PublisherLimits::allow_every
 PublisherLimits::pressure_timeout
 PublisherLimits::gpu
+PublisherLimits::progress_cpu
+PublisherLimits::net_devices
 Publisher
 Publisher::ucx_start
 Publisher::acquire
@@ -45,6 +47,8 @@ SubscriptionOptions::max_wait
 SubscriptionOptions::max_rate
 SubscriptionOptions::gpu
 SubscriptionOptions::pinned
+SubscriptionOptions::progress_cpu
+SubscriptionOptions::net_devices
 SubscriptionOptions::allow_gpu_over_tcp
 SubscriptionOptions::label
 Subscription
@@ -94,3 +98,14 @@ Health::memory_hooks
 Health::started
 Health::transport
 Health::failure
+Health::topology
+Topology
+Topology::cpu
+Topology::numa_node
+Topology::ring_numa_node
+Topology::allowed_cpus
+Topology::sibling_cpus
+Topology::network_devices
+NetworkDevice
+NetworkDevice::name
+NetworkDevice::numa_node

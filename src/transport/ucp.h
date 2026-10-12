@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 
 namespace TangoUcx::transport::ucp
 {
@@ -16,7 +17,7 @@ bool idle_waits();
 class Context
 {
   public:
-    Context();
+    explicit Context(const std::string &net_devices = {});
     ~Context();
     Context(const Context &) = delete;
     Context &operator=(const Context &) = delete;

@@ -25,6 +25,8 @@ std::string handle(Publisher &, std::string_view document);
 std::string ucx_stream(const Publisher &);
 // The UcxSessions document: the sessions of the last Health sample.
 std::string ucx_sessions(const Publisher &);
+// The UcxTopology document: the publisher's last progress-thread topology sample.
+std::string ucx_topology(const Publisher &);
 // "tango-ucx/3 open" -> 3; -1 when the description is not a UCX command marker.
 int marker_major(std::string_view type_description);
 // Throws when the document is malformed or of another major version.

@@ -118,6 +118,7 @@ std::string format(const CloseMessage &);
 std::string format(const Reply &);
 std::string format(const StreamMessage &);
 std::string format(const SessionsMessage &);
+std::string format(const Topology &);
 Status parse(std::string_view, Request &);
 bool parse(std::string_view, Reply &);
 Status parse(std::string_view, StreamMessage &);

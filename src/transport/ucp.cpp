@@ -30,14 +30,25 @@ bool idle_waits()
     }();
     return waits;
 }
-Context::Context()
+Context::Context(const std::string &net_devices)
 {
+    if(net_devices.find('\0') != std::string::npos)
+        throw std::invalid_argument("net_devices must not contain NUL");
     unsigned major = 0, minor = 0, release = 0;
     ucp_get_version(&major, &minor, &release);
     if(major < 1 || (major == 1 && minor < 21))
         throw std::runtime_error("UCX 1.21 or newer is required");
     ucp_config_t *cfg = nullptr;
     check(ucp_config_read("TANGO_UCX", nullptr, &cfg), "ucp_config_read");
+    if(!net_devices.empty())
+    {
+        auto st = ucp_config_modify(cfg, "NET_DEVICES", net_devices.c_str());
+        if(st != UCS_OK)
+        {
+            ucp_config_release(cfg);
+            check(st, "ucp_config_modify(NET_DEVICES)");
+        }
+    }
     auto st = ucp_config_modify(cfg, "MM_ERROR_HANDLING", "y");
     if(st != UCS_OK)
     {

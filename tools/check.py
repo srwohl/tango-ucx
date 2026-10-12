@@ -12,8 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
 CPP_SUFFIXES = {".h", ".hpp", ".cc", ".cpp", ".cxx", ".cu", ".cuh", ".inl"}
-PUBLIC_NAME_LIMIT = 87
-PYTHON_NAME_LIMIT = 36
+PUBLIC_NAME_LIMIT = 102
+PYTHON_NAME_LIMIT = 38
 
 
 def words(value: str) -> list[str]:

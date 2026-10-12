@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <poll.h>
 #include <thread>
 #include <time.h>
@@ -23,6 +25,13 @@ inline constexpr std::int64_t k_spin_ns = 200'000;
 struct Idle
 {
     const bool waits = ucp::idle_waits();
+    // wait skips the polling window between bursts. Work already available is still drained
+    // before arming the worker, and spin continues to bypass event waits entirely.
+    const std::int64_t spin_ns = []
+    {
+        const auto *mode = std::getenv("TANGO_UCX_IDLE");
+        return mode && std::strcmp(mode, "wait") == 0 ? std::int64_t{0} : k_spin_ns;
+    }();
     std::int64_t last_work_ns = 0;
     unsigned turns = 0;
     // Counts a pass, and yields after 64 that found no work. True when the loop has polled for
@@ -40,7 +49,7 @@ struct Idle
             turns = 0;
             std::this_thread::yield();
         }
-        return waits && now - last_work_ns >= k_spin_ns;
+        return waits && now - last_work_ns >= spin_ns;
     }
     // Waits for an event of the worker, for fd or for the timeout. It follows a progress() that
     // returned 0, and a whole pass follows it. False, without waiting, while the worker still has
