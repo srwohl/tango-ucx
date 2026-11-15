@@ -257,8 +257,10 @@ TEST_CASE("after finish, a full every row that is still draining is not evicted,
     auto depth = test::first_row(publisher, "depth");
     for(auto n = depth; n; --n)
         test::publish_one(publisher); // the row is full
+    REQUIRE(test::eventually([&] { return publisher.health().pressure; }));
     publisher.finish();
     std::this_thread::sleep_for(std::chrono::seconds(1)); // past the pressure timeout
+    CHECK_FALSE(publisher.health().pressure); // the device waits for no grant after finish
     for(std::uint64_t i = 0; i < depth; ++i)
     {
         auto batch = sub.read(test::deadline());

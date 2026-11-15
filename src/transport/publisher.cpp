@@ -857,7 +857,9 @@ void Pub::publish_health()
     observation.missing = pull.missing;
     observation.failed_every = failed_every;
     observation.source_failed = source_failed;
-    observation.pressure_from = grants.empty() && blocked ? rows[blocked - 1].ordinal : 0;
+    // After finish() the device waits for no grant, so nobody holds pressure (timer_pass).
+    bool waiting = !finishing.load(std::memory_order_relaxed) && grants.empty() && blocked;
+    observation.pressure_from = waiting ? rows[blocked - 1].ordinal : 0;
     for(const auto &slot : std::span(slots.get(), plan.slot_count))
     {
         observation.slots_free += !slot.held && slot.sends == 0;
