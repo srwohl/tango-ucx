@@ -55,8 +55,8 @@ It also holds the application text.
 _Avoid_: geometry, layout, schema, array terms
 
 **Instance ID**:
-The `instance_id` field identifies one publisher's life, from construction to finish,
-with one description.
+The `instance_id` field identifies one publisher instance, from `begin` to finish, with one
+description.
 Each new publisher instance gets a new instance ID and restarts the frame index.
 _Avoid_: epoch, generation, acquisition
 
@@ -74,8 +74,21 @@ _Avoid_: chunk size
 
 **Publisher**:
 The part of a device that owns the UCX stream's source memory, grants sessions and
-publishes frames.
-_Avoid_: producer, server
+publishes frames. It lives as long as the device and keeps its UCX resources and its arena
+across publisher instances.
+_Avoid_: producer, server, engine
+
+**Publisher instance**:
+One run of a publisher with one description, started by `begin`: its own instance ID,
+frame index from 0, sessions, slots and End. A publisher has at most one active instance;
+earlier ones may still be draining, closing their sessions once nothing of theirs is sent.
+_Avoid_: incarnation, acquisition, epoch
+
+**Arena**:
+The publisher's registered source memory, faulted in when it is made and kept across
+instances. Each instance's source ring is a region of it. It is replaced only when a ring
+needs more, or when an instance is quarantined.
+_Avoid_: pool, cache, registration cache
 
 **Start**:
 The point at which a publisher begins to grant slots, set by the device with `ucx_start`.
