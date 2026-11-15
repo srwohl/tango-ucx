@@ -315,7 +315,7 @@ TEST_CASE("refused Opens get every-refused, instance_id, no-session and finished
         wire::parse(transport::handle(publisher, wire::format(m)), reply);
         return reply.status;
     };
-    CHECK(status([](auto &m) { m.every = true; }) == wire::EveryRefused);
+    CHECK(status([](auto &m) { m.delivery = wire::Delivery::Every; }) == wire::EveryRefused);
     CHECK(status([](auto &m) { ++m.instance_id; }) == wire::InstanceId);
     CHECK(status([](auto &) {}) == wire::Ok);
     CHECK(status([](auto &m) { ++m.session; }) == wire::NoSession);

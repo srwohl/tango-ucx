@@ -26,7 +26,7 @@ wire::OpenMessage golden_open()
     m.instance_id = 12648430;
     m.depth = 256;
     m.batch = 16;
-    m.every = true;
+    m.delivery = wire::Delivery::Every;
     m.label_bytes = 8;
     std::memcpy(m.label.data(), "archiver", 8);
     m.address_bytes = 3;
@@ -263,14 +263,15 @@ TEST_CASE("an opaque stream's UcxStream has a maximum and no shape, and its Open
 TEST_CASE("a puller's Open states its range, and its delivery is pull")
 {
     auto open = golden_open();
-    open.every = false;
+    open.delivery = wire::Delivery::Pull;
     open.range = 64;
     auto text = wire::format(open);
     CHECK(text.find(R"("delivery":"pull")") != text.npos);
     CHECK(text.ends_with(R"("address":"0a3fff","range":64})"));
     wire::Request r;
     REQUIRE(wire::parse(text, r) == wire::Ok);
-    CHECK((r.open->range == 64 && !r.open->every && wire::format(*r.open) == text));
+    CHECK((r.open->range == 64 && r.open->delivery == wire::Delivery::Pull &&
+           wire::format(*r.open) == text));
     for(auto bad : {R"("range":0)", R"("range":"64")", R"("range":4294967296)"})
         CHECK(status_of(replace(text, R"("range":64)", bad)) == wire::Malformed);
     CHECK(status_of(without(text, "range")) == wire::Malformed);

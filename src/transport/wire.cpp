@@ -146,7 +146,9 @@ Status parse_open(const json &j, OpenMessage &m)
     m.depth = std::uint32_t(depth);
     m.batch = std::uint32_t(batch);
     m.range = std::uint32_t(range);
-    m.every = delivery == "every";
+    m.delivery = delivery == "every"  ? Delivery::Every
+                 : delivery == "pull" ? Delivery::Pull
+                                      : Delivery::Latest;
     m.label_bytes = std::uint8_t(label.size());
     std::memcpy(m.label.data(), label.data(), label.size());
     return Ok;
@@ -165,15 +167,15 @@ std::string format(const OpenMessage &m)
               {"depth", m.depth},
               {"batch", m.batch},
               {"min_interval_ns", m.min_interval_ns},
-              {"delivery", m.range   ? "pull"
-                           : m.every ? "every"
-                                     : "latest"},
+              {"delivery", m.delivery == Delivery::Pull    ? "pull"
+                           : m.delivery == Delivery::Every ? "every"
+                                                           : "latest"},
               {"gpu", m.gpu},
               {"label", std::string(m.label.data(), m.label_bytes)},
               {"address", hex({m.address.data(), m.address_bytes})}};
     if(m.ring_bytes)
         j["ring_bytes"] = m.ring_bytes;
-    if(m.range)
+    if(m.delivery == Delivery::Pull)
         j["range"] = m.range;
     return dump(j);
 }

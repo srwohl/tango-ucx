@@ -86,7 +86,7 @@ struct RawPeer
         m.depth = depth;
         m.ring_bytes = ring_bytes;
         m.batch = 1;
-        m.every = every;
+        m.delivery = every ? wire::Delivery::Every : wire::Delivery::Latest;
         m.address_bytes = std::uint16_t(worker.address().size());
         std::ranges::copy(worker.address(), m.address.begin());
         wire::Reply r;

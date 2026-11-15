@@ -62,13 +62,21 @@ enum Reason : std::uint8_t
     Closing
 };
 
+// Which frames a session receives; sent by name.
+enum class Delivery : std::uint8_t
+{
+    Latest,
+    Every,
+    Pull
+};
 // Control plane: JSON documents carried by the UCX commands.
 struct OpenMessage
 {
     std::uint64_t session = 0, instance_id = 0;
     std::uint32_t depth = 0, batch = 0, range = 0;     // range: a puller's, the frames of a range
     std::uint64_t min_interval_ns = 0, ring_bytes = 0; // ring_bytes: an opaque stream's packed ring
-    bool every = false, gpu = false;
+    Delivery delivery = Delivery::Latest;
+    bool gpu = false;
     std::array<char, k_max_label> label{};
     std::uint8_t label_bytes = 0;
     std::array<std::byte, k_max_address> address{};

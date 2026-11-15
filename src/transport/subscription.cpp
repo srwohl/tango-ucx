@@ -842,7 +842,9 @@ std::string PendingSubscription::open_message() const
     m.instance_id = s.offer.instance_id;
     m.depth = s.plan.ring_depth;
     m.batch = s.plan.batch_size;
-    m.every = s.every && !s.range;
+    m.delivery = s.range   ? wire::Delivery::Pull
+                 : s.every ? wire::Delivery::Every
+                           : wire::Delivery::Latest;
     m.range = s.range;
     if(s.options.max_rate > 0)
         m.min_interval_ns = std::uint64_t(std::min(1e9 / s.options.max_rate, 9.2e18));

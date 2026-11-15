@@ -517,8 +517,8 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
 wire::Status Pub::check_open(const wire::OpenMessage &open_message) const
 {
     // An every subscription or a puller can make the device wait.
-    bool holds_device = open_message.every || open_message.range;
-    bool is_puller = open_message.range != 0;
+    bool holds_device = open_message.delivery != wire::Delivery::Latest;
+    bool is_puller = open_message.delivery == wire::Delivery::Pull;
     if(open_message.instance_id != instance_id)
         return wire::InstanceId;
     if(finishing.load())
@@ -572,8 +572,8 @@ void Pub::open(ControlEntry &entry)
     row.row = std::uint8_t(row_index);
     row.ordinal = ++ordinals;
     row.used = true;
-    row.every = open_message.every;
-    row.pull = open_message.range != 0;
+    row.every = open_message.delivery == wire::Delivery::Every;
+    row.pull = open_message.delivery == wire::Delivery::Pull;
     row.ring_depth = open_message.depth;
     row.ring_bytes = plan.sizes.opaque ? open_message.ring_bytes : 0;
     row.gpu = open_message.gpu;
@@ -602,12 +602,18 @@ void Pub::open(ControlEntry &entry)
     row.network_devices = endpoint_network_devices(row.ep);
     last_topology_ns = 0;
     ready_mask |= std::uint64_t{1} << row_index;
-    if(open_message.every)
-        every.add(row_index);
-    else if(open_message.range)
-        pull.add(row_index, open_message.range);
-    else
-        latest.add(row_index);
+    switch(open_message.delivery)
+    {
+        case wire::Delivery::Every:
+            every.add(row_index);
+            break;
+        case wire::Delivery::Pull:
+            pull.add(row_index, open_message.range);
+            break;
+        case wire::Delivery::Latest:
+            latest.add(row_index);
+            break;
+    }
     auto encoded = wire::encode(wire::SessionMessage{row.session});
     send_control(row_index, OpKind::Ready, wire::Ready, encoded);
     wire::Reply reply{wire::Ok};
