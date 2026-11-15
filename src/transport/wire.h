@@ -13,8 +13,11 @@
 
 namespace TangoUcx::wire
 {
-inline constexpr std::uint8_t k_major = 3;
-inline constexpr std::uint8_t k_minor = 2; // 3.1: opaque streams; 3.2: pull, application text
+// 0.1 is a pre-release, to be continued until 1.0: until then any change may break the wire, so
+// a document is accepted only at exactly this version. From 1.0, a minor only adds keys and any
+// minor of the same major is accepted.
+inline constexpr std::uint8_t k_major = 0;
+inline constexpr std::uint8_t k_minor = 1;
 inline constexpr std::size_t k_max_document = 16 * 1024;
 // An application text of this many bytes fits a document even when every byte is escaped.
 inline constexpr std::size_t k_max_text = 2048;
@@ -22,8 +25,8 @@ inline constexpr std::size_t k_max_address = 4096;
 inline constexpr std::size_t k_max_label = 64;
 inline constexpr std::size_t k_max_detail = 128;
 // The UCX commands' type descriptions; a client finds the commands by them.
-inline constexpr const char *k_open_marker = "tango-ucx/3 open";
-inline constexpr const char *k_close_marker = "tango-ucx/3 close";
+inline constexpr const char *k_open_marker = "tango-ucx/0 open";
+inline constexpr const char *k_close_marker = "tango-ucx/0 close";
 // Data-plane messages; the value is the UCX active-message id.
 enum Type : std::uint8_t
 {

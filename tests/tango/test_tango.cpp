@@ -228,7 +228,7 @@ TEST_CASE("the UCX attributes describe the stream and its sessions")
         proxy, [&](auto d)
         { return (doc = d)["sessions"].size() == 1 && doc["sessions"][0]["sent"] == 3; }, in()));
     INFO(doc.dump());
-    CHECK(doc["interface"] == "tango-ucx-sessions/3.2");
+    CHECK(doc["interface"] == "tango-ucx-sessions/0.1");
     CHECK(doc["instance_id"] == offer.instance_id);
     auto row = doc["sessions"][0];
     CHECK((row["ordinal"] == 1 && row["label"] == "archiver" && row["delivery"] == "every" &&

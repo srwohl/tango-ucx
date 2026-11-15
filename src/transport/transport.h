@@ -27,7 +27,7 @@ std::string ucx_stream(const Publisher &);
 std::string ucx_sessions(const Publisher &);
 // The UcxTopology document: the publisher's last progress-thread topology sample.
 std::string ucx_topology(const Publisher &);
-// "tango-ucx/3 open" -> 3; -1 when the description is not a UCX command marker.
+// "tango-ucx/0 open" -> 0; -1 when the description is not a UCX command marker.
 int marker_major(std::string_view type_description);
 // Throws when the document is malformed or of another major version.
 Offer parse_ucx_stream(std::string_view document);

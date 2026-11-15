@@ -26,7 +26,7 @@ def release_native_core_module():
 def ucx_stream():
     return json.dumps(
         {
-            "interface": "tango-ucx-stream/3.0",
+            "interface": "tango-ucx-stream/0.1",
             "instance_id": 12648430,
             "element": "u16",
             "shape": [4, 8],
@@ -51,7 +51,7 @@ def test_prepare_builds_an_open_message_from_ucx_stream_and_options(ucx_stream):
     )
 
     message = json.loads(pending.open_message())
-    assert message["interface"] == "tango-ucx-open/3.2"
+    assert message["interface"] == "tango-ucx-open/0.1"
     assert message["instance_id"] == 12648430
     assert message["delivery"] == "latest"
     assert message["batch"] == 4
@@ -77,13 +77,13 @@ def test_start_calls_the_python_closer_after_an_accepted_open_cannot_reach_ready
         calls.append((json.loads(document), remaining_seconds))
         return True
 
-    reply = '{"interface":"tango-ucx-reply/3.0","status":"ok"}'
+    reply = '{"interface":"tango-ucx-reply/0.1","status":"ok"}'
     with pytest.raises(RuntimeError, match="endpoint"):
         pending.start(reply, closer, 0.5)
 
     assert len(calls) == 1
     assert calls[0][0] == {
-        "interface": "tango-ucx-close/3.2",
+        "interface": "tango-ucx-close/0.1",
         "session": session,
     }
     assert calls[0][1] > 0

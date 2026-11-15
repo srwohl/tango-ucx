@@ -39,7 +39,8 @@ bool number(std::string_view s, unsigned &v)
     auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
     return ec == std::errc{} && end == s.data() + s.size() && !s.empty();
 }
-// Any minor of our major is accepted: a minor only adds keys.
+// Any minor of our major is accepted from 1.0, when a minor only adds keys. Before 1.0 only
+// exactly our version is.
 Status check_interface(const json &j, std::string_view &name)
 {
     if(!j.is_object())
@@ -55,7 +56,7 @@ Status check_interface(const json &j, std::string_view &name)
        !number(v.substr(dot + 1), minor))
         return Malformed;
     name = v.substr(0, slash);
-    return major == k_major ? Ok : Version;
+    return major == k_major && (k_major > 0 || minor == k_minor) ? Ok : Version;
 }
 bool unsigned_key(const json &j, const char *key, std::uint64_t max, std::uint64_t &v)
 {

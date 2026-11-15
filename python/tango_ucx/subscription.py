@@ -10,7 +10,7 @@ from . import Failed
 from ._async import AsyncSubscription
 
 
-_MAJOR = 3
+_MAJOR = 0  # wire::k_major in src/transport/wire.h
 _MARKER = re.compile(r"^tango-ucx/([0-9]+) (open|close)$")
 _BUDGET = re.compile(r"^\s*([0-9]+)\s*(B|KiB|MiB|GiB)\s*$", re.IGNORECASE)
 _MEMORY = re.compile(r"^(cuda|pinned):(0|[1-9][0-9]*)$")
