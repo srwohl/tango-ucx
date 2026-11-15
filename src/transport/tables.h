@@ -377,6 +377,7 @@ struct ControlEntry
 struct ControlTable
 {
     std::array<ControlEntry, 8> entries{};
+    Wake *wake = nullptr; // the loop's, which a posted request ends the wait of
     ControlEntry *claim()
     {
         for(auto &e : entries)
@@ -393,7 +394,9 @@ struct ControlTable
         if(!e)
             return {wire::Busy};
         e->in = request;
-        e->state.store(ControlEntry::Posted, std::memory_order_release);
+        e->state.store(ControlEntry::Posted); // sequentially consistent, as Wake asks
+        if(wake)
+            wake->notify();
         if(!wait_until(e->replied, d))
         {
             // Not taken yet: nothing else will free the entry. Taken: the loop frees it.
@@ -408,6 +411,12 @@ struct ControlTable
         auto out = e->out;
         e->state.store(ControlEntry::Free, std::memory_order_release);
         return out;
+    }
+    // A request waits for the loop: checked after Wake::park, so no wake is lost.
+    bool pending() const
+    {
+        return std::ranges::any_of(entries, [](const ControlEntry &e)
+                                   { return e.state.load() == ControlEntry::Posted; });
     }
     template <class F> bool drain(F &&fn)
     {

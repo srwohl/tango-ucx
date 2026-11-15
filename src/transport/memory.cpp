@@ -118,15 +118,20 @@ Sizes sizes_of(const Description &d)
             opaque};
 }
 
+void check_limits(const PublisherLimits &l)
+{
+    if(l.gpu < -1 || (l.gpu >= 0 && !registered_gpu))
+        throw std::invalid_argument("GPU source needs a GPU runtime and a non-negative GPU number");
+    if(l.max_sessions < 1 || l.max_sessions > k_max_sessions)
+        throw std::invalid_argument("max_sessions must be 1 to 64");
+}
+
 PublisherPlan plan_publisher(const Description &d, const PublisherLimits &l, std::uint32_t request,
                              std::uint64_t max_header)
 {
     PublisherPlan p;
     p.sizes = sizes_of(d);
-    if(l.gpu < -1 || (l.gpu >= 0 && !registered_gpu))
-        throw std::invalid_argument("GPU source needs a GPU runtime and a non-negative GPU number");
-    if(l.max_sessions < 1 || l.max_sessions > k_max_sessions)
-        throw std::invalid_argument("max_sessions must be 1 to 64");
+    check_limits(l);
     if(request > 1024)
         throw std::invalid_argument("UCX request is larger than 1 KiB");
     if(p.sizes.header_bytes > max_header)

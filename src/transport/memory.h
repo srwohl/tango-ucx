@@ -35,6 +35,7 @@ struct SubscriptionPlan
 };
 
 Sizes sizes_of(const Description &);
+void check_limits(const PublisherLimits &); // what plan_publisher checks without a description
 PublisherPlan plan_publisher(const Description &, const PublisherLimits &,
                              std::uint32_t request_bytes, std::uint64_t max_header);
 SubscriptionPlan plan_subscription(const Offer &, bool every, const SubscriptionOptions &,
