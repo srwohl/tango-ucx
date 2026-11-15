@@ -136,8 +136,14 @@ struct PullSet
         reserved[row] = 0;
     }
     PubRow *puller(Pub &, std::uint64_t frame_index);
-    int reserve(Pub &); // room for the next grant, or the row the device waits for
-    void take_back(Pub &, std::uint32_t grants); // the newest grants, which the device never took
+    // Room for the next grant, or the row the device waits for.
+    int reserve(Pub &);
+    // The puller of the next slot to route, before the slot is counted as routed.
+    PubRow *route(Pub &, bool cancel);
+    // The pullers whose End must wait.
+    std::uint64_t end_waits(const Pub &) const;
+    // The newest grants, which the device never took.
+    void take_back(Pub &, std::uint32_t grants);
 };
 // One publisher instance: one description, its sessions, slots, records and grants. The engine
 // drives it on its progress thread; the device holds it through its slots.

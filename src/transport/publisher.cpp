@@ -238,6 +238,35 @@ int PullSet::reserve(Pub &pub)
         ++reserved[holder->row];
     return -1;
 }
+// The puller the next routed slot goes to, which releases the room it reserved. A cancelled
+// slot uses no frame index, so every later grant moves down by one, and the puller of the newest
+// granted index loses one grant; the slot goes to no puller. A frame whose range's puller is
+// gone, when no other puller could take the whole range, goes to any puller with room for one
+// more frame. If none has room, it is missing.
+PubRow *PullSet::route(Pub &pub, bool cancel)
+{
+    auto *to_puller =
+        puller(pub, cancel ? pub.next_frame_index + pub.outstanding() - 1 : pub.next_frame_index);
+    if(to_puller && reserved[to_puller->row])
+        --reserved[to_puller->row];
+    if(cancel)
+        return nullptr;
+    for(std::uint32_t row_index = 0; range_frames && !to_puller && row_index < pub.plan.row_count;
+        ++row_index)
+        if(has(row_index) && pub.has_room(pub.rows[row_index]))
+            to_puller = &pub.rows[row_index];
+    missing += range_frames && !to_puller;
+    return to_puller;
+}
+// A puller's End reports the set's missing count, so while one puller is sending, the End of
+// every puller waits.
+std::uint64_t PullSet::end_waits(const Pub &pub) const
+{
+    for(auto left = mask; left; left &= left - 1)
+        if(pub.rows[std::countr_zero(left)].in_flight)
+            return mask;
+    return 0;
+}
 std::span<std::byte> Pub::payload(std::uint32_t slot_index)
 {
     if(limits.gpu >= 0)
@@ -626,14 +655,8 @@ bool Pub::route_pass(std::int64_t now)
         }
         slot.posted.store(false, std::memory_order_relaxed);
         slot.held = false;
-        // The puller this frame goes to. A cancelled slot uses no frame index, so every later
-        // grant moves down by one, and the puller of the newest granted index loses one grant.
-        auto *to_puller =
-            pull.puller(*this, slot.cancel ? next_frame_index + slots_granted - slots_routed - 1
-                                           : next_frame_index);
+        auto *to_puller = pull.route(*this, slot.cancel);
         ++slots_routed;
-        if(to_puller && pull.reserved[to_puller->row])
-            --pull.reserved[to_puller->row];
         if(!slot.cancel)
         {
             wire::put64(records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride,
@@ -641,13 +664,6 @@ bool Pub::route_pass(std::int64_t now)
             wire::put64(records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride + 8,
                         slot.timestamp);
             ++next_frame_index;
-            // The range's puller is gone and no other puller could take the whole range. Any
-            // puller with room for one more frame takes this one. If none has room, it is missing.
-            for(std::uint32_t row_index = 0;
-                pull.range_frames && !to_puller && row_index < plan.row_count; ++row_index)
-                if(pull.has(row_index) && has_room(rows[row_index]))
-                    to_puller = &rows[row_index];
-            pull.missing += pull.range_frames && !to_puller;
             // Every sessions and the puller had room reserved when the slot was granted.
             auto takers = latest.takers(*this, slot, now);
             auto recipients = every.mask | takers;
@@ -676,14 +692,11 @@ bool Pub::route_pass(std::int64_t now)
         check_reservations();
         return work;
     }
-    // A puller's End reports the set's missing count, so it waits until no puller is sending.
-    bool sending = false;
-    for(const auto &row : rows)
-        sending |= row.pull && row.ready && row.in_flight;
+    auto end_waits = pull.end_waits(*this);
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
         auto &row = rows[row_index];
-        if(row.ready && !row.end_sent && row.in_flight == 0 && !(row.pull && sending))
+        if(row.ready && !row.end_sent && row.in_flight == 0 && !(end_waits >> row_index & 1))
             send_end(row_index);
     }
     check_reservations();
