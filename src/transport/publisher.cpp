@@ -219,6 +219,25 @@ void PullSet::take_back(Pub &pub, std::uint32_t grants)
         if(auto *holder = puller(pub, newest - back); holder && reserved[holder->row])
             --reserved[holder->row];
 }
+// The puller of the next grant's frame index, which is the next one if no slot ahead of it is
+// cancelled, reserves room for the grant, and -1 is returned. Without room the device waits for
+// that puller or, when none has room for the range, for the one longest without a frame, and
+// that row is returned. With no puller left it does not wait: -1.
+int PullSet::reserve(Pub &pub)
+{
+    auto *holder = puller(pub, pub.next_frame_index + pub.outstanding());
+    if(mask && !(holder && pub.has_room(*holder)))
+    {
+        auto *slow = holder;
+        for(std::uint32_t row_index = 0; !holder && row_index < pub.plan.row_count; ++row_index)
+            if(has(row_index) && !(slow && slow->last_send_ns <= pub.rows[row_index].last_send_ns))
+                slow = &pub.rows[row_index];
+        return slow->row;
+    }
+    if(holder)
+        ++reserved[holder->row];
+    return -1;
+}
 std::span<std::byte> Pub::payload(std::uint32_t slot_index)
 {
     if(limits.gpu >= 0)
@@ -691,31 +710,16 @@ bool Pub::grant_pass()
         }
         if(slot_index < 0)
             break;
-        bool room = true;
-        if(int row_index = every.blocking(*this); row_index >= 0)
+        // The every sessions gate first. The pull set is asked only if they have room, because it
+        // reserves its puller's room as it answers.
+        int row_index = every.blocking(*this);
+        if(row_index < 0)
+            row_index = pull.reserve(*this);
+        if(row_index >= 0)
         {
-            room = false;
             blocked = row_index + 1;
-        }
-        // The puller of the grant's frame index, which is the next one if no slot ahead of it is
-        // cancelled. The device waits for that puller or, when none has room for the range, for
-        // the one longest without a frame. With no puller left it does not wait.
-        auto *holder =
-            room ? pull.puller(*this, next_frame_index + slots_granted - slots_routed) : nullptr;
-        if(room && pull.mask && !(holder && has_room(*holder)))
-        {
-            auto *slow = holder;
-            for(std::uint32_t row_index = 0; !holder && row_index < plan.row_count; ++row_index)
-                if(pull.has(row_index) &&
-                   !(slow && slow->last_send_ns <= rows[row_index].last_send_ns))
-                    slow = &rows[row_index];
-            room = false;
-            blocked = slow->row + 1;
-        }
-        if(!room)
             break;
-        if(holder)
-            ++pull.reserved[holder->row];
+        }
         slots[slot_index].held = true;
         order[slots_granted % plan.slot_count] = slot_index;
         grants.push(slot_index);

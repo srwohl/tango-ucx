@@ -136,6 +136,7 @@ struct PullSet
         reserved[row] = 0;
     }
     PubRow *puller(Pub &, std::uint64_t frame_index);
+    int reserve(Pub &); // room for the next grant, or the row the device waits for
     void take_back(Pub &, std::uint32_t grants); // the newest grants, which the device never took
 };
 // One publisher instance: one description, its sessions, slots, records and grants. The engine
