@@ -1,7 +1,7 @@
 # The wire of tango-ucx, as tools/check.py checks it against src/transport/wire.cpp.
 #
-# 0.1 is a pre-release, to be continued until 1.0: until then an entry may still change, and a
-# reader accepts only its own version. From 1.0 these rules hold, after protobuf's:
+# 0.1 is being worked on until its release (docs/roadmap.md): an entry may still change. Until
+# 1.0 a reader accepts only its own version. From 1.0 these rules hold, after protobuf's:
 #   - an entry is never renamed, retyped, moved or given another meaning;
 #   - a new key is optional, and its absence means what it meant before the key existed;
 #   - a new binary field goes at the end of its message; readers ignore bytes they do not know;

@@ -13,9 +13,9 @@
 
 namespace TangoUcx::wire
 {
-// 0.1 is a pre-release, to be continued until 1.0: until then any change may break the wire, so
-// a document is accepted only at exactly this version. From 1.0, a minor only adds keys and any
-// minor of the same major is accepted.
+// 0.1 is being worked on until its release (docs/roadmap.md), and may still change. Until 1.0 any
+// version may break the wire, so a document is accepted only at exactly this version. From 1.0,
+// a minor only adds keys and any minor of the same major is accepted.
 inline constexpr std::uint8_t k_major = 0;
 inline constexpr std::uint8_t k_minor = 1;
 inline constexpr std::size_t k_max_document = 16 * 1024;
