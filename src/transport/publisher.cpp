@@ -172,43 +172,52 @@ int EverySessions::blocking(const Pub &pub) const
     return -1;
 }
 // The puller that holds the range of a frame index, or none, as in a stream with no pull set.
-// The index says which range, and
-// the table which puller: after a pass no rule gives it. A range's first grant gives the range
-// to the next puller in the fixed order that has room for all of it. A range whose puller has
-// gone goes to the next with room for its grants outstanding, which that puller then reserves.
-PubRow *Pub::puller(std::uint64_t frame_index)
+// The index says which range, and the table which puller: after a pass no rule gives it. A
+// range's first grant gives the range to the next puller in the fixed order that has room for
+// all of it. A range whose puller has gone goes to the next with room for its grants
+// outstanding, which that puller then reserves.
+PubRow *PullSet::puller(Pub &pub, std::uint64_t frame_index)
 {
-    if(!pull.range_frames)
+    if(!range_frames)
         return nullptr;
-    auto range_start = frame_index - frame_index % pull.range_frames;
-    auto &holder = pull.range_pullers[frame_index / pull.range_frames % pull.range_pullers.size()];
-    bool untaken = frame_index / pull.range_frames == pull.ranges_taken;
-    if(!untaken && pull.has(holder))
+    auto &rows = pub.rows;
+    auto range_start = frame_index - frame_index % range_frames;
+    auto &holder = range_pullers[frame_index / range_frames % range_pullers.size()];
+    bool untaken = frame_index / range_frames == ranges_taken;
+    if(!untaken && has(holder))
         return &rows[holder];
-    auto first = std::max(next_frame_index, range_start),
-         last = std::min(next_frame_index + slots_granted - slots_routed,
-                         range_start + pull.range_frames);
+    auto first = std::max(pub.next_frame_index, range_start),
+         last = std::min(pub.next_frame_index + pub.outstanding(), range_start + range_frames);
     std::uint64_t outstanding = last > first ? last - first : 0, passed_over = 0;
     for(std::uint32_t step = 1; step <= rows.size(); ++step)
     {
-        auto row_index = (pull.last_taker + step) % rows.size();
-        if(!pull.has(row_index))
+        auto row_index = (last_taker + step) % rows.size();
+        if(!has(row_index))
             continue;
-        if(has_room(rows[row_index],
-                    untaken ? pull.range_frames : std::max<std::uint64_t>(outstanding, 1),
-                    std::max<std::uint64_t>(outstanding, 1)))
+        if(pub.has_room(rows[row_index],
+                        untaken ? range_frames : std::max<std::uint64_t>(outstanding, 1),
+                        std::max<std::uint64_t>(outstanding, 1)))
         {
             for(; passed_over; passed_over &= passed_over - 1)
                 ++rows[std::countr_zero(passed_over)].passes;
-            pull.reserved[row_index] += std::uint32_t(outstanding);
-            pull.ranges_taken += untaken;
-            return &rows[holder = pull.last_taker = std::uint8_t(row_index)];
+            reserved[row_index] += std::uint32_t(outstanding);
+            ranges_taken += untaken;
+            return &rows[holder = last_taker = std::uint8_t(row_index)];
         }
         passed_over |= std::uint64_t{1} << row_index;
     }
-    if(untaken && !pull.mask) // no puller is left: the range is nobody's, and its frames missing
-        holder = pull.last_taker, ++pull.ranges_taken;
+    if(untaken && !mask) // no puller is left: the range is nobody's, and its frames missing
+        holder = last_taker, ++ranges_taken;
     return nullptr;
+}
+// The grants taken back are the newest, so they would have had the last frame indices. Their
+// pullers release what they reserved for them.
+void PullSet::take_back(Pub &pub, std::uint32_t grants)
+{
+    auto newest = pub.next_frame_index + pub.outstanding() - 1;
+    for(std::uint32_t back = 0; back < grants; ++back)
+        if(auto *holder = puller(pub, newest - back); holder && reserved[holder->row])
+            --reserved[holder->row];
 }
 std::span<std::byte> Pub::payload(std::uint32_t slot_index)
 {
@@ -553,11 +562,7 @@ void Pub::unissue_grants()
     std::uint32_t queued = 0;
     for(int slot_index; (slot_index = grants.try_pop()) >= 0; ++queued)
         slots[slot_index].held = false;
-    // The grants in the ring are the newest, so they would have had the last frame indices.
-    auto newest = next_frame_index + slots_granted - slots_routed - 1;
-    for(std::uint32_t back = 0; back < queued; ++back)
-        if(auto *holder = puller(newest - back); holder && pull.reserved[holder->row])
-            --pull.reserved[holder->row];
+    pull.take_back(*this, queued);
     slots_granted -= queued;
 }
 
@@ -604,8 +609,9 @@ bool Pub::route_pass(std::int64_t now)
         slot.held = false;
         // The puller this frame goes to. A cancelled slot uses no frame index, so every later
         // grant moves down by one, and the puller of the newest granted index loses one grant.
-        auto *to_puller = puller(slot.cancel ? next_frame_index + slots_granted - slots_routed - 1
-                                             : next_frame_index);
+        auto *to_puller =
+            pull.puller(*this, slot.cancel ? next_frame_index + slots_granted - slots_routed - 1
+                                           : next_frame_index);
         ++slots_routed;
         if(to_puller && pull.reserved[to_puller->row])
             --pull.reserved[to_puller->row];
@@ -694,7 +700,8 @@ bool Pub::grant_pass()
         // The puller of the grant's frame index, which is the next one if no slot ahead of it is
         // cancelled. The device waits for that puller or, when none has room for the range, for
         // the one longest without a frame. With no puller left it does not wait.
-        auto *holder = room ? puller(next_frame_index + slots_granted - slots_routed) : nullptr;
+        auto *holder =
+            room ? pull.puller(*this, next_frame_index + slots_granted - slots_routed) : nullptr;
         if(room && pull.mask && !(holder && has_room(*holder)))
         {
             auto *slow = holder;

@@ -135,6 +135,8 @@ struct PullSet
         mask &= ~(std::uint64_t{1} << row);
         reserved[row] = 0;
     }
+    PubRow *puller(Pub &, std::uint64_t frame_index);
+    void take_back(Pub &, std::uint32_t grants); // the newest grants, which the device never took
 };
 // One publisher instance: one description, its sessions, slots, records and grants. The engine
 // drives it on its progress thread; the device holds it through its slots.
@@ -201,7 +203,6 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
         return slots_granted - slots_routed;
     }
     bool has_room(const PubRow &, std::uint64_t frames = 1, std::uint64_t grants = 1) const;
-    PubRow *puller(std::uint64_t);
     wire::Status check_open(const wire::OpenMessage &) const;
     void unissue_grants();
     void check_reservations() const; // asserts; nothing in a release build
