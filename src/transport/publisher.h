@@ -41,7 +41,6 @@ struct PubRow
     // An opaque stream's packed ring, and where its last sent and last credited frames end.
     std::uint64_t ring_bytes = 0, sent_bytes = 0, credited_bytes = 0;
     std::uint32_t ring_depth = 0, in_flight = 0;
-    std::uint32_t reserved = 0; // a puller's: frames granted to it and not yet routed
     std::int64_t min_interval_ns = 0, last_send_ns = 0, blocked_since_ns = 0;
     std::int64_t transfer_max_ns = 0, transfer_sum_ns = 0;
     Text<64> label, transport;
@@ -110,6 +109,33 @@ struct LatestSessions
     // The rows that take this frame now; the others skip it.
     std::uint64_t takers(const Pub &, const SourceSlot &, std::int64_t now) const;
 };
+// The pullers of an instance (ADR 0002): a set that takes each frame once, a range at a time.
+// Ranges are kept on the frame index, so a cancelled slot, which uses no index, moves every
+// later grant down by one.
+struct PullSet
+{
+    // Its rows, the frames of a range, the ranges given out so far, the row each of the latest
+    // went to, the row that took the last, and the frames no puller received.
+    std::uint64_t mask = 0, ranges_taken = 0, missing = 0;
+    std::uint32_t range_frames = 0;
+    std::vector<std::uint8_t> range_pullers;
+    std::uint8_t last_taker = 63;
+    std::array<std::uint32_t, 64> reserved{}; // each puller's frames granted and not yet routed
+    bool has(std::uint32_t row) const
+    {
+        return mask >> row & 1;
+    }
+    void add(std::uint32_t row, std::uint32_t range)
+    {
+        mask |= std::uint64_t{1} << row;
+        range_frames = range;
+    }
+    void remove(std::uint32_t row) // what it reserved goes with it
+    {
+        mask &= ~(std::uint64_t{1} << row);
+        reserved[row] = 0;
+    }
+};
 // One publisher instance: one description, its sessions, slots, records and grants. The engine
 // drives it on its progress thread; the device holds it through its slots.
 struct Pub final : Owner, std::enable_shared_from_this<Pub>
@@ -134,12 +160,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::uint64_t ready_mask = 0;
     EverySessions every;
     LatestSessions latest;
-    // A set of pullers: its rows, the frames of a range, the ranges given out so far, the row
-    // each of the latest went to, the row that took the last, and the frames no puller received.
-    std::uint64_t pull_mask = 0, ranges_taken = 0, missing = 0;
-    std::uint32_t range_frames = 0;
-    std::vector<std::uint8_t> range_pullers;
-    std::uint8_t last_taker = 63;
+    PullSet pull;
     std::uint64_t slots_granted = 0, slots_routed = 0, next_frame_index = 0, skipped = 0;
     std::uint32_t scan = 0, failed_every = 0, blocked = 0, ordinals = 0;
     IndexRing grants{IndexRing::Fd::None}; // acquire sleeps on the queue; nobody polls a grant fd
