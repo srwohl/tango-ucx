@@ -267,6 +267,30 @@ std::uint64_t PullSet::end_waits(const Pub &pub) const
             return mask;
     return 0;
 }
+// A puller left before it was sent End. Frames it received but did not release are counted as
+// missing, because a frame is never sent twice, and what it reserved goes with it. With no
+// pullers left before the start, the range is cleared: the stream then has no pull set.
+void PullSet::remove(const PubRow &row, bool started)
+{
+    auto bit = std::uint64_t{1} << row.row;
+    if(mask & bit && !row.end_sent)
+        missing += row.sent - row.credited;
+    mask &= ~bit;
+    reserved[row.row] = 0;
+    if(!mask && !started)
+        range_frames = 0;
+}
+// A grant reserves at most one puller, so the pullers together hold no more than the grants not
+// yet routed.
+void PullSet::check([[maybe_unused]] std::uint64_t outstanding) const
+{
+#ifndef NDEBUG
+    std::uint64_t pulled = 0;
+    for(auto left = mask; left; left &= left - 1)
+        pulled += reserved[std::countr_zero(left)];
+    assert(pulled <= outstanding);
+#endif
+}
 std::span<std::byte> Pub::payload(std::uint32_t slot_index)
 {
     if(limits.gpu >= 0)
@@ -478,16 +502,9 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     bool held_device = ((every.mask | pull.mask) & bit) != 0;
     if(row.ready)
         ready_mask &= ~bit;
-    // A puller left before it was sent End. Frames it received but did not release are counted
-    // as missing, because a frame is never sent twice.
-    if(pull.mask & bit && !row.end_sent)
-        pull.missing += row.sent - row.credited;
     every.remove(row_index);
     latest.remove(row_index);
-    pull.remove(row_index);
-    // With no pullers left before the start, clear the range. The stream then has no pull set.
-    if(!pull.mask && !started.load(std::memory_order_acquire))
-        pull.range_frames = 0;
+    pull.remove(row, started.load(std::memory_order_acquire));
     if(failed && held_device)
         ++failed_every;
     row.ready = false;
@@ -614,16 +631,12 @@ void Pub::unissue_grants()
     slots_granted -= queued;
 }
 
-// Every and latest sessions are all ready sessions, and a grant reserves at most one puller, so the
-// pullers together hold no more than the grants not yet routed.
+// Every and latest sessions are all ready sessions.
 void Pub::check_reservations() const
 {
 #ifndef NDEBUG
     assert(((every.mask | latest.mask) & ~ready_mask) == 0);
-    std::uint64_t pulled = 0;
-    for(auto left = pull.mask; left; left &= left - 1)
-        pulled += pull.reserved[std::countr_zero(left)];
-    assert(pulled <= outstanding());
+    pull.check(outstanding());
 #endif
 }
 bool Pub::route_pass(std::int64_t now)

@@ -130,11 +130,7 @@ struct PullSet
         mask |= std::uint64_t{1} << row;
         range_frames = range;
     }
-    void remove(std::uint32_t row) // what it reserved goes with it
-    {
-        mask &= ~(std::uint64_t{1} << row);
-        reserved[row] = 0;
-    }
+    void remove(const PubRow &, bool started);
     PubRow *puller(Pub &, std::uint64_t frame_index);
     // Room for the next grant, or the row the device waits for.
     int reserve(Pub &);
@@ -144,6 +140,7 @@ struct PullSet
     std::uint64_t end_waits(const Pub &) const;
     // The newest grants, which the device never took.
     void take_back(Pub &, std::uint32_t grants);
+    void check(std::uint64_t outstanding) const; // asserts; nothing in a release build
 };
 // One publisher instance: one description, its sessions, slots, records and grants. The engine
 // drives it on its progress thread; the device holds it through its slots.
