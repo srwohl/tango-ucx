@@ -506,7 +506,7 @@ TEST_CASE("an Open without a packed ring is refused, and a Credit for more bytes
     REQUIRE(test::publish_opaque(publisher, 200, 1));
     REQUIRE(peer.progress_until([&] { return peer.count(wire::Frame) == 2; }));
     wire::FrameMessage second; // the publisher states where it placed the frame
-    REQUIRE(wire::decode(peer.got.back().second, 8, second));
+    REQUIRE(wire::decode(peer.got.back().second, 8, true, second));
     CHECK((second.packed && second.sequence == 1 && second.position == 100));
     CHECK(peer.count(wire::End) == 0);
     credit = wire::encode(wire::CreditMessage{peer.session, 2, 301});

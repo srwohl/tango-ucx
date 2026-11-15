@@ -65,12 +65,13 @@ template <std::size_t N> Bytes bytes(const std::array<std::byte, N> &a)
     return {a.begin(), a.end()};
 }
 // Only the exact length decodes, and a flipped bit is either refused or encodes back unchanged.
+// Shorter than the struct is refused; longer is accepted, and the bytes beyond it are ignored.
 void sweep(const Bytes &good, const Round &round)
 {
     auto longer = good;
-    longer.push_back(std::byte{});
+    longer.resize(good.size() + 16, std::byte{0x5a});
     for(std::size_t n = 0; n <= longer.size(); ++n)
-        CHECK(round({longer.data(), n}).has_value() == (n == good.size()));
+        CHECK(round({longer.data(), n}).has_value() == (n >= good.size()));
     for(std::size_t bit = 0; bit < 8 * good.size(); ++bit)
     {
         auto flipped = good;
@@ -347,13 +348,14 @@ TEST_CASE("data-plane structs match their golden bytes")
     CHECK(packed == u64s({1, 2, 3, 4, 5, 6, 0x2121212121212121}));
     CHECK(wire::encode_into({packed.data(), 55}, f) == 0);
     wire::FrameMessage back;
-    REQUIRE(wire::decode(packed, 8, back));
+    REQUIRE(wire::decode(packed, 8, true, back));
     CHECK((back.packed && back.position == 6 && back.record[7] == std::byte{0x21}));
-    REQUIRE(wire::decode(frame, 8, back));
+    REQUIRE(wire::decode(frame, 8, false, back));
     CHECK((!back.packed && back.position == 0));
 }
 
-TEST_CASE("data-plane structs refuse every other length and re-encode every accepted bit flip")
+TEST_CASE("data-plane structs refuse a shorter message, ignore what follows a longer one, and "
+          "re-encode every accepted bit flip")
 {
     sweep(bytes(wire::encode(wire::SessionMessage{0x0102030405060708})),
           [](std::span<const std::byte> b) -> std::optional<Bytes>
@@ -371,11 +373,13 @@ TEST_CASE("data-plane structs refuse every other length and re-encode every acce
               out.resize(b.size());
               return out;
           });
-    wire::CreditMessage ring; // a packed ring's Credit has 8 bytes more, and no other length
+    wire::CreditMessage ring; // a packed ring's Credit has 8 bytes more
     auto credit = u64s({7, 9, 11, 13});
-    for(std::size_t n = 17; n <= credit.size(); ++n)
-        CHECK(wire::decode({credit.data(), n}, ring) == (n == 24));
-    CHECK((ring.credit == 9 && ring.bytes == 11));
+    for(std::size_t n = 16; n <= credit.size(); ++n)
+    {
+        REQUIRE(wire::decode({credit.data(), n}, ring));
+        CHECK((ring.credit == 9 && ring.bytes == (n >= 24 ? 11u : 0u)));
+    }
     sweep(bytes(wire::encode(wire::EndMessage{7, 9, 11, wire::Protocol})),
           [](std::span<const std::byte> b) -> std::optional<Bytes>
           {
@@ -387,7 +391,7 @@ TEST_CASE("data-plane structs refuse every other length and re-encode every acce
           {
               wire::FrameMessage m;
               Bytes out(48);
-              if(!wire::decode(b, 8, m) || wire::encode_into(out, m) != 48)
+              if(!wire::decode(b, 8, false, m) || wire::encode_into(out, m) != 48)
                   return std::nullopt;
               return out;
           });
@@ -396,7 +400,7 @@ TEST_CASE("data-plane structs refuse every other length and re-encode every acce
           {
               wire::FrameMessage m;
               Bytes out(56);
-              if(!wire::decode(b, 8, m) || !m.packed || wire::encode_into(out, m) != 56)
+              if(!wire::decode(b, 8, true, m) || !m.packed || wire::encode_into(out, m) != 56)
                   return std::nullopt;
               return out;
           });

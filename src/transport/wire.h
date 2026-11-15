@@ -126,7 +126,9 @@ Status parse(std::string_view, StreamMessage &);
 bool valid_text(std::string_view);
 std::string_view status_name(Status);
 
-// Data plane: fixed little-endian structs; the active-message id is the type.
+// Data plane: fixed little-endian structs; the active-message id is the type. A field keeps its
+// offset for good, and new fields go at the end: a decoder accepts a message longer than it knows
+// and ignores the rest.
 struct SessionMessage
 {
     std::uint64_t session = 0;
@@ -159,7 +161,8 @@ struct EndMessage
 std::array<std::byte, 8> encode(const SessionMessage &);
 bool decode(std::span<const std::byte>, SessionMessage &);
 std::size_t encode_into(std::span<std::byte>, const FrameMessage &);
-bool decode(std::span<const std::byte>, std::size_t record_bytes, FrameMessage &);
+// packed: the stream is opaque, so its frames have their position, 8 bytes more.
+bool decode(std::span<const std::byte>, std::size_t record_bytes, bool packed, FrameMessage &);
 std::array<std::byte, 24> encode(const CreditMessage &);
 bool decode(std::span<const std::byte>, CreditMessage &);
 std::array<std::byte, 32> encode(const EndMessage &);

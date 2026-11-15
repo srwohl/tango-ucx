@@ -349,7 +349,7 @@ std::array<std::byte, 8> encode(const SessionMessage &m)
 }
 bool decode(std::span<const std::byte> b, SessionMessage &m)
 {
-    if(b.size() != 8)
+    if(b.size() < 8)
         return false;
     m.session = get64(b.data());
     return true;
@@ -370,21 +370,20 @@ std::size_t encode_into(std::span<std::byte> b, const FrameMessage &m)
     std::memcpy(b.data() + fixed, m.record.data(), m.record_bytes);
     return n;
 }
-// The length says which frame it is: a packed ring's has its position, 8 bytes more.
-bool decode(std::span<const std::byte> b, std::size_t record_bytes, FrameMessage &m)
+bool decode(std::span<const std::byte> b, std::size_t record_bytes, bool packed, FrameMessage &m)
 {
-    if(record_bytes > m.record.size() ||
-       (b.size() != 40 + record_bytes && b.size() != 48 + record_bytes))
+    std::size_t fixed = packed ? 48 : 40;
+    if(record_bytes > m.record.size() || b.size() < fixed + record_bytes)
         return false;
     m.session = get64(b.data());
     m.sequence = get64(b.data() + 8);
     m.payload_bytes = get64(b.data() + 16);
     m.index = get64(b.data() + 24);
     m.timestamp_ns = get64(b.data() + 32);
-    m.packed = b.size() == 48 + record_bytes;
-    m.position = m.packed ? get64(b.data() + 40) : 0;
+    m.packed = packed;
+    m.position = packed ? get64(b.data() + 40) : 0;
     m.record_bytes = std::uint16_t(record_bytes);
-    std::memcpy(m.record.data(), b.data() + b.size() - record_bytes, record_bytes);
+    std::memcpy(m.record.data(), b.data() + fixed, record_bytes);
     return true;
 }
 std::array<std::byte, 24> encode(const CreditMessage &m)
@@ -397,9 +396,9 @@ std::array<std::byte, 24> encode(const CreditMessage &m)
 }
 bool decode(std::span<const std::byte> b, CreditMessage &m)
 {
-    if(b.size() != 16 && b.size() != 24)
+    if(b.size() < 16)
         return false;
-    m = {get64(b.data()), get64(b.data() + 8), b.size() == 24 ? get64(b.data() + 16) : 0};
+    m = {get64(b.data()), get64(b.data() + 8), b.size() >= 24 ? get64(b.data() + 16) : 0};
     return true;
 }
 std::array<std::byte, 32> encode(const EndMessage &m)
@@ -413,7 +412,7 @@ std::array<std::byte, 32> encode(const EndMessage &m)
 }
 bool decode(std::span<const std::byte> b, EndMessage &m)
 {
-    if(b.size() != 32 || std::to_integer<unsigned>(b[24]) > Closing)
+    if(b.size() < 32 || std::to_integer<unsigned>(b[24]) > Closing)
         return false;
     m = {get64(b.data()), get64(b.data() + 8), get64(b.data() + 16),
          Reason(std::to_integer<unsigned>(b[24])), get64(b.data() + 24) >> 8};

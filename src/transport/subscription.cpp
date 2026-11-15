@@ -81,11 +81,11 @@ ucs_status_t on_frame(void *arg, const void *h, size_t hn, void *data, size_t n,
     auto rndv = (param->recv_attr & UCP_AM_RECV_ATTR_FLAG_RNDV) != 0;
     wire::FrameMessage f;
     const auto &sizes = s->plan.sizes;
-    bool valid =
-        wire::decode({static_cast<const std::byte *>(h), hn}, sizes.padded_field_bytes, f) &&
-        f.session == s->session && f.payload_bytes == n && f.sequence >= s->credited &&
-        !(s->plan.gpu && !rndv) && f.sequence < s->credited + s->plan.ring_depth &&
-        !s->rings->bit_test(s->rings->busy, f.sequence % s->plan.ring_depth);
+    bool valid = wire::decode({static_cast<const std::byte *>(h), hn}, sizes.padded_field_bytes,
+                              sizes.opaque, f) &&
+                 f.session == s->session && f.payload_bytes == n && f.sequence >= s->credited &&
+                 !(s->plan.gpu && !rndv) && f.sequence < s->credited + s->plan.ring_depth &&
+                 !s->rings->bit_test(s->rings->busy, f.sequence % s->plan.ring_depth);
     auto k = std::uint32_t(f.sequence % s->plan.ring_depth);
     auto at = std::uint64_t(k) * sizes.frame_bytes;
     if(valid && sizes.opaque)
