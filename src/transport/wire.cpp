@@ -401,21 +401,22 @@ bool decode(std::span<const std::byte> b, CreditMessage &m)
     m = {get64(b.data()), get64(b.data() + 8), b.size() >= 24 ? get64(b.data() + 16) : 0};
     return true;
 }
-std::array<std::byte, 32> encode(const EndMessage &m)
+std::array<std::byte, 40> encode(const EndMessage &m)
 {
-    std::array<std::byte, 32> b{};
+    std::array<std::byte, 40> b{};
     put64(b.data(), m.session);
     put64(b.data() + 8, m.sequences);
     put64(b.data() + 16, m.frames);
-    put64(b.data() + 24, m.reason | m.missing << 8);
+    b[24] = std::byte(m.reason);
+    put64(b.data() + 32, m.missing);
     return b;
 }
 bool decode(std::span<const std::byte> b, EndMessage &m)
 {
-    if(b.size() < 32)
+    if(b.size() < 40)
         return false;
     m = {get64(b.data()), get64(b.data() + 8), get64(b.data() + 16),
-         Reason(std::to_integer<unsigned>(b[24])), get64(b.data() + 24) >> 8};
+         Reason(std::to_integer<unsigned>(b[24])), get64(b.data() + 32)};
     return true;
 }
 } // namespace TangoUcx::wire

@@ -152,8 +152,8 @@ struct CreditMessage
 {
     std::uint64_t session = 0, credit = 0, bytes = 0;
 };
-// `missing` is a set's, and only a puller's End has it: the frames no puller received. It is
-// the seven bytes after the reason, which are zero in every other End.
+// The reason is byte 24, and the seven bytes after it are reserved: zero when sent, ignored when
+// read. `missing` is a set's, the frames no puller received: 0 in every End but a puller's.
 struct EndMessage
 {
     std::uint64_t session = 0, sequences = 0, frames = 0;
@@ -168,7 +168,7 @@ std::size_t encode_into(std::span<std::byte>, const FrameMessage &);
 bool decode(std::span<const std::byte>, std::size_t record_bytes, bool packed, FrameMessage &);
 std::array<std::byte, 24> encode(const CreditMessage &);
 bool decode(std::span<const std::byte>, CreditMessage &);
-std::array<std::byte, 32> encode(const EndMessage &);
+std::array<std::byte, 40> encode(const EndMessage &);
 bool decode(std::span<const std::byte>, EndMessage &);
 std::uint64_t get64(const std::byte *) noexcept;
 void put64(std::byte *, std::uint64_t) noexcept;

@@ -327,14 +327,14 @@ TEST_CASE("data-plane structs match their golden bytes")
           Bytes{std::byte{8}, std::byte{7}, std::byte{6}, std::byte{5}, std::byte{4}, std::byte{3},
                 std::byte{2}, std::byte{1}});
     CHECK(bytes(wire::encode(wire::CreditMessage{1, 0x200, 0x300})) == u64s({1, 0x200, 0x300}));
-    auto end = u64s({1, 2, 3, 0});
+    auto end = u64s({1, 2, 3, 0, 0});
     end[24] = std::byte{wire::Evicted};
     CHECK(bytes(wire::encode(wire::EndMessage{1, 2, 3, wire::Evicted})) == end);
     wire::EndMessage lost; // a puller's End: what the set lost, after the reason
-    REQUIRE(wire::decode(u64s({1, 2, 3, 7 << 8 | wire::Closing}), lost));
+    REQUIRE(wire::decode(u64s({1, 2, 3, wire::Closing, 7}), lost));
     CHECK((lost.reason == wire::Closing && lost.missing == 7));
     wire::EndMessage later; // a reason from a later build is kept, not refused
-    REQUIRE(wire::decode(u64s({1, 2, 3, 200}), later));
+    REQUIRE(wire::decode(u64s({1, 2, 3, 200, 0}), later));
     CHECK(int(later.reason) == 200);
     CHECK(wire::Unspecified == 0);
     wire::FrameMessage f{1, 2, 3, 4, 5};
@@ -384,11 +384,15 @@ TEST_CASE("data-plane structs refuse a shorter message, ignore what follows a lo
         REQUIRE(wire::decode({credit.data(), n}, ring));
         CHECK((ring.credit == 9 && ring.bytes == (n >= 24 ? 11u : 0u)));
     }
-    sweep(bytes(wire::encode(wire::EndMessage{7, 9, 11, wire::Protocol})),
+    sweep(bytes(wire::encode(wire::EndMessage{7, 9, 11, wire::Protocol, 5})),
           [](std::span<const std::byte> b) -> std::optional<Bytes>
           {
               wire::EndMessage m;
-              return wire::decode(b, m) ? std::optional(bytes(wire::encode(m))) : std::nullopt;
+              if(!wire::decode(b, m))
+                  return std::nullopt;
+              auto out = bytes(wire::encode(m));
+              std::copy_n(b.begin() + 25, 7, out.begin() + 25); // reserved: ignored when read
+              return out;
           });
     sweep(u64s({1, 2, 3, 4, 5, 0x2121212121212121}),
           [](std::span<const std::byte> b) -> std::optional<Bytes>
