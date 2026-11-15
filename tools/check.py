@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check glossary use, target layering, and the public-name allowance."""
+"""Check glossary use, target layering, the public-name allowance, and the wire registry."""
 
 from __future__ import annotations
 
@@ -233,12 +233,84 @@ def check_layering() -> list[str]:
     return errors
 
 
+def check_wire() -> list[str]:
+    """tools/wire.txt against src/transport/wire.cpp: the JSON keys, the enum names sent in
+    JSON, and each data-plane field's offset, in both directions."""
+    errors: list[str] = []
+    keys: set[str] = set()
+    enums: dict[str, set[str]] = {}
+    fields: dict[str, set[tuple[int, str]]] = {}
+    retired: set[str] = set()
+    for number, raw in enumerate((ROOT / "tools/wire.txt").read_text().splitlines(), 1):
+        entry = raw.partition("#")[0].split()
+        if not entry:
+            continue
+        kind, rest = entry[0], entry[1:]
+        if kind == "key" and len(rest) == 3:
+            keys.add(rest[1])
+        elif kind == "enum" and len(rest) == 2:
+            enums.setdefault(rest[0], set()).add(rest[1])
+        elif kind == "field" and len(rest) == 4:
+            if rest[2] != "-":
+                fields.setdefault(rest[0], set()).add((int(rest[1]), rest[2]))
+        elif kind == "retired" and len(rest) == 2 and rest[0] == "key":
+            retired.add(rest[1])
+        else:
+            errors.append(f"tools/wire.txt:{number}: cannot read {raw.strip()!r}")
+
+    text = re.sub(r"//[^\n]*", "", (ROOT / "src/transport/wire.cpp").read_text())
+    used: set[str] = set()
+    for pattern in (
+        r'\{"([a-z_]+)",\s*[^"\s]',  # an ordered_json pair, whose value is not a string literal
+        r'_key\(j, "([a-z_]+)"',
+        r'contains\("([a-z_]+)"\)',
+        r'\["([a-z_]+)"\]',
+        r'\.at\("([a-z_]+)"\)',
+        r'find\("([a-z_]+)"\)',
+    ):
+        used |= set(re.findall(pattern, text))
+    for key in sorted(used - keys):
+        errors.append(f"wire: key {key!r} is in wire.cpp but not in tools/wire.txt")
+    for key in sorted(keys - used):
+        errors.append(f"wire: key {key!r} is in tools/wire.txt but not in wire.cpp")
+    for key in sorted(used & retired):
+        errors.append(f"wire: key {key!r} is retired and must not be used again")
+
+    literals = set(re.findall(r'"([a-z0-9_-]+)"', text))
+    for name, array in (("element", "k_element_names"), ("status", "k_status_names")):
+        match = re.search(array + r"\{(.*?)\};", text, re.DOTALL)
+        sent = set(re.findall(r'"([^"]+)"', match.group(1))) if match else set()
+        if sent != enums.get(name, set()):
+            differ = sorted(sent ^ enums.get(name, set()))
+            errors.append(f"wire: enum {name} differs from {array}: {differ}")
+    for name, values in enums.items():
+        for value in sorted(values - literals):
+            errors.append(f"wire: enum {name} value {value!r} is not in wire.cpp")
+
+    found: dict[str, set[tuple[int, str]]] = {}
+    for match in re.finditer(
+        r"(?:encode|encode_into)\([^)]*const (\w+) &m\)\s*\{(.*?)\n\}", text, re.DOTALL
+    ):
+        body = match.group(2)
+        pairs = {(int(offset or 0), name) for offset, name in re.findall(
+            r"put64\(b\.data\(\)(?: \+ (\d+))?, m\.(\w+)\)", body)}
+        pairs |= {(int(offset), name) for offset, name in re.findall(
+            r"b\[(\d+)\] = std::byte\(m\.(\w+)\)", body)}
+        found[match.group(1)] = pairs
+    for message in sorted(set(found) | set(fields)):
+        for offset, name in sorted(found.get(message, set()) ^ fields.get(message, set())):
+            where = "wire.cpp" if (offset, name) in found.get(message, set()) else "tools/wire.txt"
+            errors.append(f"wire: {message} field {name} at {offset} is only in {where}")
+    return errors
+
+
 def main() -> int:
     cpp = cpp_declared_names(public_header_text())
     python = python_declared_names(ROOT / "python/tango_ucx")
     errors = check_names("C++", "tools/public_names.txt", cpp, PUBLIC_NAME_LIMIT)
     errors += check_names("Python", "tools/python_names.txt", python, PYTHON_NAME_LIMIT)
     errors.extend(check_layering())
+    errors.extend(check_wire())
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
@@ -246,7 +318,7 @@ def main() -> int:
 
     print(
         f"architecture checks passed: {len(cpp)} C++ names (limit {PUBLIC_NAME_LIMIT}), "
-        f"{len(python)} Python names (limit {PYTHON_NAME_LIMIT})"
+        f"{len(python)} Python names (limit {PYTHON_NAME_LIMIT}), wire registry matches"
     )
     return 0
 

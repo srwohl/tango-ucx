@@ -1,0 +1,125 @@
+# The wire of tango-ucx, as tools/check.py checks it against src/transport/wire.cpp.
+#
+# 0.1 is a pre-release, to be continued until 1.0: until then an entry may still change, and a
+# reader accepts only its own version. From 1.0 these rules hold, after protobuf's:
+#   - an entry is never renamed, retyped, moved or given another meaning;
+#   - a new key is optional, and its absence means what it meant before the key existed;
+#   - a new binary field goes at the end of its message; readers ignore bytes they do not know;
+#   - a reader keeps an enum value it does not know, and treats it as a failure, not as 0;
+#   - a removed entry becomes `retired` and its name is never used again.
+#
+# key <document> <name> <type>             a JSON key; documents: open close reply stream
+#                                          sessions (sessions.row: each entry of "sessions")
+#                                          topology (topology.device: each network device)
+# enum <name> <value>                      sent by name, never by number
+# field <message> <offset> <name> <type>   a little-endian data-plane field; `reserved` is
+#                                          zero when sent and ignored when read
+# retired key <name>                       never to be used again
+
+key open interface string
+key open session u64
+key open instance_id u64
+key open depth u32
+key open batch u32
+key open min_interval_ns u64
+key open delivery enum:delivery
+key open range u32                         # pull only
+key open gpu bool
+key open label string
+key open address hex
+key open ring_bytes u64                    # opaque streams only
+
+key close interface string
+key close session u64
+
+key reply interface string
+key reply status enum:status
+key reply address hex                      # ok only
+key reply detail string                    # some refusals
+
+key stream interface string
+key stream instance_id u64
+key stream element enum:element
+key stream shape list:u64                  # array streams
+key stream max_payload_bytes u64           # opaque streams
+key stream field_bytes u32
+key stream field_dtype string
+key stream allow_every bool
+key stream max_sessions u32
+key stream application_text string
+
+key sessions interface string
+key sessions instance_id u64
+key sessions missing u64
+key sessions sessions list:sessions.row
+key sessions.row ordinal u32
+key sessions.row label string
+key sessions.row delivery enum:delivery
+key sessions.row state enum:state
+key sessions.row depth u32
+key sessions.row room u32
+key sessions.row sent u64
+key sessions.row skipped u64
+key sessions.row transfer_max_us u64
+key sessions.row transport string
+key sessions.row passes u64
+
+key topology cpu i32
+key topology numa_node i32
+key topology ring_numa_node i32
+key topology allowed_cpus string
+key topology sibling_cpus string
+key topology network_devices list:topology.device
+key topology.device name string
+key topology.device numa_node i32
+
+enum delivery every
+enum delivery latest
+enum delivery pull
+enum state ready
+enum state retiring
+enum element u8
+enum element u16
+enum element u32
+enum element u64
+enum element i8
+enum element i16
+enum element i32
+enum element i64
+enum element f32
+enum element f64
+enum element bytes
+enum status ok
+enum status malformed
+enum status version
+enum status instance_id
+enum status every-refused
+enum status no-session
+enum status endpoint
+enum status finished
+enum status unknown-session
+enum status busy
+enum status timeout
+enum status started
+enum status range
+
+# Ready (SessionMessage), 8 bytes.
+field SessionMessage 0 session u64
+# Frame, 40 bytes then the record; an opaque stream's has its position first, 48 bytes.
+field FrameMessage 0 session u64
+field FrameMessage 8 sequence u64
+field FrameMessage 16 payload_bytes u64
+field FrameMessage 24 index u64
+field FrameMessage 32 timestamp_ns u64
+field FrameMessage 40 position u64         # opaque streams only
+# Credit, 24 bytes; an array stream's may be the first 16.
+field CreditMessage 0 session u64
+field CreditMessage 8 credit u64
+field CreditMessage 16 bytes u64
+# End, 40 bytes.
+field EndMessage 0 session u64
+field EndMessage 8 sequences u64
+field EndMessage 16 frames u64
+field EndMessage 24 reason enum:reason     # by number: Unspecified 0, then Finished, Evicted, Protocol, Closing
+field EndMessage 25 - reserved7
+field EndMessage 32 missing u64
