@@ -206,7 +206,8 @@ bool Engine::begin_pass(std::int64_t now)
         active->retire_all();
         draining.push_back(std::move(active));
         active.reset();
-        set_current(nullptr);
+        // Other threads still see it, finished, until the next instance replaces it: UcxStream
+        // and Health keep answering while the next is made.
     }
     begin_since_ns = 0;
     std::shared_ptr<BeginRequest> request;
@@ -222,6 +223,7 @@ bool Engine::begin_pass(std::int64_t now)
     }
     catch(...)
     {
+        set_current(nullptr); // the previous instance has finished, and no other was made
         request->done.set_exception(std::current_exception());
     }
     return true;
