@@ -212,12 +212,20 @@ PubRow *PullSet::puller(Pub &pub, std::uint64_t frame_index)
 }
 // The grants taken back are the newest, so they would have had the last frame indices. Their
 // pullers release what they reserved for them.
+// A puller's grant routed or taken back. Each was reserved when granted, so none is missing; a
+// release build still keeps the count from wrapping, which would stall the set.
+void PullSet::release(std::uint32_t row)
+{
+    assert(reserved[row]);
+    if(reserved[row])
+        --reserved[row];
+}
 void PullSet::take_back(Pub &pub, std::uint32_t grants)
 {
     auto newest = pub.next_frame_index + pub.outstanding() - 1;
     for(std::uint32_t back = 0; back < grants; ++back)
-        if(auto *holder = puller(pub, newest - back); holder && reserved[holder->row])
-            --reserved[holder->row];
+        if(auto *holder = puller(pub, newest - back))
+            release(holder->row);
 }
 // The puller of the next grant's frame index, which is the next one if no slot ahead of it is
 // cancelled, reserves room for the grant, and -1 is returned. Without room the device waits for
@@ -247,8 +255,8 @@ PubRow *PullSet::route(Pub &pub, bool cancel)
 {
     auto *to_puller =
         puller(pub, cancel ? pub.next_frame_index + pub.outstanding() - 1 : pub.next_frame_index);
-    if(to_puller && reserved[to_puller->row])
-        --reserved[to_puller->row];
+    if(to_puller)
+        release(to_puller->row);
     if(cancel)
         return nullptr;
     for(std::uint32_t row_index = 0; range_frames && !to_puller && row_index < pub.plan.row_count;

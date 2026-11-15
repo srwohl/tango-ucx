@@ -140,6 +140,7 @@ struct PullSet
     std::uint64_t end_waits(const Pub &) const;
     // The newest grants, which the device never took.
     void take_back(Pub &, std::uint32_t grants);
+    void release(std::uint32_t row);
     void check(std::uint64_t outstanding) const; // asserts; nothing in a release build
 };
 // One publisher instance: one description, its sessions, slots, records and grants. The engine
