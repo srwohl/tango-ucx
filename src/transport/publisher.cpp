@@ -542,6 +542,26 @@ void Pub::unissue_grants()
             rows[row_index].reserved -= queued;
 }
 
+// What the reservation counters should reduce to, checked before the delivery policies move to
+// positions. Every every session joined before the first grant and reserves one frame per grant,
+// so each holds exactly the grants not yet routed. A grant reserves at most one puller, so the
+// pullers together hold no more than that.
+void Pub::check_reservations() const
+{
+#ifndef NDEBUG
+    auto outstanding = slots_granted - slots_routed;
+    std::uint64_t pulled = 0;
+    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+    {
+        auto bit = std::uint64_t{1} << row_index;
+        if(ready_mask & every_mask & bit)
+            assert(rows[row_index].reserved == outstanding);
+        if(pull_mask & bit)
+            pulled += rows[row_index].reserved;
+    }
+    assert(pulled <= outstanding);
+#endif
+}
 bool Pub::route_pass(std::int64_t now)
 {
     bool work = false;
@@ -636,7 +656,10 @@ bool Pub::route_pass(std::int64_t now)
         ended = true;
     }
     if(!ended)
+    {
+        check_reservations();
         return work;
+    }
     // A puller's End reports the set's missing count, so it waits until no puller is sending.
     bool sending = false;
     for(const auto &row : rows)
@@ -647,6 +670,7 @@ bool Pub::route_pass(std::int64_t now)
         if(row.ready && !row.end_sent && row.in_flight == 0 && !(row.pull && sending))
             send_end(row_index);
     }
+    check_reservations();
     return work;
 }
 bool Pub::grant_pass()
@@ -708,6 +732,7 @@ bool Pub::grant_pass()
         ++slots_granted;
         work = true;
     }
+    check_reservations();
     return work;
 }
 bool Pub::retire_pass(std::int64_t now)

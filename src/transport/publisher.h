@@ -138,6 +138,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     PubRow *puller(std::uint64_t);
     wire::Status check_open(const wire::OpenMessage &) const;
     void unissue_grants();
+    void check_reservations() const; // asserts; nothing in a release build
     bool route_pass(std::int64_t);
     bool grant_pass();
     bool retire_pass(std::int64_t);
