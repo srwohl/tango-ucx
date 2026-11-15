@@ -241,8 +241,7 @@ struct Engine final : Owner, std::enable_shared_from_this<Engine>
     // replaced only when a ring needs more, or when an instance that may still read it leaves.
     Region arena;
     ControlTable control;
-    Wake wake; // a posted slot, a control request or a poke ends the loop's wait
-    std::atomic<bool> poked{false};
+    Wake wake; // a posted slot or a poke ends the loop's wait
     std::jthread loop;
     std::atomic<bool> stopping{false};
     bool setup_ok = false, quarantined = false;

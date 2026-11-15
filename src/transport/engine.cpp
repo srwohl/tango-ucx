@@ -90,7 +90,7 @@ Engine::~Engine()
 void Engine::stop()
 {
     stopping = true;
-    wake.notify();
+    wake.poke();
     if(loop.joinable())
     {
         if(loop.get_id() == std::this_thread::get_id())
@@ -101,8 +101,7 @@ void Engine::stop()
 }
 void Engine::poke()
 {
-    poked.store(true);
-    wake.notify();
+    wake.poke();
 }
 void Engine::start()
 {
@@ -333,12 +332,11 @@ void Engine::run()
         }
         if(idle.due(work, now))
         {
-            // From here on a posted slot, a control request or a poke ends the wait. Any of them
-            // may have come before that, or the next slot may wait for its GPU event, which has
-            // no fd and is short: then the loop polls on.
+            // From here on a posted slot or a poke ends the wait. Either may have come before
+            // that, or the next slot may wait for its GPU event, which has no fd and is short:
+            // then the loop polls on. Everything but a slot pokes.
             wake.park();
-            bool posted = poked.exchange(false) || stopping.load() || begin_posted.load() ||
-                          control.pending() || (active && active->next_posted());
+            bool posted = wake.poked() || (active && active->next_posted());
             if(!posted)
                 Idle::wait(*worker, wake.fd(), busy() ? k_timer_ns : k_idle_ns);
             wake.unpark();

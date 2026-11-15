@@ -108,6 +108,17 @@ struct Wake
         if(parked.load())
             event.signal();
     }
+    // Work with no flag of its own for the loop to look at: a control request, a stop, a begin.
+    // The loop checks poked() after park, as for any other work.
+    void poke()
+    {
+        poke_flag.store(true);
+        notify();
+    }
+    bool poked()
+    {
+        return poke_flag.exchange(false);
+    }
     int fd() const noexcept
     {
         return event.fd();
@@ -115,7 +126,7 @@ struct Wake
 
   private:
     EventFd event;
-    std::atomic<bool> parked{false};
+    std::atomic<bool> parked{false}, poke_flag{false};
 };
 
 // The indices one thread hands another: slots granted, batches delivered, batches released. The
@@ -377,7 +388,7 @@ struct ControlEntry
 struct ControlTable
 {
     std::array<ControlEntry, 8> entries{};
-    Wake *wake = nullptr; // the loop's, which a posted request ends the wait of
+    Wake *wake = nullptr; // the loop's: a posted request pokes it
     ControlEntry *claim()
     {
         for(auto &e : entries)
@@ -394,9 +405,9 @@ struct ControlTable
         if(!e)
             return {wire::Busy};
         e->in = request;
-        e->state.store(ControlEntry::Posted); // sequentially consistent, as Wake asks
+        e->state.store(ControlEntry::Posted, std::memory_order_release);
         if(wake)
-            wake->notify();
+            wake->poke();
         if(!wait_until(e->replied, d))
         {
             // Not taken yet: nothing else will free the entry. Taken: the loop frees it.
@@ -411,12 +422,6 @@ struct ControlTable
         auto out = e->out;
         e->state.store(ControlEntry::Free, std::memory_order_release);
         return out;
-    }
-    // A request waits for the loop: checked after Wake::park, so no wake is lost.
-    bool pending() const
-    {
-        return std::ranges::any_of(entries, [](const ControlEntry &e)
-                                   { return e.state.load() == ControlEntry::Posted; });
     }
     template <class F> bool drain(F &&fn)
     {
