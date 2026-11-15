@@ -101,6 +101,7 @@ class GpuView;
 struct GpuStream;
 namespace transport
 {
+struct Engine;
 struct Pub;
 struct Rings;
 struct Sub;
@@ -139,20 +140,30 @@ class Slot
     bool active_ = false;
 };
 
+// Lives as long as the device: its UCX context, worker, progress thread and arena are kept
+// across publisher instances. Each instance has one description, its own instance ID and
+// sessions, and frame indices from 0. ucx_start, acquire, finish, health and description act
+// on the active instance.
 class Publisher
 {
   public:
+    explicit Publisher(PublisherLimits); // no instance until begin
+    // Publisher(limits), then begin(description).
     explicit Publisher(Description, PublisherLimits = {});
     Publisher(Publisher &&) noexcept;
     Publisher &operator=(Publisher &&) noexcept;
     Publisher(const Publisher &) = delete;
     Publisher &operator=(const Publisher &) = delete;
     ~Publisher();
+    // Finishes the active instance, waits until nothing of it is still being sent, and makes a
+    // new one. The earlier instance closes its sessions meanwhile, after their End. A refused
+    // description throws and leaves the active instance as it was.
+    void begin(Description);
     void ucx_start(); // slots are granted from here on; every and pull join before it
     std::optional<Slot> acquire(Deadline);
     void finish();
     Health health() const;
-    const Description &description() const;
+    Description description() const; // the active instance's; throws when there is none
 
   private:
     friend class Slot;
@@ -160,7 +171,7 @@ class Publisher
     friend std::string transport::handle(Publisher &, std::string_view);
     friend std::string transport::ucx_stream(const Publisher &);
     friend std::string transport::ucx_sessions(const Publisher &);
-    std::shared_ptr<transport::Pub> p_;
+    std::shared_ptr<transport::Engine> p_;
 };
 
 // The application's CUDA stream; null is the default stream.

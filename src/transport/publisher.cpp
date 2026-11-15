@@ -10,9 +10,13 @@
 #include <chrono>
 #include <cstring>
 #include <format>
+#include <mutex>
 #include <pthread.h>
 #include <stdexcept>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace TangoUcx::transport
 {
@@ -66,16 +70,23 @@ struct Observation
     bool source_failed = false;
     std::array<RowObservation, 64> rows{};
 };
+struct Engine;
+// One publisher instance: one description, its sessions, slots, records and grants. The engine
+// drives it on its progress thread; the device holds it through its slots.
 struct Pub final : Owner, std::enable_shared_from_this<Pub>
 {
+    std::shared_ptr<Engine> engine; // first, so it is released last
     Description description;
     PublisherLimits limits;
     std::uint64_t instance_id = 0;
     PublisherPlan plan;
-    std::unique_ptr<ucp::Context> context;
-    std::unique_ptr<ucp::Worker> worker;
-    Region source;
+    // The source ring: a region of the engine's arena, or this instance's own GPU memory.
+    std::byte *source_base = nullptr;
+    ucp_mem_h source_memh = nullptr;
+    Region gpu_source;
     std::shared_ptr<void> source_storage; // keeps GPU writes safe when a slot outlives Publisher
+    // The arena this instance still read when the next began: released with the instance.
+    Region kept_arena;
     std::vector<std::byte> records;
     PublisherOperations operations;
     std::unique_ptr<SourceSlot[]> slots;
@@ -89,28 +100,32 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::vector<std::uint8_t> range_pullers;
     std::uint8_t last_taker = 63;
     std::uint64_t slots_granted = 0, slots_routed = 0, next_frame_index = 0, skipped = 0;
-    std::int64_t last_timer_ns = 0;
     std::uint32_t scan = 0, failed_every = 0, blocked = 0, ordinals = 0;
     IndexRing grants{IndexRing::Fd::None}; // acquire sleeps on the queue; nobody polls a grant fd
-    ControlTable control;
     HealthCopy<Observation> health_copy;
     Topology topology;
     HealthCopy<Topology> topology_copy;
     std::int64_t last_topology_ns = 0;
-    std::jthread loop;
-    std::atomic<bool> started{false}, finishing{false}, stopping{false};
-    Wake wake; // a posted slot ends the loop's wait
-    bool ended = false, quarantined = false, setup_ok = false;
+    std::atomic<bool> started{false}, finishing{false};
+    bool ended = false, quarantined = false;
     bool source_failed = false;
-    std::promise<void> setup_done;
     std::shared_ptr<Pub> self_keep;
-    explicit Pub(Description, PublisherLimits);
-    ~Pub();
-    void start();
-    void stop();
-    void run();
-    void setup();
-    void shutdown();
+    Pub(std::shared_ptr<Engine>, Description, PublisherPlan);
+    void setup();        // on the progress thread, once the source ring is set
+    bool closed() const; // the publisher has stopped
+    std::byte *source_at(std::uint64_t offset) const
+    {
+        return source_base + offset;
+    }
+    bool next_posted() const;
+    // Nothing of this instance is being sent, nor can be: the device returned every slot it
+    // acquired, every send completed and every ready session was sent End.
+    bool quiet() const;
+    bool done() const; // ended, and every session closed
+    void retire_all();
+    void release_memory() noexcept; // on the progress thread: what is registered with UCX
+    void open(ControlEntry &);
+    void close(ControlEntry &);
     void publish_slot(std::uint32_t, std::optional<std::uint64_t>, std::optional<std::size_t>);
     void cancel_slot(std::uint32_t);
     void post(SourceSlot &);
@@ -122,7 +137,6 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     bool has_room(const PubRow &, std::uint64_t frames = 1, std::uint64_t grants = 1) const;
     PubRow *puller(std::uint64_t);
     wire::Status check_open(const wire::OpenMessage &) const;
-    bool control_pass();
     void unissue_grants();
     bool route_pass(std::int64_t);
     bool grant_pass();
@@ -139,11 +153,76 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     void quarantine_owner();
 };
 
+// What a publisher keeps for its whole life: the UCX context and worker, the progress thread,
+// the control table and the arena. It drives one active instance and the earlier instances that
+// still close their sessions (ADR 0001).
+struct Engine final : Owner, std::enable_shared_from_this<Engine>
+{
+    PublisherLimits limits;
+    std::unique_ptr<ucp::Context> context;
+    std::unique_ptr<ucp::Worker> worker;
+    std::uint32_t request_bytes = 0;
+    std::uint64_t max_header = 0;
+    bool memory_hooks = true;
+    // Registered once and faulted in, it holds the active instance's source ring. It is
+    // replaced only when a ring needs more, or when an instance that may still read it leaves.
+    Region arena;
+    ControlTable control;
+    Wake wake; // a posted slot, a control request or a poke ends the loop's wait
+    std::atomic<bool> poked{false};
+    std::jthread loop;
+    std::atomic<bool> stopping{false};
+    bool setup_ok = false, quarantined = false;
+    bool tainted = false; // an instance was quarantined: the worker may still hold its endpoints
+    std::promise<void> setup_done;
+    std::shared_ptr<Engine> self_keep;
+
+    // The progress thread's own.
+    std::shared_ptr<Pub> active;
+    std::vector<std::shared_ptr<Pub>> draining;
+    std::int64_t begin_since_ns = 0;
+    // The active instance, for every other thread.
+    mutable std::mutex current_lock;
+    std::shared_ptr<Pub> current;
+
+    struct BeginRequest
+    {
+        Description description;
+        PublisherPlan plan;
+        std::promise<void> done;
+    };
+    std::mutex begin_serial; // one begin at a time
+    std::mutex begin_lock;
+    std::shared_ptr<BeginRequest> begin_request;
+    bool begin_closed = false; // under begin_lock: shutdown has refused what is left
+    std::atomic<bool> begin_posted{false};
+
+    explicit Engine(PublisherLimits);
+    ~Engine();
+    void start();
+    void stop();
+    void run();
+    void setup();
+    void shutdown();
+    void poke(); // another thread made work for the loop
+    void begin(Description);
+    bool begin_pass(std::int64_t);
+    void make_instance(BeginRequest &);
+    bool control_pass();
+    bool busy() const;
+    Pub *owner_of(std::uint64_t session) const;
+    std::shared_ptr<Pub> instance() const;
+    void set_current(std::shared_ptr<Pub>);
+};
+
 namespace
 {
 constexpr std::int64_t k_close_ns = 2'000'000'000LL, k_quarantine_ns = 1'000'000'000LL;
 // How often eviction is checked and Health is sampled.
 constexpr std::int64_t k_timer_ns = 1'000'000LL;
+// The longest wait of a loop with no instance that has work: a poke, a control request or a
+// worker event ends it sooner.
+constexpr std::int64_t k_idle_ns = 100'000'000LL;
 std::int64_t now_ns()
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -192,11 +271,15 @@ void ep_error(void *arg, ucp_ep_h, ucs_status_t status)
 ucs_status_t on_credit(void *arg, const void *header, size_t header_bytes, void *, size_t,
                        const ucp_am_recv_param_t *)
 {
-    auto *publisher = static_cast<Pub *>(arg);
+    auto *engine = static_cast<Engine *>(arg);
     wire::CreditMessage credit_message;
     if(!wire::decode({static_cast<const std::byte *>(header), header_bytes}, credit_message))
         return UCS_OK;
 
+    // The instance that holds the session: the active one or one that is draining.
+    auto *publisher = engine->owner_of(credit_message.session);
+    if(!publisher)
+        return UCS_OK;
     const int row_index = publisher->find_row(credit_message.session);
     if(row_index < 0)
         return UCS_OK;
@@ -220,45 +303,45 @@ ucs_status_t on_credit(void *arg, const void *header, size_t header_bytes, void 
 }
 } // namespace
 
-Pub::Pub(Description description, PublisherLimits limits)
-    : description(std::move(description)), limits(limits)
+#ifndef MADV_POPULATE_WRITE
+#define MADV_POPULATE_WRITE 23 // Linux 5.14; an older kernel refuses it, and the pages are touched
+#endif
+namespace
 {
-    instance_id = (random64() >> 8) | 1;
+// Faults in every page of a new arena, so that no frame pays for it on the device's thread.
+// TODO(numa): this runs on the progress thread, so first touch puts the pages on the progress
+// core's NUMA node, not the node of the thread that writes the frames (Basler's grab thread) or
+// of the NIC that reads them. On one socket that is the same node. On several, choose the node
+// explicitly: a PublisherLimits field (e.g. arena_numa_node, defaulting to the node of
+// net_devices or progress_cpu), then mbind(MPOL_BIND) or set_mempolicy before this touch, and
+// report the result in Health's ring_numa_node, which sample_topology already measures. Measure
+// a two-socket host before deciding the default.
+void prefault(const Region &region) noexcept
+{
+    if(!region.base() || !region.bytes())
+        return;
+    auto page = std::uintptr_t(::sysconf(_SC_PAGESIZE));
+    auto begin = reinterpret_cast<std::uintptr_t>(region.base()), end = begin + region.bytes();
+    auto first = begin & ~(page - 1);
+    if(::madvise(reinterpret_cast<void *>(first), end - first, MADV_POPULATE_WRITE) == 0)
+        return;
+    for(auto at = begin; at < end; at = (at & ~(page - 1)) + page)
+        *reinterpret_cast<volatile std::byte *>(at) = std::byte{0};
+}
+} // namespace
 
-    // A maximum payload size makes this an opaque stream.
-    if(this->description.max_payload_bytes)
-        this->description.element = Element::Bytes;
-    if(!wire::valid_text(this->description.application_text))
-        throw std::invalid_argument("the application text is not UTF-8 or is over 2,048 bytes");
-}
-Pub::~Pub()
+Pub::Pub(std::shared_ptr<Engine> engine, Description description, PublisherPlan plan)
+    : engine(std::move(engine)), description(std::move(description)), plan(plan)
 {
-    stop();
+    limits = this->engine->limits;
+    instance_id = (random64() >> 8) | 1;
 }
-// Ends the loop and waits for it. The loop holds a reference to its publisher, so letting go of
-// the last handle does not end it.
-void Pub::stop()
+bool Pub::closed() const
 {
-    stopping = true;
-    if(loop.joinable())
-        loop.join();
-}
-void Pub::start()
-{
-    auto ready = setup_done.get_future();
-    loop = std::jthread(&Pub::run, shared_from_this());
-    // A refused setup: join here, or the loop may drop the last reference and join itself.
-    ready.wait();
-    if(!setup_ok)
-        loop.join();
-    ready.get();
+    return engine->stopping.load();
 }
 void Pub::setup()
 {
-    context = std::make_unique<ucp::Context>(limits.net_devices);
-    worker = std::make_unique<ucp::Worker>(*context);
-    auto request_bytes = context->request_bytes();
-    plan = plan_publisher(description, limits, request_bytes, worker->max_am_header());
     records.resize(plan.records_bytes);
     slots = std::make_unique<SourceSlot[]>(plan.slot_count);
     if(limits.gpu >= 0)
@@ -267,13 +350,13 @@ void Pub::setup()
         source_storage = gpu_storage(limits.gpu, plan.source_bytes, false, events);
         for(std::size_t i = 0; i < events.size(); ++i)
             slots[i].event = events[i];
-        source =
-            Region::adopt(context->get(), source_storage, plan.source_bytes, UCS_MEMORY_TYPE_CUDA);
+        gpu_source = Region::adopt(engine->context->get(), source_storage, plan.source_bytes,
+                                   UCS_MEMORY_TYPE_CUDA);
+        source_base = gpu_source.base();
+        source_memh = gpu_source.memh();
     }
-    else
-        source = Region::allocate(context->get(), plan.source_bytes);
     order.resize(plan.slot_count);
-    operations.allocate(this, plan, request_bytes);
+    operations.allocate(this, plan, engine->request_bytes);
     grants.reserve(plan.slot_count);
     range_pullers.assign(plan.slot_count + 2,
                          0); // the grants outstanding span fewer ranges than this
@@ -282,11 +365,244 @@ void Pub::setup()
         rows[row_index].pub = this;
         rows[row_index].row = std::uint8_t(row_index);
     }
-    worker->set_am(wire::Credit, on_credit, this);
     publish_health(); // placement is available even before the first session opens
+}
+bool Pub::next_posted() const
+{
+    return slots_routed < slots_granted &&
+           slots[order[slots_routed % plan.slot_count]].posted.load();
+}
+bool Pub::quiet() const
+{
+    if(!ended)
+        return false;
+    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+    {
+        const auto &row = rows[row_index];
+        if(row.used && (row.in_flight || (row.ready && !row.end_sent)))
+            return false;
+    }
+    return true;
+}
+bool Pub::done() const
+{
+    return ended && std::ranges::none_of(rows, &PubRow::used);
+}
+void Pub::retire_all()
+{
+    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+        if(rows[row_index].used && !rows[row_index].closing)
+        {
+            retire(row_index, wire::Closing, false);
+            rows[row_index].end_due = true; // the subscriber learns why its session ended
+        }
+}
+void Pub::release_memory() noexcept
+{
+    source_base = nullptr;
+    source_memh = nullptr;
+    gpu_source.unmap();
+    kept_arena.unmap();
+}
+
+Engine::Engine(PublisherLimits limits) : limits(std::move(limits))
+{
+    check_limits(this->limits);
+    control.wake = &wake;
+}
+Engine::~Engine()
+{
+    stop();
+}
+// Ends the loop and waits for it. The loop holds a reference to its engine, so letting go of
+// the last handle does not end it.
+void Engine::stop()
+{
+    stopping = true;
+    wake.notify();
+    if(loop.joinable())
+    {
+        if(loop.get_id() == std::this_thread::get_id())
+            loop.detach(); // the loop let go of the last reference: it is ending already
+        else
+            loop.join();
+    }
+}
+void Engine::poke()
+{
+    poked.store(true);
+    wake.notify();
+}
+void Engine::start()
+{
+    auto ready = setup_done.get_future();
+    loop = std::jthread(&Engine::run, shared_from_this());
+    // A refused setup: join here, or the loop may drop the last reference and join itself.
+    ready.wait();
+    if(!setup_ok)
+        loop.join();
+    ready.get();
+}
+void Engine::setup()
+{
+    context = std::make_unique<ucp::Context>(limits.net_devices);
+    worker = std::make_unique<ucp::Worker>(*context);
+    request_bytes = context->request_bytes();
+    max_header = worker->max_am_header();
+    memory_hooks = context->memory_hooks();
+    worker->set_am(wire::Credit, on_credit, this);
     setup_ok = true;
 }
-void Pub::run()
+std::shared_ptr<Pub> Engine::instance() const
+{
+    std::lock_guard lock(current_lock);
+    return current;
+}
+void Engine::set_current(std::shared_ptr<Pub> instance)
+{
+    std::lock_guard lock(current_lock);
+    current.swap(instance); // the previous one is released after the lock
+}
+Pub *Engine::owner_of(std::uint64_t session) const
+{
+    if(active && active->find_row(session) >= 0)
+        return active.get();
+    for(const auto &instance : draining)
+        if(instance->find_row(session) >= 0)
+            return instance.get();
+    return nullptr;
+}
+// Short waits while an instance publishes, has sessions or is draining: eviction, End and
+// teardown run on the timer. Otherwise only a poke, a control request or a worker event ends it.
+bool Engine::busy() const
+{
+    if(!draining.empty())
+        return true;
+    if(!active)
+        return false;
+    if(active->started.load(std::memory_order_acquire) && !active->ended)
+        return true;
+    return std::ranges::any_of(active->rows, &PubRow::used);
+}
+// Validated on the caller's thread, so a refused description leaves the active instance alone.
+void Engine::begin(Description description)
+{
+    if(description.max_payload_bytes) // a maximum payload size makes this an opaque stream
+        description.element = Element::Bytes;
+    if(!wire::valid_text(description.application_text))
+        throw std::invalid_argument("the application text is not UTF-8 or is over 2,048 bytes");
+    auto request = std::make_shared<BeginRequest>();
+    request->plan = plan_publisher(description, limits, request_bytes, max_header);
+    request->description = std::move(description);
+    auto done = request->done.get_future();
+    std::lock_guard serial(begin_serial);
+    // A device thread waiting in acquire returns at once.
+    if(auto previous = instance())
+    {
+        previous->finishing.store(true, std::memory_order_release);
+        previous->grants.signal();
+    }
+    {
+        std::lock_guard lock(begin_lock);
+        if(begin_closed)
+            throw std::logic_error("the publisher has closed");
+        begin_request = request;
+    }
+    begin_posted.store(true);
+    poke();
+    done.get();
+}
+// Finishes the active instance, waits until it is quiet and moves it to the draining ones, then
+// makes the requested instance. One that is still not quiet after k_close_ns may still be read
+// by a send: it takes the arena with it, and the new instance gets another.
+bool Engine::begin_pass(std::int64_t now)
+{
+    if(!begin_posted.load())
+        return false;
+    if(active)
+    {
+        if(!active->finishing.load())
+        {
+            active->finishing.store(true, std::memory_order_release);
+            active->grants.signal();
+        }
+        if(!begin_since_ns)
+            begin_since_ns = now;
+        bool quiet = active->quiet();
+        if(!quiet && now - begin_since_ns <= k_close_ns)
+            return false;
+        if(limits.gpu < 0 && (!quiet || active->quarantined))
+            active->kept_arena = std::move(arena);
+        active->retire_all();
+        draining.push_back(std::move(active));
+        active.reset();
+        set_current(nullptr);
+    }
+    begin_since_ns = 0;
+    std::shared_ptr<BeginRequest> request;
+    {
+        std::lock_guard lock(begin_lock);
+        request = std::move(begin_request);
+        begin_posted.store(false);
+    }
+    try
+    {
+        make_instance(*request);
+        request->done.set_value();
+    }
+    catch(...)
+    {
+        request->done.set_exception(std::current_exception());
+    }
+    return true;
+}
+void Engine::make_instance(BeginRequest &request)
+{
+    auto instance =
+        std::make_shared<Pub>(shared_from_this(), std::move(request.description), request.plan);
+    if(limits.gpu < 0)
+    {
+        // Only a quiet instance can be draining with this arena, and it sends no more.
+        if(arena.bytes() < instance->plan.source_bytes)
+        {
+            arena.unmap();
+            arena = Region::allocate(context->get(), instance->plan.source_bytes);
+            prefault(arena);
+        }
+        instance->source_base = arena.base();
+        instance->source_memh = arena.memh();
+    }
+    instance->setup();
+    active = instance;
+    set_current(std::move(instance));
+}
+// Opens go to the active instance, which checks the instance ID. Closes go to the instance that
+// holds the session.
+bool Engine::control_pass()
+{
+    return control.drain(
+        [&](ControlEntry &entry)
+        {
+            if(!entry.in.open)
+            {
+                if(auto *owner = owner_of(entry.in.close.session))
+                    owner->close(entry);
+                else
+                    control.reply(entry, {wire::UnknownSession});
+                return;
+            }
+            if(active)
+            {
+                active->open(entry);
+                return;
+            }
+            bool earlier = std::ranges::any_of(
+                draining, [&](const auto &instance)
+                { return instance->instance_id == entry.in.open->instance_id; });
+            control.reply(entry, {earlier ? wire::Finished : wire::InstanceId});
+        });
+}
+void Engine::run()
 {
     // What a thread list and a profile show: it tells the loop's CPU time from the device's.
     pthread_setname_np(pthread_self(), "tango-ucx-pub");
@@ -306,33 +622,54 @@ void Pub::run()
         catch(...)
         {
         };
-        shutdown(); // no session was opened, so this only releases what setup created
+        shutdown(); // no instance was made, so this only releases what setup created
         return;
     }
     Idle idle;
+    std::int64_t last_timer_ns = 0;
     while(!stopping.load(std::memory_order_acquire))
     {
         auto now = now_ns();
         bool work = control_pass();
-        work |= route_pass(now);
+        work |= begin_pass(now);
+        if(active)
+            work |= active->route_pass(now);
+        for(auto &instance : draining)
+            work |= instance->route_pass(now);
         work |= worker->progress() != 0;
-        work |= grant_pass();
-        work |= retire_pass(now);
+        if(active)
+        {
+            work |= active->grant_pass();
+            work |= active->retire_pass(now);
+        }
+        for(auto &instance : draining)
+            work |= instance->retire_pass(now);
+        work |= std::erase_if(draining,
+                              [](const std::shared_ptr<Pub> &instance)
+                              {
+                                  if(instance->quarantined)
+                                      return true; // it keeps what it holds
+                                  if(!instance->done())
+                                      return false;
+                                  instance->release_memory();
+                                  return true;
+                              }) != 0;
         if(now - last_timer_ns >= k_timer_ns)
         {
             last_timer_ns = now;
-            timer_pass(now);
+            if(active)
+                active->timer_pass(now);
         }
         if(idle.due(work, now))
         {
-            // From here on a posted slot ends the wait (post). The next slot to route may have
-            // been posted before that, or be waiting for its GPU event, which has no fd and is
-            // short: then the loop polls on. The wait is no longer than the timer's turn.
+            // From here on a posted slot, a control request or a poke ends the wait. Any of them
+            // may have come before that, or the next slot may wait for its GPU event, which has
+            // no fd and is short: then the loop polls on.
             wake.park();
-            bool next_posted = slots_routed < slots_granted &&
-                               slots[order[slots_routed % plan.slot_count]].posted.load();
-            if(!next_posted)
-                Idle::wait(*worker, wake.fd(), k_timer_ns);
+            bool posted = poked.exchange(false) || stopping.load() || begin_posted.load() ||
+                          control.pending() || (active && active->next_posted());
+            if(!posted)
+                Idle::wait(*worker, wake.fd(), busy() ? k_timer_ns : k_idle_ns);
             wake.unpark();
         }
     }
@@ -403,19 +740,19 @@ std::span<std::byte> Pub::payload(std::uint32_t slot_index)
         throw std::logic_error("a GPU source slot uses gpu_payload on its GPU stream");
     if(slot_index >= plan.slot_count)
         throw std::out_of_range("source slot");
-    return {source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
+    return {source_at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
             std::size_t(plan.sizes.frame_bytes)};
 }
 void *Pub::gpu_payload(std::uint32_t slot_index, GpuStream stream)
 {
-    if(limits.gpu < 0 || stopping.load())
+    if(limits.gpu < 0 || closed())
         throw std::logic_error("gpu_payload needs an active GPU source slot");
     auto &slot = slots[slot_index];
     if(slot.gpu_accessed && slot.gpu_stream.handle != stream.handle)
         throw std::logic_error("all writes to a source slot use its GPU stream");
     slot.gpu_stream = stream;
     slot.gpu_accessed = true;
-    return source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes);
+    return source_at(std::uint64_t(slot_index) * plan.sizes.frame_bytes);
 }
 std::span<std::byte> Pub::fields(std::uint32_t slot_index)
 {
@@ -430,7 +767,7 @@ void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> ti
 {
     if(slot_index >= plan.slot_count)
         return;
-    if(stopping.load())
+    if(closed())
         throw std::logic_error("the publisher has closed");
     if(bytes.has_value() != plan.sizes.opaque)
         throw std::logic_error(plan.sizes.opaque ? "an opaque stream publishes with publish_bytes"
@@ -467,7 +804,7 @@ void Pub::cancel_slot(std::uint32_t slot_index)
 void Pub::post(SourceSlot &slot)
 {
     slot.posted.store(true);
-    wake.notify();
+    engine->wake.notify();
 }
 
 void Pub::send_control(std::uint32_t row_index, OpKind kind, std::uint8_t message_id,
@@ -545,11 +882,11 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     // An eager frame cannot land in GPU memory.
     auto params = prepare(operation, row.gpu || limits.gpu >= 0 ? UCP_AM_SEND_FLAG_RNDV : 0);
     params.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
-    params.memh = source.memh();
+    params.memh = source_memh;
     params.memory_type = limits.gpu >= 0 ? UCS_MEMORY_TYPE_CUDA : UCS_MEMORY_TYPE_HOST;
     complete_if_done(operation,
                      ucp_am_send_nbx(row.ep, wire::Frame, header.data(), header_bytes,
-                                     source.at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
+                                     source_at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
                                      slot.payload_bytes, &params));
 }
 void Pub::on_send(OpMeta *operation, ucs_status_t status)
@@ -651,88 +988,85 @@ wire::Status Pub::check_open(const wire::OpenMessage &open_message) const
         return wire::Range; // every puller of a set has the same range
     return wire::Ok;
 }
-bool Pub::control_pass()
+void Pub::close(ControlEntry &entry)
 {
-    return control.drain(
-        [&](ControlEntry &entry)
-        {
-            if(!entry.in.open)
-            {
-                int row_index = find_row(entry.in.close.session);
-                if(row_index < 0 || rows[row_index].close_reply)
-                {
-                    control.reply(entry, {wire::UnknownSession});
-                    return;
-                }
-                rows[row_index].close_reply = &entry;
-                retire(row_index, wire::Closing, false);
-                return;
-            }
-            const auto &open_message = *entry.in.open;
-            auto status = check_open(open_message);
-            std::uint32_t row_index = 0;
-            while(row_index < plan.row_count && rows[row_index].used)
-                ++row_index;
-            if(status == wire::Ok && row_index == plan.row_count)
-                status = wire::NoSession;
-            if(status != wire::Ok)
-            {
-                control.reply(entry, {status});
-                return;
-            }
-            auto &row = rows[row_index];
-            row = PubRow{};
-            row.pub = this;
-            row.row = std::uint8_t(row_index);
-            row.ordinal = ++ordinals;
-            row.used = true;
-            row.every = open_message.every;
-            row.pull = open_message.range != 0;
-            row.ring_depth = open_message.depth;
-            row.ring_bytes = plan.sizes.opaque ? open_message.ring_bytes : 0;
-            row.gpu = open_message.gpu;
-            row.session = open_message.session;
-            row.min_interval_ns =
-                std::int64_t(std::min<std::uint64_t>(open_message.min_interval_ns, INT64_MAX));
-            row.label.set({open_message.label.data(), open_message.label_bytes});
-            try
-            {
-                row.ep = worker->endpoint({open_message.address.data(), open_message.address_bytes},
-                                          &row, ep_error);
-            }
-            catch(const std::exception &error)
-            {
-                row.used = false;
-                wire::Reply refused{wire::Endpoint};
-                std::string_view why = error.what();
-                refused.detail_bytes = std::uint8_t(std::min(why.size(), refused.detail.size()));
-                std::memcpy(refused.detail.data(), why.data(), refused.detail_bytes);
-                control.reply(entry, refused);
-                return;
-            }
-            // The subscriber set up its ring and handlers before it sent Open, so it is ready now.
-            row.ready = true;
-            row.transport.n = std::uint8_t(worker->transports(row.ep, row.transport.c));
-            row.network_devices = endpoint_network_devices(row.ep);
-            last_topology_ns = 0;
-            ready_mask |= std::uint64_t{1} << row_index;
-            if(open_message.every)
-                every_mask |= std::uint64_t{1} << row_index;
-            if(open_message.range)
-            {
-                pull_mask |= std::uint64_t{1} << row_index;
-                range_frames = open_message.range;
-            }
-            auto encoded = wire::encode(wire::SessionMessage{row.session});
-            send_control(row_index, OpKind::Ready, wire::Ready, encoded);
-            wire::Reply reply{wire::Ok};
-            auto address = worker->address();
-            reply.address_bytes = std::uint16_t(address.size());
-            std::memcpy(reply.address.data(), address.data(), address.size());
-            // The subscriber gave up waiting for the reply, so nobody will use the session.
-            if(!control.reply(entry, reply))
-                retire(row_index, wire::Closing, false);
-        });
+    int row_index = find_row(entry.in.close.session);
+    if(row_index < 0 || rows[row_index].close_reply)
+    {
+        engine->control.reply(entry, {wire::UnknownSession});
+        return;
+    }
+    rows[row_index].close_reply = &entry;
+    retire(row_index, wire::Closing, false);
+}
+void Pub::open(ControlEntry &entry)
+{
+    auto &control = engine->control;
+    auto &worker = engine->worker;
+    const auto &open_message = *entry.in.open;
+    auto status = check_open(open_message);
+    std::uint32_t row_index = 0;
+    while(row_index < plan.row_count && rows[row_index].used)
+        ++row_index;
+    if(status == wire::Ok && row_index == plan.row_count)
+        status = wire::NoSession;
+    if(status != wire::Ok)
+    {
+        control.reply(entry, {status});
+        return;
+    }
+    auto &row = rows[row_index];
+    row = PubRow{};
+    row.pub = this;
+    row.row = std::uint8_t(row_index);
+    row.ordinal = ++ordinals;
+    row.used = true;
+    row.every = open_message.every;
+    row.pull = open_message.range != 0;
+    row.ring_depth = open_message.depth;
+    row.ring_bytes = plan.sizes.opaque ? open_message.ring_bytes : 0;
+    row.gpu = open_message.gpu;
+    row.session = open_message.session;
+    row.min_interval_ns =
+        std::int64_t(std::min<std::uint64_t>(open_message.min_interval_ns, INT64_MAX));
+    row.label.set({open_message.label.data(), open_message.label_bytes});
+    try
+    {
+        row.ep = worker->endpoint({open_message.address.data(), open_message.address_bytes}, &row,
+                                  ep_error);
+    }
+    catch(const std::exception &error)
+    {
+        row.used = false;
+        wire::Reply refused{wire::Endpoint};
+        std::string_view why = error.what();
+        refused.detail_bytes = std::uint8_t(std::min(why.size(), refused.detail.size()));
+        std::memcpy(refused.detail.data(), why.data(), refused.detail_bytes);
+        control.reply(entry, refused);
+        return;
+    }
+    // The subscriber set up its ring and handlers before it sent Open, so it is ready now.
+    row.ready = true;
+    row.transport.n = std::uint8_t(worker->transports(row.ep, row.transport.c));
+    row.network_devices = endpoint_network_devices(row.ep);
+    last_topology_ns = 0;
+    ready_mask |= std::uint64_t{1} << row_index;
+    if(open_message.every)
+        every_mask |= std::uint64_t{1} << row_index;
+    if(open_message.range)
+    {
+        pull_mask |= std::uint64_t{1} << row_index;
+        range_frames = open_message.range;
+    }
+    auto encoded = wire::encode(wire::SessionMessage{row.session});
+    send_control(row_index, OpKind::Ready, wire::Ready, encoded);
+    wire::Reply reply{wire::Ok};
+    auto address = worker->address();
+    reply.address_bytes = std::uint16_t(address.size());
+    std::memcpy(reply.address.data(), address.data(), address.size());
+    // The subscriber gave up waiting for the reply, so nobody will use the session.
+    if(!control.reply(entry, reply))
+        retire(row_index, wire::Closing, false);
 }
 // Takes back the grants the device never picked up, after finish(). The grant ring is first in,
 // first out, so the grants still in it are the newest. Their slots become free, and the room
@@ -956,7 +1290,7 @@ bool Pub::retire_pass(std::int64_t now)
         {
             if(row.close_reply)
             {
-                control.reply(*row.close_reply, {wire::Ok});
+                engine->control.reply(*row.close_reply, {wire::Ok});
                 row.close_reply = nullptr;
             }
             row.used = false;
@@ -1002,7 +1336,7 @@ void Pub::publish_health()
     if(!last_topology_ns || now - last_topology_ns >= 1'000'000'000LL)
     {
         last_topology_ns = now;
-        sample_topology(topology, limits.gpu >= 0 ? nullptr : source.base(), source.bytes());
+        sample_topology(topology, limits.gpu >= 0 ? nullptr : source_base, plan.source_bytes);
         topology.network_devices.clear();
         for(const auto &row : rows)
             if(row.used)
@@ -1024,7 +1358,7 @@ void Pub::publish_health()
         observation.slots_free += !slot.held && slot.sends == 0;
         observation.slots_held += slot.held;
     }
-    observation.memory_hooks = context->memory_hooks();
+    observation.memory_hooks = engine->memory_hooks;
     // The frames a row can still be granted: rows of its tables and, in a packed ring, bytes.
     auto room = [&](const PubRow &row) -> std::uint64_t
     {
@@ -1059,32 +1393,58 @@ void Pub::quarantine_owner()
     if(quarantined)
         return;
     quarantined = true;
+    engine->tainted = true;
     self_keep = shared_from_this();
     quarantine().keep(*this, plan.charge);
 }
-void Pub::shutdown()
+// Every session of every instance is retired and closed within one bound. What cannot be shown
+// safe to release, because a session did not close or an instance was quarantined, is kept.
+void Engine::shutdown()
 {
-    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-        if(rows[row_index].used && !rows[row_index].closing)
-        {
-            retire(row_index, wire::Closing, false);
-            rows[row_index].end_due = true; // the subscriber learns why its session ended
-        }
-    auto in_use = [&] { return std::ranges::any_of(rows, &PubRow::used); };
+    {
+        std::lock_guard lock(begin_lock);
+        begin_closed = true;
+        if(begin_request)
+            begin_request->done.set_exception(
+                std::make_exception_ptr(std::logic_error("the publisher has closed")));
+        begin_request.reset();
+        begin_posted.store(false);
+    }
+    if(active)
+        draining.push_back(std::move(active));
+    active.reset();
+    set_current(nullptr);
+    for(auto &instance : draining)
+        instance->retire_all();
+    auto in_use = [&]
+    {
+        return std::ranges::any_of(draining, [](const auto &instance)
+                                   { return std::ranges::any_of(instance->rows, &PubRow::used); });
+    };
     auto deadline = now_ns() + k_close_ns + k_quarantine_ns;
-    while(in_use() && now_ns() < deadline)
+    while(worker && in_use() && now_ns() < deadline)
     {
         control_pass();
         worker->progress();
-        retire_pass(now_ns());
+        for(auto &instance : draining)
+            if(!instance->quarantined)
+                instance->retire_pass(now_ns());
         std::this_thread::yield();
     }
-    if(in_use())
+    if(in_use() || tainted)
     {
-        quarantine_owner();
+        if(!quarantined)
+        {
+            quarantined = true;
+            self_keep = shared_from_this();
+            quarantine().keep(*this, arena.bytes());
+        }
         return;
     }
-    source.unmap();
+    for(auto &instance : draining)
+        instance->release_memory();
+    draining.clear(); // an instance a slot still holds keeps the engine, not its memory
+    arena.unmap();
     if(worker)
         worker->destroy();
     if(context)
@@ -1124,13 +1484,13 @@ Slot::~Slot()
 }
 std::span<std::byte> Slot::payload()
 {
-    if(auto pub = active_ ? state_ : nullptr; pub && !pub->stopping.load())
+    if(auto pub = active_ ? state_ : nullptr; pub && !pub->closed())
         return pub->payload(index_);
     return {};
 }
 std::span<std::byte> Slot::fields()
 {
-    if(auto pub = active_ ? state_ : nullptr; pub && !pub->stopping.load())
+    if(auto pub = active_ ? state_ : nullptr; pub && !pub->closed())
         return pub->fields(index_);
     return {};
 }
@@ -1164,10 +1524,15 @@ void Slot::publish_bytes(std::size_t bytes, std::optional<std::uint64_t> timesta
     active_ = false;
     state_.reset();
 }
-Publisher::Publisher(Description description, PublisherLimits limits)
-    : p_(std::make_shared<transport::Pub>(std::move(description), limits))
+Publisher::Publisher(PublisherLimits limits)
+    : p_(std::make_shared<transport::Engine>(std::move(limits)))
 {
     p_->start();
+}
+// Constructed once the delegated constructor returns: a refused description stops the engine.
+Publisher::Publisher(Description description, PublisherLimits limits) : Publisher(std::move(limits))
+{
+    begin(std::move(description));
 }
 Publisher::Publisher(Publisher &&) noexcept = default;
 Publisher &Publisher::operator=(Publisher &&other) noexcept
@@ -1185,35 +1550,50 @@ Publisher::~Publisher()
     if(p_)
         p_->stop();
 }
+void Publisher::begin(Description description)
+{
+    if(!p_)
+        throw std::logic_error("moved publisher");
+    p_->begin(std::move(description));
+}
 std::optional<Slot> Publisher::acquire(Deadline deadline)
 {
-    if(!p_ || p_->finishing.load())
+    auto pub = p_ ? p_->instance() : nullptr;
+    if(!pub || pub->finishing.load())
         return {};
     int slot_index =
-        p_->grants.pop_until(deadline, [&] { return p_->finishing.load() || p_->stopping.load(); });
+        pub->grants.pop_until(deadline, [&] { return pub->finishing.load() || pub->closed(); });
     if(slot_index < 0)
         return {};
-    return Slot(p_, slot_index);
+    return Slot(std::move(pub), slot_index);
 }
 // No slot is granted before this, and no every Open is accepted after it.
 void Publisher::ucx_start()
 {
-    if(p_)
-        p_->started.store(true, std::memory_order_release);
+    if(auto pub = p_ ? p_->instance() : nullptr)
+    {
+        pub->started.store(true, std::memory_order_release);
+        p_->poke();
+    }
 }
 void Publisher::finish()
 {
-    if(p_)
+    if(auto pub = p_ ? p_->instance() : nullptr)
     {
-        p_->finishing.store(true, std::memory_order_release);
-        p_->grants.signal();
+        pub->finishing.store(true, std::memory_order_release);
+        pub->grants.signal();
+        p_->poke();
     }
 }
 Health Publisher::health() const
 {
     if(!p_)
         return {};
-    auto observation = p_->health_copy.read();
+    auto pub = p_->instance();
+    if(!pub)
+        return {.quarantined_bytes = transport::quarantine().total.load(),
+                .memory_hooks = p_->memory_hooks};
+    auto observation = pub->health_copy.read();
     Health result{.frames = observation.frames,
                   .skipped = observation.skipped,
                   .failed_every = observation.failed_every,
@@ -1223,8 +1603,8 @@ Health Publisher::health() const
                   .slots_held = observation.slots_held,
                   .quarantined_bytes = transport::quarantine().total.load(),
                   .memory_hooks = observation.memory_hooks,
-                  .started = p_->started.load(std::memory_order_acquire),
-                  .topology = p_->topology_copy.read()};
+                  .started = pub->started.load(std::memory_order_acquire),
+                  .topology = pub->topology_copy.read()};
     if(observation.source_failed)
         result.failure = "a GPU source event failed; its memory cannot be reused";
     for(const auto &row : std::span(observation.rows).first(observation.count))
@@ -1242,11 +1622,14 @@ Health Publisher::health() const
     }
     return result;
 }
-const Description &Publisher::description() const
+Description Publisher::description() const
 {
     if(!p_)
         throw std::logic_error("moved publisher");
-    return p_->description;
+    auto pub = p_->instance();
+    if(!pub)
+        throw std::logic_error("no publisher instance: begin has not been called");
+    return pub->description;
 }
 } // namespace TangoUcx
 
@@ -1261,21 +1644,31 @@ std::string handle(Publisher &publisher, std::string_view document)
     return wire::format(publisher.p_->control.call(request, std::chrono::steady_clock::now() +
                                                                 std::chrono::seconds(3)));
 }
+namespace
+{
+std::shared_ptr<Pub> required_instance(const std::shared_ptr<Engine> &p)
+{
+    if(!p)
+        throw std::logic_error("moved publisher");
+    auto pub = p->instance();
+    if(!pub)
+        throw std::runtime_error("the publisher has no instance: none has begun, or the next "
+                                 "is being made");
+    return pub;
+}
+} // namespace
 std::string ucx_stream(const Publisher &publisher)
 {
-    if(!publisher.p_)
-        throw std::logic_error("moved publisher");
-    return wire::format(wire::StreamMessage{publisher.p_->instance_id, publisher.p_->description,
-                                            publisher.p_->limits.allow_every,
-                                            publisher.p_->limits.max_sessions});
+    auto pub = required_instance(publisher.p_);
+    return wire::format(wire::StreamMessage{pub->instance_id, pub->description,
+                                            pub->limits.allow_every, pub->limits.max_sessions});
 }
 // Formatted on the calling thread, from the loop's fixed Health copy.
 std::string ucx_sessions(const Publisher &publisher)
 {
-    if(!publisher.p_)
-        throw std::logic_error("moved publisher");
-    auto observation = publisher.p_->health_copy.read();
-    wire::SessionsMessage sessions_message{publisher.p_->instance_id, {}, observation.missing};
+    auto pub = required_instance(publisher.p_);
+    auto observation = pub->health_copy.read();
+    wire::SessionsMessage sessions_message{pub->instance_id, {}, observation.missing};
     for(const auto &row : std::span(observation.rows).first(observation.count))
         sessions_message.sessions.push_back(
             {row.ordinal, std::string(row.label.view()), row.every, row.retiring, row.depth,

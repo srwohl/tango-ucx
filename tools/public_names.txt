@@ -21,6 +21,7 @@ PublisherLimits::gpu
 PublisherLimits::progress_cpu
 PublisherLimits::net_devices
 Publisher
+Publisher::begin
 Publisher::ucx_start
 Publisher::acquire
 Publisher::finish
