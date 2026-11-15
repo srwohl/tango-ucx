@@ -149,6 +149,22 @@ bool Pub::has_room(const PubRow &row, std::uint64_t frames, std::uint64_t grants
            (!row.ring_bytes || ring_room(row.sent_bytes - row.credited_bytes, reserved + grants - 1,
                                          plan.sizes.frame_bytes, row.ring_bytes));
 }
+std::uint64_t LatestSessions::takers(const Pub &pub, const SourceSlot &slot, std::int64_t now) const
+{
+    std::uint64_t taken = 0;
+    for(auto left = mask; left; left &= left - 1)
+    {
+        auto row_index = std::countr_zero(left);
+        const auto &row = pub.rows[row_index];
+        if(row.sent - row.credited < row.ring_depth && row.in_flight == 0 &&
+           now - row.last_send_ns >= row.min_interval_ns &&
+           (!row.ring_bytes || place(row.sent_bytes, slot.payload_bytes, row.ring_bytes) +
+                                       slot.payload_bytes - row.credited_bytes <=
+                                   row.ring_bytes))
+            taken |= std::uint64_t{1} << row_index;
+    }
+    return taken;
+}
 int EverySessions::blocking(const Pub &pub) const
 {
     for(auto left = mask; left; left &= left - 1)
@@ -411,6 +427,7 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     if(pull_mask & bit && !row.end_sent)
         missing += row.sent - row.credited;
     every.remove(row_index);
+    latest.remove(row_index);
     pull_mask &= ~bit;
     // With no pullers left before the start, clear the range. The stream then has no pull set.
     if(!pull_mask && !started.load(std::memory_order_acquire))
@@ -514,11 +531,13 @@ void Pub::open(ControlEntry &entry)
     ready_mask |= std::uint64_t{1} << row_index;
     if(open_message.every)
         every.add(row_index);
-    if(open_message.range)
+    else if(open_message.range)
     {
         pull_mask |= std::uint64_t{1} << row_index;
         range_frames = open_message.range;
     }
+    else
+        latest.add(row_index);
     auto encoded = wire::encode(wire::SessionMessage{row.session});
     send_control(row_index, OpKind::Ready, wire::Ready, encoded);
     wire::Reply reply{wire::Ok};
@@ -546,12 +565,12 @@ void Pub::unissue_grants()
     slots_granted -= queued;
 }
 
-// Every sessions are all ready sessions, and a grant reserves at most one puller, so the pullers
-// together hold no more than the grants not yet routed.
+// Every and latest sessions are all ready sessions, and a grant reserves at most one puller, so the
+// pullers together hold no more than the grants not yet routed.
 void Pub::check_reservations() const
 {
 #ifndef NDEBUG
-    assert((every.mask & ~ready_mask) == 0);
+    assert(((every.mask | latest.mask) & ~ready_mask) == 0);
     std::uint64_t pulled = 0;
     for(auto left = pull_mask; left; left &= left - 1)
         pulled += rows[std::countr_zero(left)].reserved;
@@ -608,35 +627,18 @@ bool Pub::route_pass(std::int64_t now)
                 if(pull_mask >> row_index & 1 && has_room(rows[row_index]))
                     to_puller = &rows[row_index];
             missing += range_frames && !to_puller;
-            std::uint64_t recipients = 0;
-            for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+            // Every sessions and the puller had room reserved when the slot was granted.
+            auto takers = latest.takers(*this, slot, now);
+            auto recipients = every.mask | takers;
+            if(to_puller && to_puller->ready && !to_puller->closing)
+                recipients |= std::uint64_t{1} << to_puller->row;
+            for(auto left = latest.mask & ~takers; left; left &= left - 1)
             {
-                auto bit = std::uint64_t{1} << row_index;
-                auto &row = rows[row_index];
-                if(!row.ready || row.closing)
-                    continue;
-                if(every.has(row_index) || &row == to_puller)
-                    recipients |= bit; // room was reserved for it when the slot was granted
-                else if(!row.pull && row.sent - row.credited < row.ring_depth &&
-                        row.in_flight == 0 && now - row.last_send_ns >= row.min_interval_ns &&
-                        (!row.ring_bytes ||
-                         place(row.sent_bytes, slot.payload_bytes, row.ring_bytes) +
-                                 slot.payload_bytes - row.credited_bytes <=
-                             row.ring_bytes))
-                    recipients |= bit;
+                ++skipped;
+                ++rows[std::countr_zero(left)].skipped;
             }
-            for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-            {
-                auto bit = std::uint64_t{1} << row_index;
-                if(ready_mask & bit && !((every.mask | pull_mask) & bit) && !(recipients & bit))
-                {
-                    ++skipped;
-                    ++rows[row_index].skipped;
-                }
-            }
-            for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-                if(recipients & (std::uint64_t{1} << row_index))
-                    send_frame(slot_index, row_index, now);
+            for(auto left = recipients; left; left &= left - 1)
+                send_frame(slot_index, std::countr_zero(left), now);
         }
         else
         {

@@ -93,6 +93,23 @@ struct EverySessions
     }
     int blocking(const Pub &) const; // the first row with no room for one more grant, or -1
 };
+struct SourceSlot;
+// The latest sessions of an instance (ADR 0002): each takes a frame when it has room and is due,
+// and skips it otherwise. They never gate a grant.
+struct LatestSessions
+{
+    std::uint64_t mask = 0;
+    void add(std::uint32_t row)
+    {
+        mask |= std::uint64_t{1} << row;
+    }
+    void remove(std::uint32_t row)
+    {
+        mask &= ~(std::uint64_t{1} << row);
+    }
+    // The rows that take this frame now; the others skip it.
+    std::uint64_t takers(const Pub &, const SourceSlot &, std::int64_t now) const;
+};
 // One publisher instance: one description, its sessions, slots, records and grants. The engine
 // drives it on its progress thread; the device holds it through its slots.
 struct Pub final : Owner, std::enable_shared_from_this<Pub>
@@ -116,6 +133,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::array<PubRow, 64> rows{};
     std::uint64_t ready_mask = 0;
     EverySessions every;
+    LatestSessions latest;
     // A set of pullers: its rows, the frames of a range, the ranges given out so far, the row
     // each of the latest went to, the row that took the last, and the frames no puller received.
     std::uint64_t pull_mask = 0, ranges_taken = 0, missing = 0;
