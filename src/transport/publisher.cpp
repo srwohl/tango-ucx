@@ -251,6 +251,15 @@ int PullSet::reserve(Pub &pub)
 // granted index loses one grant; the slot goes to no puller. A frame whose range's puller is
 // gone, when no other puller could take the whole range, goes to any puller with room for one
 // more frame. If none has room, it is missing.
+// TODO(pull-loss): a puller should never lose frames while the set is healthy, as every does
+// not. Two edges lose them today, both when a puller leaves:
+//   1. grants it had reserved, when no other puller has room: wait (pressure) instead of
+//      counting them missing, and only miss them when no puller is left;
+//   2. frames in its ring it never released. Options: keep failing the set, as an every
+//      subscriber's death fails it (today); let a puller that closes cleanly receive what it
+//      holds before it goes, so only a crash loses frames; or redeliver, at least once, keeping
+//      source slots until released (duplicates, non-consecutive ranges, earlier pressure).
+// Not decided; update CONTEXT.md's Missing with the choice.
 PubRow *PullSet::route(Pub &pub, bool cancel)
 {
     auto *to_puller =
