@@ -333,6 +333,10 @@ TEST_CASE("data-plane structs match their golden bytes")
     wire::EndMessage lost; // a puller's End: what the set lost, after the reason
     REQUIRE(wire::decode(u64s({1, 2, 3, 7 << 8 | wire::Closing}), lost));
     CHECK((lost.reason == wire::Closing && lost.missing == 7));
+    wire::EndMessage later; // a reason from a later build is kept, not refused
+    REQUIRE(wire::decode(u64s({1, 2, 3, 200}), later));
+    CHECK(int(later.reason) == 200);
+    CHECK(wire::Unspecified == 0);
     wire::FrameMessage f{1, 2, 3, 4, 5};
     f.record_bytes = 8;
     std::fill_n(f.record.begin(), 8, std::byte{0x21});

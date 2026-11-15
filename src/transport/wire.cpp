@@ -412,7 +412,7 @@ std::array<std::byte, 32> encode(const EndMessage &m)
 }
 bool decode(std::span<const std::byte> b, EndMessage &m)
 {
-    if(b.size() < 32 || std::to_integer<unsigned>(b[24]) > Closing)
+    if(b.size() < 32)
         return false;
     m = {get64(b.data()), get64(b.data() + 8), get64(b.data() + 16),
          Reason(std::to_integer<unsigned>(b[24])), get64(b.data() + 24) >> 8};

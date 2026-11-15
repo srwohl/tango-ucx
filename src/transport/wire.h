@@ -48,8 +48,11 @@ enum Status : std::uint16_t
     Started,
     Range
 };
+// Why a session ended, in End. 0 is no reason, so a zeroed End never reads as finished. A
+// value this build does not know is kept as it came, and means the session failed.
 enum Reason : std::uint8_t
 {
+    Unspecified,
     FinishedReason,
     Evicted,
     Protocol,

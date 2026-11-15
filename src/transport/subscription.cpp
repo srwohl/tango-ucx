@@ -554,7 +554,11 @@ void Sub::decide(std::int64_t now)
         {
             fail(end.reason == wire::Evicted    ? "evicted: the publisher ended the session"
                  : end.reason == wire::Protocol ? "the publisher ended the session: protocol"
-                                                : "the publisher closed");
+                 : end.reason == wire::Closing
+                     ? "the publisher closed"
+                     : std::format("the publisher ended the session for reason {}, which this "
+                                   "subscriber does not know",
+                                   int(end.reason)));
             outcome.store(int(TangoUcx::Outcome::Failed));
             queue.signal();
             return;
