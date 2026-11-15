@@ -40,7 +40,8 @@ struct PubRow
     std::uint64_t session = 0, sent = 0, credited = 0, skipped = 0, passes = 0;
     // An opaque stream's packed ring, and where its last sent and last credited frames end.
     std::uint64_t ring_bytes = 0, sent_bytes = 0, credited_bytes = 0;
-    std::uint32_t ring_depth = 0, in_flight = 0, reserved = 0;
+    std::uint32_t ring_depth = 0, in_flight = 0;
+    std::uint32_t reserved = 0; // a puller's: frames granted to it and not yet routed
     std::int64_t min_interval_ns = 0, last_send_ns = 0, blocked_since_ns = 0;
     std::int64_t transfer_max_ns = 0, transfer_sum_ns = 0;
     Text<64> label, transport;
@@ -71,6 +72,27 @@ struct Observation
     std::array<RowObservation, 64> rows{};
 };
 struct Engine;
+struct Pub;
+// The every sessions of an instance (ADR 0002): each takes every frame and gates every grant.
+// They join before the first grant, and each grant is one more frame for all of them, so what
+// they have reserved is one position of the instance: its grants not yet routed.
+struct EverySessions
+{
+    std::uint64_t mask = 0;
+    bool has(std::uint32_t row) const
+    {
+        return mask >> row & 1;
+    }
+    void add(std::uint32_t row)
+    {
+        mask |= std::uint64_t{1} << row;
+    }
+    void remove(std::uint32_t row)
+    {
+        mask &= ~(std::uint64_t{1} << row);
+    }
+    int blocking(const Pub &) const; // the first row with no room for one more grant, or -1
+};
 // One publisher instance: one description, its sessions, slots, records and grants. The engine
 // drives it on its progress thread; the device holds it through its slots.
 struct Pub final : Owner, std::enable_shared_from_this<Pub>
@@ -92,7 +114,8 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::unique_ptr<SourceSlot[]> slots;
     std::vector<std::uint16_t> order;
     std::array<PubRow, 64> rows{};
-    std::uint64_t ready_mask = 0, every_mask = 0;
+    std::uint64_t ready_mask = 0;
+    EverySessions every;
     // A set of pullers: its rows, the frames of a range, the ranges given out so far, the row
     // each of the latest went to, the row that took the last, and the frames no puller received.
     std::uint64_t pull_mask = 0, ranges_taken = 0, missing = 0;
@@ -134,6 +157,10 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     void *gpu_payload(std::uint32_t, GpuStream);
     std::uint64_t id_for(std::uint32_t) const;
     int find_row(std::uint64_t) const;
+    std::uint64_t outstanding() const // grants not yet routed
+    {
+        return slots_granted - slots_routed;
+    }
     bool has_room(const PubRow &, std::uint64_t frames = 1, std::uint64_t grants = 1) const;
     PubRow *puller(std::uint64_t);
     wire::Status check_open(const wire::OpenMessage &) const;

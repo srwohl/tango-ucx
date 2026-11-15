@@ -144,10 +144,17 @@ int Pub::find_row(std::uint64_t session) const
 // and, in a packed ring, the bytes for the grants. One of each is room for one more grant.
 bool Pub::has_room(const PubRow &row, std::uint64_t frames, std::uint64_t grants) const
 {
-    return row.sent + row.reserved - row.credited + frames <= row.ring_depth &&
-           (!row.ring_bytes ||
-            ring_room(row.sent_bytes - row.credited_bytes, row.reserved + grants - 1,
-                      plan.sizes.frame_bytes, row.ring_bytes));
+    auto reserved = every.has(row.row) ? outstanding() : row.reserved;
+    return row.sent + reserved - row.credited + frames <= row.ring_depth &&
+           (!row.ring_bytes || ring_room(row.sent_bytes - row.credited_bytes, reserved + grants - 1,
+                                         plan.sizes.frame_bytes, row.ring_bytes));
+}
+int EverySessions::blocking(const Pub &pub) const
+{
+    for(auto left = mask; left; left &= left - 1)
+        if(auto row_index = std::countr_zero(left); !pub.has_room(pub.rows[row_index]))
+            return row_index;
+    return -1;
 }
 // The puller that holds the range of a frame index, or none, as in a stream with no pull set.
 // The index says which range, and
@@ -396,14 +403,14 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     if(!row.used || row.closing)
         return;
     auto bit = std::uint64_t{1} << row_index;
-    bool held_device = ((every_mask | pull_mask) & bit) != 0;
+    bool held_device = ((every.mask | pull_mask) & bit) != 0;
     if(row.ready)
         ready_mask &= ~bit;
     // A puller left before it was sent End. Frames it received but did not release are counted
     // as missing, because a frame is never sent twice.
     if(pull_mask & bit && !row.end_sent)
         missing += row.sent - row.credited;
-    every_mask &= ~bit;
+    every.remove(row_index);
     pull_mask &= ~bit;
     // With no pullers left before the start, clear the range. The stream then has no pull set.
     if(!pull_mask && !started.load(std::memory_order_acquire))
@@ -506,7 +513,7 @@ void Pub::open(ControlEntry &entry)
     last_topology_ns = 0;
     ready_mask |= std::uint64_t{1} << row_index;
     if(open_message.every)
-        every_mask |= std::uint64_t{1} << row_index;
+        every.add(row_index);
     if(open_message.range)
     {
         pull_mask |= std::uint64_t{1} << row_index;
@@ -524,7 +531,7 @@ void Pub::open(ControlEntry &entry)
 }
 // Takes back the grants the device never picked up, after finish(). The grant ring is first in,
 // first out, so the grants still in it are the newest. Their slots become free, and the room
-// that every subscriptions and pullers reserved for them is released.
+// that pullers reserved for them is released. Every sessions follow slots_granted.
 void Pub::unissue_grants()
 {
     // The grants the device has not taken. It may take one meanwhile: that one stays granted.
@@ -537,29 +544,18 @@ void Pub::unissue_grants()
         if(auto *holder = puller(newest - back); holder && holder->reserved)
             --holder->reserved;
     slots_granted -= queued;
-    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-        if((ready_mask & every_mask) >> row_index & 1)
-            rows[row_index].reserved -= queued;
 }
 
-// What the reservation counters should reduce to, checked before the delivery policies move to
-// positions. Every every session joined before the first grant and reserves one frame per grant,
-// so each holds exactly the grants not yet routed. A grant reserves at most one puller, so the
-// pullers together hold no more than that.
+// Every sessions are all ready sessions, and a grant reserves at most one puller, so the pullers
+// together hold no more than the grants not yet routed.
 void Pub::check_reservations() const
 {
 #ifndef NDEBUG
-    auto outstanding = slots_granted - slots_routed;
+    assert((every.mask & ~ready_mask) == 0);
     std::uint64_t pulled = 0;
-    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-    {
-        auto bit = std::uint64_t{1} << row_index;
-        if(ready_mask & every_mask & bit)
-            assert(rows[row_index].reserved == outstanding);
-        if(pull_mask & bit)
-            pulled += rows[row_index].reserved;
-    }
-    assert(pulled <= outstanding);
+    for(auto left = pull_mask; left; left &= left - 1)
+        pulled += rows[std::countr_zero(left)].reserved;
+    assert(pulled <= outstanding());
 #endif
 }
 bool Pub::route_pass(std::int64_t now)
@@ -596,9 +592,6 @@ bool Pub::route_pass(std::int64_t now)
         auto *to_puller = puller(slot.cancel ? next_frame_index + slots_granted - slots_routed - 1
                                              : next_frame_index);
         ++slots_routed;
-        for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-            if((every_mask & (std::uint64_t{1} << row_index)) && rows[row_index].reserved)
-                --rows[row_index].reserved;
         if(to_puller && to_puller->reserved)
             --to_puller->reserved;
         if(!slot.cancel)
@@ -622,7 +615,7 @@ bool Pub::route_pass(std::int64_t now)
                 auto &row = rows[row_index];
                 if(!row.ready || row.closing)
                     continue;
-                if(every_mask & bit || &row == to_puller)
+                if(every.has(row_index) || &row == to_puller)
                     recipients |= bit; // room was reserved for it when the slot was granted
                 else if(!row.pull && row.sent - row.credited < row.ring_depth &&
                         row.in_flight == 0 && now - row.last_send_ns >= row.min_interval_ns &&
@@ -635,7 +628,7 @@ bool Pub::route_pass(std::int64_t now)
             for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
             {
                 auto bit = std::uint64_t{1} << row_index;
-                if(ready_mask & bit && !((every_mask | pull_mask) & bit) && !(recipients & bit))
+                if(ready_mask & bit && !((every.mask | pull_mask) & bit) && !(recipients & bit))
                 {
                     ++skipped;
                     ++rows[row_index].skipped;
@@ -695,16 +688,11 @@ bool Pub::grant_pass()
         if(slot_index < 0)
             break;
         bool room = true;
-        for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-            if((ready_mask & every_mask) & (std::uint64_t{1} << row_index))
-            {
-                if(!has_room(rows[row_index]))
-                {
-                    room = false;
-                    blocked = row_index + 1;
-                    break;
-                }
-            }
+        if(int row_index = every.blocking(*this); row_index >= 0)
+        {
+            room = false;
+            blocked = row_index + 1;
+        }
         // The puller of the grant's frame index, which is the next one if no slot ahead of it is
         // cancelled. The device waits for that puller or, when none has room for the range, for
         // the one longest without a frame. With no puller left it does not wait.
@@ -721,9 +709,6 @@ bool Pub::grant_pass()
         }
         if(!room)
             break;
-        for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-            if((ready_mask & every_mask) & (std::uint64_t{1} << row_index))
-                ++rows[row_index].reserved;
         if(holder)
             ++holder->reserved;
         slots[slot_index].held = true;
@@ -797,7 +782,7 @@ void Pub::timer_pass(std::int64_t now)
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
         auto &row = rows[row_index];
-        bool blocking = waiting && (every_mask >> row_index & 1
+        bool blocking = waiting && (every.has(row_index)
                                         ? !has_room(row)
                                         : pull_mask >> row_index & 1 && blocked == row_index + 1);
         if(!blocking)
