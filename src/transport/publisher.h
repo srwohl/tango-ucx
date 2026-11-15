@@ -266,7 +266,9 @@ struct Engine final : Owner, std::enable_shared_from_this<Engine>
     std::mutex begin_serial; // one begin at a time
     std::mutex begin_lock;
     std::shared_ptr<BeginRequest> begin_request;
-    bool begin_closed = false; // under begin_lock: shutdown has refused what is left
+    std::shared_ptr<BeginRequest> making; // the progress thread's: taken, waiting for its arena
+    std::future<void> prefaulting;        // faulting in a new arena's pages
+    bool begin_closed = false;            // under begin_lock: shutdown has refused what is left
     std::atomic<bool> begin_posted{false};
 
     explicit Engine(PublisherLimits);

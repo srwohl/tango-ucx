@@ -55,19 +55,19 @@ ucs_status_t on_credit(void *arg, const void *header, size_t header_bytes, void 
 namespace
 {
 // Faults in every page of a new arena, so that no frame pays for it on the device's thread.
-// TODO(numa): this runs on the progress thread, so first touch puts the pages on the progress
-// core's NUMA node, not the node of the thread that writes the frames (Basler's grab thread) or
-// of the NIC that reads them. On one socket that is the same node. On several, choose the node
-// explicitly: a PublisherLimits field (e.g. arena_numa_node, defaulting to the node of
+// TODO(numa): this runs on a helper thread that is not pinned, so first touch puts the pages on
+// whatever node it runs on, not the node of the thread that writes the frames (Basler's grab
+// thread) or of the NIC that reads them. On one socket that is the same node. On several, choose
+// the node explicitly: a PublisherLimits field (e.g. arena_numa_node, defaulting to the node of
 // net_devices or progress_cpu), then mbind(MPOL_BIND) or set_mempolicy before this touch, and
 // report the result in Health's ring_numa_node, which sample_topology already measures. Measure
 // a two-socket host before deciding the default.
-void prefault(const Region &region) noexcept
+void prefault(std::byte *base, std::uint64_t bytes) noexcept
 {
-    if(!region.base() || !region.bytes())
+    if(!base || !bytes)
         return;
     auto page = std::uintptr_t(::sysconf(_SC_PAGESIZE));
-    auto begin = reinterpret_cast<std::uintptr_t>(region.base()), end = begin + region.bytes();
+    auto begin = reinterpret_cast<std::uintptr_t>(base), end = begin + bytes;
     auto first = begin & ~(page - 1);
     if(::madvise(reinterpret_cast<void *>(first), end - first, MADV_POPULATE_WRITE) == 0)
         return;
@@ -187,9 +187,9 @@ void Engine::begin(Description description)
 // by a send: it takes the arena with it, and the new instance gets another.
 bool Engine::begin_pass(std::int64_t now)
 {
-    if(!begin_posted.load())
+    if(!making && !begin_posted.load())
         return false;
-    if(active)
+    if(active && !making)
     {
         if(!active->finishing.load())
         {
@@ -210,22 +210,53 @@ bool Engine::begin_pass(std::int64_t now)
         // and Health keep answering while the next is made.
     }
     begin_since_ns = 0;
-    std::shared_ptr<BeginRequest> request;
+    if(!making)
     {
-        std::lock_guard lock(begin_lock);
-        request = std::move(begin_request);
-        begin_posted.store(false);
+        {
+            std::lock_guard lock(begin_lock);
+            making = std::move(begin_request);
+            begin_posted.store(false);
+        }
+        // A ring larger than the arena needs another. Allocating it here is quick; its pages are
+        // faulted in on a helper thread, so the loop goes on serving the draining instances.
+        // Only a quiet instance can be draining with this arena, and it sends no more.
+        if(limits.gpu < 0 && arena.bytes() < making->plan.source_bytes)
+            try
+            {
+                arena.unmap();
+                arena = Region::allocate(context->get(), making->plan.source_bytes);
+                prefaulting = std::async(std::launch::async,
+                                         [this, base = arena.base(), bytes = arena.bytes()]
+                                         {
+                                             prefault(base, bytes);
+                                             poke();
+                                         });
+            }
+            catch(...)
+            {
+                set_current(nullptr);
+                making->done.set_exception(std::current_exception());
+                making.reset();
+                return true;
+            }
+    }
+    if(prefaulting.valid())
+    {
+        if(prefaulting.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            return false;
+        prefaulting.get();
     }
     try
     {
-        make_instance(*request);
-        request->done.set_value();
+        make_instance(*making);
+        making->done.set_value();
     }
     catch(...)
     {
         set_current(nullptr); // the previous instance has finished, and no other was made
-        request->done.set_exception(std::current_exception());
+        making->done.set_exception(std::current_exception());
     }
+    making.reset();
     return true;
 }
 void Engine::make_instance(BeginRequest &request)
@@ -234,13 +265,6 @@ void Engine::make_instance(BeginRequest &request)
         std::make_shared<Pub>(shared_from_this(), std::move(request.description), request.plan);
     if(limits.gpu < 0)
     {
-        // Only a quiet instance can be draining with this arena, and it sends no more.
-        if(arena.bytes() < instance->plan.source_bytes)
-        {
-            arena.unmap();
-            arena = Region::allocate(context->get(), instance->plan.source_bytes);
-            prefault(arena);
-        }
         instance->source_base = arena.base();
         instance->source_memh = arena.memh();
     }
@@ -350,6 +374,12 @@ void Engine::run()
 // safe to release, because a session did not close or an instance was quarantined, is kept.
 void Engine::shutdown()
 {
+    if(prefaulting.valid())
+        prefaulting.wait(); // it writes to the arena, which is unmapped below
+    if(making)
+        making->done.set_exception(
+            std::make_exception_ptr(std::logic_error("the publisher has closed")));
+    making.reset();
     {
         std::lock_guard lock(begin_lock);
         begin_closed = true;
