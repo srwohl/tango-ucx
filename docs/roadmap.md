@@ -85,7 +85,8 @@ session's selection and bytes per frame.
 |---|---|---|---|
 | Threshold detector, compressed (as DECTRIS Stream V2) | `threshold_1`, `threshold_2`, `difference`: bytes | whole parts | one per part |
 | The same, uncompressed | three array parts `(y, x)` | part and rectangle | one per row |
-| Many thresholds in one array (as Medipix3 colour mode) | one array `(threshold, y, x)` | thresholds and rectangle | one per row |
+| Many counters in one array (as Medipix3 spectroscopic mode, 4–8 counters) | one array `(counter, y, x)` | counters and rectangle | one per row |
+| Storage cells in a train (as AGIPD, JUNGFRAU at XFELs) | one array `(cell, 2, y, x)`, data and gain; cell and pulse IDs follow the cell axis | cells, gain stage, rectangle | one per row |
 | Spectroscopic pixel detector, histogrammed (as HEXITEC) | one array `(y, x, energy)` | energy window and rectangle | packed |
 | Multi-channel analyser for fluorescence (as Xspress3) | one array `(channel, energy)` | channels and energy window | one per channel |
 | 4D-STEM, ptychography | one array `(ky, kx)`; the scan position in the record | detector region | one per row |
@@ -96,6 +97,10 @@ session's selection and bytes per frame.
 | Event detector, decoded | one array `events (n ≤ max)` of `{x, y, toa, tot}` | fields | packed |
 | Several sensors behind a prism | one array part per sensor, each its own shape and type | part and rectangle | one per row |
 | Filter wheel | one array part; the filter in the record | frames by a record field | after 0.1 |
+
+[research/detectors.md](research/detectors.md) checks these against sources and lists the gaps:
+data sent once per series (flat fields, pixel masks, energies per threshold), sub-byte depths
+(1, 4, 6, 12 bits) as bytes encodings, encodings with parameters, and module geometry.
 
 Multispectral cameras use the same three orders, under the names BSQ `(band, y, x)`, BIL
 `(y, band, x)` and BIP `(y, x, band)`.
