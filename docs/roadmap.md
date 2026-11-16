@@ -159,6 +159,11 @@ are the selection of what was published.
 - Overlapping instances: arena regions, quarantine per region, a budget policy, health per
   instance.
 - Alternating saver groups.
+- Membership for the start fence, so no device holds a count: a saver keeps a member endpoint
+  across instances, and the fence waits for every member. Liveness comes from UCX's peer
+  errors, as a ZooKeeper ephemeral node lives with its session, so there is no lease. The same
+  endpoint can tell a saver that an instance began, and carry its group. It reverses part of
+  Cut 3 and needs an ADR. `ucx_start(every, deadline)` then gains a form without the count.
 - Frames selected by a record field, such as a time range or a scan region, and every Nth
   frame.
 - Filters on content for events: a region of interest over raw hits, decoded by the publisher.
