@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -55,6 +56,9 @@ struct PublisherLimits
     int gpu = -1;          // source payloads on this GPU; records remain in host memory
     int progress_cpu = -1; // -1 inherits affinity; otherwise reserve this physical core in-process
     std::string net_devices; // UCX NET_DEVICES selector; empty inherits environment/defaults
+    // A lent ring: the device keeps the source ring as its own buffers, such as a camera's grab
+    // buffers, and publishes each slot from one of them with Slot::publish_from. Host only.
+    bool lend_source = false;
 };
 struct SubscriptionOptions
 {
@@ -131,6 +135,14 @@ class Slot
     void publish(std::optional<std::uint64_t> timestamp_ns = {}) &&;
     // An opaque frame of 1 to max_payload_bytes bytes; a refused length leaves the slot held.
     void publish_bytes(std::size_t bytes, std::optional<std::uint64_t> timestamp_ns = {}) &&;
+    // A lent ring's slot has no memory of its own: it is published from the device's buffer
+    // `buffer` of Publisher::lent_ring, of `bytes` for an opaque stream. `done` runs on the
+    // publisher's thread once no session reads that buffer for this frame; it must be short and
+    // must not call the publisher. Several slots may be published from one buffer. When this
+    // throws, the buffer stays the device's and `done` never runs.
+    void publish_from(std::uint32_t buffer, std::function<void()> done,
+                      std::optional<std::size_t> bytes = {},
+                      std::optional<std::uint64_t> timestamp_ns = {}) &&;
 
   private:
     friend class Publisher;
@@ -168,6 +180,9 @@ class Publisher
     void finish();
     Health health() const;
     Description description() const; // the active instance's; throws when there is none
+    // The active instance's lent ring: its buffers, each as large as a source slot, back to back,
+    // registered with UCX. Empty without lend_source or an instance. Valid until the next begin.
+    std::span<std::byte> lent_ring() const;
 
   private:
     friend class Slot;

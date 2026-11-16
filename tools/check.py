@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
 CPP_SUFFIXES = {".h", ".hpp", ".cc", ".cpp", ".cxx", ".cu", ".cuh", ".inl"}
-PUBLIC_NAME_LIMIT = 103  # Publisher::begin, ADR 0001
+PUBLIC_NAME_LIMIT = 106  # the lent ring
 PYTHON_NAME_LIMIT = 38
 
 

@@ -124,6 +124,8 @@ void check_limits(const PublisherLimits &l)
         throw std::invalid_argument("GPU source needs a GPU runtime and a non-negative GPU number");
     if(l.max_sessions < 1 || l.max_sessions > k_max_sessions)
         throw std::invalid_argument("max_sessions must be 1 to 64");
+    if(l.lend_source && l.gpu >= 0)
+        throw std::invalid_argument("a lent ring is host memory: lend_source needs gpu -1");
 }
 
 PublisherPlan plan_publisher(const Description &d, const PublisherLimits &l, std::uint32_t request,

@@ -20,6 +20,7 @@ PublisherLimits::pressure_timeout
 PublisherLimits::gpu
 PublisherLimits::progress_cpu
 PublisherLimits::net_devices
+PublisherLimits::lend_source
 Publisher
 Publisher::begin
 Publisher::ucx_start
@@ -27,6 +28,7 @@ Publisher::acquire
 Publisher::finish
 Publisher::health
 Publisher::description
+Publisher::lent_ring
 Slot
 Slot::payload
 Slot::payload_bytes
@@ -34,6 +36,7 @@ Slot::gpu_payload
 Slot::fields
 Slot::publish
 Slot::publish_bytes
+Slot::publish_from
 Health
 install_ucx_commands
 install_ucx_attributes

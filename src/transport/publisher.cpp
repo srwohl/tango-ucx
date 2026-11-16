@@ -314,6 +314,8 @@ std::span<std::byte> Pub::payload(std::uint32_t slot_index)
 {
     if(limits.gpu >= 0)
         throw std::logic_error("a GPU source slot uses gpu_payload on its GPU stream");
+    if(limits.lend_source)
+        throw std::logic_error("a lent ring's slot has no memory: publish_from a lent buffer");
     if(slot_index >= plan.slot_count)
         throw std::out_of_range("source slot");
     return {source_at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
@@ -339,12 +341,19 @@ std::span<std::byte> Pub::fields(std::uint32_t slot_index)
 }
 // Marks a filled slot ready to send. Opaque streams pass the frame's length; array streams do not.
 void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> timestamp,
-                       std::optional<std::size_t> bytes)
+                       std::optional<std::size_t> bytes, std::optional<std::uint32_t> buffer,
+                       std::function<void()> done)
 {
     if(slot_index >= plan.slot_count)
         return;
     if(closed())
         throw std::logic_error("the publisher has closed");
+    if(buffer.has_value() != limits.lend_source)
+        throw std::logic_error(limits.lend_source ? "a lent ring publishes with publish_from"
+                                                  : "publish_from needs a lent ring");
+    if(buffer && *buffer >= plan.slot_count)
+        throw std::out_of_range(
+            std::format("lent buffer {}; the ring has {}", *buffer, plan.slot_count));
     if(bytes.has_value() != plan.sizes.opaque)
         throw std::logic_error(plan.sizes.opaque ? "an opaque stream publishes with publish_bytes"
                                                  : "publish_bytes needs an opaque stream");
@@ -359,9 +368,19 @@ void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> ti
                                             std::chrono::system_clock::now().time_since_epoch())
                                             .count());
     slot.cancel = false;
+    slot.source_offset = std::uint64_t(buffer.value_or(slot_index)) * plan.sizes.frame_bytes;
+    slot.done = std::move(done);
     if(slot.gpu_accessed)
         gpu_runtime()->record(slot.event, slot.gpu_stream);
     post(slot);
+}
+void Pub::hand_back(SourceSlot &slot)
+{
+    if(!slot.done || slot.routing || slot.sends)
+        return;
+    auto done = std::move(slot.done);
+    slot.done = nullptr;
+    done();
 }
 // Gives a slot back unpublished. It is still posted because the loop takes slots in grant order.
 void Pub::cancel_slot(std::uint32_t slot_index)
@@ -462,8 +481,7 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     params.memory_type = limits.gpu >= 0 ? UCS_MEMORY_TYPE_CUDA : UCS_MEMORY_TYPE_HOST;
     complete_if_done(operation,
                      ucp_am_send_nbx(row.ep, wire::Frame, header.data(), header_bytes,
-                                     source_at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
-                                     slot.payload_bytes, &params));
+                                     source_at(slot.source_offset), slot.payload_bytes, &params));
 }
 void Pub::on_send(OpMeta *operation, ucs_status_t status)
 {
@@ -476,7 +494,8 @@ void Pub::on_send(OpMeta *operation, ucs_status_t status)
     if(row.in_flight)
         --row.in_flight;
     if(slot_index < plan.slot_count && slots[slot_index].sends)
-        --slots[slot_index].sends;
+        if(--slots[slot_index].sends == 0)
+            hand_back(slots[slot_index]);
     auto transfer_ns = now_ns() - operation->sent_ns;
     row.transfer_max_ns = std::max(row.transfer_max_ns, transfer_ns);
     row.transfer_sum_ns += transfer_ns;
@@ -718,8 +737,12 @@ bool Pub::route_pass(std::int64_t now)
                 ++skipped;
                 ++rows[std::countr_zero(left)].skipped;
             }
+            // A send may complete at once: the buffer goes back only after the last is issued.
+            slot.routing = true;
             for(auto left = recipients; left; left &= left - 1)
                 send_frame(slot_index, std::countr_zero(left), now);
+            slot.routing = false;
+            hand_back(slot);
         }
         else
         {
@@ -1003,6 +1026,16 @@ void Slot::publish_bytes(std::size_t bytes, std::optional<std::uint64_t> timesta
     active_ = false;
     state_.reset();
 }
+void Slot::publish_from(std::uint32_t buffer, std::function<void()> done,
+                        std::optional<std::size_t> bytes, std::optional<std::uint64_t> timestamp) &&
+{
+    if(!active_)
+        throw std::logic_error("slot already published");
+    if(auto pub = state_)
+        pub->publish_slot(index_, timestamp, bytes, buffer, std::move(done));
+    active_ = false;
+    state_.reset();
+}
 Publisher::Publisher(PublisherLimits limits)
     : p_(std::make_shared<transport::Engine>(std::move(limits)))
 {
@@ -1086,6 +1119,13 @@ void Publisher::finish()
         pub->grants.signal();
         p_->poke();
     }
+}
+std::span<std::byte> Publisher::lent_ring() const
+{
+    auto pub = p_ ? p_->instance() : nullptr;
+    if(!pub || !pub->limits.lend_source)
+        return {};
+    return {pub->source_base, std::size_t(pub->plan.source_bytes)};
 }
 Health Publisher::health() const
 {

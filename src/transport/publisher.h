@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -26,6 +27,11 @@ struct SourceSlot
     bool cancel = false, held = false;
     std::uint64_t timestamp = 0, payload_bytes = 0;
     std::uint32_t sends = 0;
+    // Where the payload is sent from: the slot's own memory, or a lent ring's buffer, which
+    // `done` hands back to the device once the frame's last send completes.
+    std::uint64_t source_offset = 0;
+    std::function<void()> done;
+    bool routing = false; // its frame is being sent to its recipients
     bool gpu_accessed = false;
     GpuStream gpu_stream;
     GpuEvent event;
@@ -199,7 +205,9 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     void release_memory() noexcept; // on the progress thread: what is registered with UCX
     void open(ControlEntry &);
     void close(ControlEntry &);
-    void publish_slot(std::uint32_t, std::optional<std::uint64_t>, std::optional<std::size_t>);
+    void publish_slot(std::uint32_t, std::optional<std::uint64_t>, std::optional<std::size_t>,
+                      std::optional<std::uint32_t> buffer = {}, std::function<void()> done = {});
+    void hand_back(SourceSlot &); // a lent buffer, once its frame's last send completed
     void cancel_slot(std::uint32_t);
     void post(SourceSlot &);
     std::span<std::byte> payload(std::uint32_t);

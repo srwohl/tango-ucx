@@ -159,6 +159,58 @@ TEST_CASE("a fenced ucx_start gives up at its deadline without starting")
     archiver.close(test::deadline());
 }
 
+TEST_CASE("a lent ring sends the device's own buffer and hands it back once sent")
+{
+    auto limits = test::small_limits();
+    limits.lend_source = true;
+    Publisher publisher(test::small_description(), limits);
+    constexpr std::size_t frame = 128;
+    auto ring = publisher.lent_ring();
+    REQUIRE(ring.size() >= 2 * frame);
+    auto archiver = test::subscribe(publisher, true);
+    publisher.ucx_start();
+    std::ranges::fill(ring.subspan(frame, frame), std::byte{0x5a});
+    std::atomic<int> back{0};
+    for(int i = 0; i < 2; ++i) // two frames from one buffer, as a device sends a blank frame
+    {
+        auto slot = publisher.acquire(test::deadline());
+        REQUIRE(slot);
+        slot->fields()[0] = std::byte(i);
+        std::move(*slot).publish_from(1, [&] { ++back; });
+    }
+    for(std::uint64_t i = 0; i < 2; ++i)
+    {
+        auto batch = archiver.read(test::deadline());
+        REQUIRE(batch);
+        CHECK(batch->index(0) == i);
+        CHECK(static_cast<const std::byte *>(batch->payload())[frame - 1] == std::byte{0x5a});
+    }
+    CHECK(test::eventually([&] { return back == 2; }));
+    archiver.close(test::deadline());
+}
+
+TEST_CASE("a lent ring's slot has no memory, and its buffer comes back with no session")
+{
+    auto limits = test::small_limits();
+    limits.lend_source = true;
+    Publisher publisher(test::small_description(), limits);
+    publisher.ucx_start();
+    auto slot = publisher.acquire(test::deadline());
+    REQUIRE(slot);
+    CHECK_THROWS_AS(slot->payload(), std::logic_error);
+    CHECK_THROWS_AS(std::move(*slot).publish(), std::logic_error); // the slot stays held
+    std::atomic<int> back{0};
+    std::move(*slot).publish_from(0, [&] { ++back; });
+    CHECK(test::eventually([&] { return back == 1; }));
+
+    Publisher owned(test::small_description(), test::small_limits());
+    owned.ucx_start();
+    CHECK(owned.lent_ring().empty());
+    auto own = owned.acquire(test::deadline());
+    REQUIRE(own);
+    CHECK_THROWS_AS(std::move(*own).publish_from(0, {}), std::logic_error);
+}
+
 TEST_CASE("UcxSessions lists all 64 sessions with their 64-byte labels")
 {
     test::RawPeer peer; // one worker behind every session

@@ -104,6 +104,13 @@ acquiring it until it publishes it as a frame or cancels it. An opaque stream's 
 has the size of the largest frame, and the device says each frame's length when it publishes.
 _Avoid_: slot handle, publication, cell
 
+**Lent ring**:
+A source ring whose memory the device keeps as its own buffers, such as a camera's grab
+buffers, set by `lend_source`. Its slots carry no memory: the device publishes each slot from
+one of its buffers, and the publisher hands that buffer back once the frame's last send has
+completed. The device's own copy into a slot goes away.
+_Avoid_: zero copy, borrowed buffer, external memory
+
 **Pressure**:
 The condition in which an every subscription has no room for another frame, or no puller of
 a set has room for a range, so the publisher refuses new slots and the device must wait,
