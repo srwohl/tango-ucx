@@ -218,7 +218,7 @@ TEST_CASE("the UCX attributes describe the stream and its sessions")
     CHECK(offer.limits.allow_every);
     CHECK(offer.limits.max_sessions == 2);
     for(auto name : {"UcxStream", "UcxSessions", "UcxTopology", "UcxPublished", "UcxSkipped",
-                     "UcxPressure", "UcxFailedEvery"})
+                     "UcxPressure", "UcxEvery", "UcxFailedEvery"})
         CHECK_FALSE(proxy.attribute_query(name).description.empty());
 
     auto sub = every(proxy, {.label = "archiver"});
@@ -236,6 +236,7 @@ TEST_CASE("the UCX attributes describe the stream and its sessions")
     CHECK(attribute<Tango::DevULong64>(proxy, "UcxPublished") == 3);
     CHECK(attribute<Tango::DevULong64>(proxy, "UcxSkipped") == 0);
     CHECK(attribute<Tango::DevULong>(proxy, "UcxPressure") == 0);
+    CHECK(attribute<Tango::DevULong>(proxy, "UcxEvery") == 1);
     CHECK(attribute<Tango::DevULong>(proxy, "UcxFailedEvery") == 0);
     sub.close(in());
 }

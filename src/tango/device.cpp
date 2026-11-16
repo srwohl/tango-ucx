@@ -164,6 +164,10 @@ void install_ucx_attributes(std::vector<Tango::Attr *> &list)
                             [](const Health &h) { return U32(h.pressure_from); }),
         "The UcxSessions ordinal of the every or pull session the device waits for; 0: none");
     add(list,
+        new HealthAttr<U32>("UcxEvery", Tango::DEV_ULONG,
+                            [](const Health &h) { return U32(h.every); }),
+        "Every and pull sessions that are open and not retiring: what a start fence counts");
+    add(list,
         new HealthAttr<U32>("UcxFailedEvery", Tango::DEV_ULONG,
                             [](const Health &h) { return U32(h.failed_every); }),
         "Every and pull sessions that ended without the subscriber closing them");
