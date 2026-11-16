@@ -139,6 +139,7 @@ image stream.
 |---|---|---|
 | 1 | Adapt the Basler plugin (markers, `begin`) and rerun its end-to-end test | ½ day |
 | 2 | Start fence: the count of ready every sessions; Basler's `startAcq` waits on it | ½–1 day |
+| 2b | Lent ring: Basler grabs into registered memory through Pylon's buffer factory, with no copy for subscribers; video and live mode publish the camera's own pixel format | done |
 | 3 | Measure IOV against the generic datatype for rows and gathers | 1 day |
 | 4 | Parts in the description, the slot and Frame; discovery in `UcxStream` | 2–3 days |
 | 5 | Varying first axis and structured elements (choice 4) | 1 day |
@@ -176,3 +177,11 @@ are the selection of what was published.
 - **The arena's NUMA node** is wherever its helper thread runs (`TODO(numa)` in
   `src/transport/engine.cpp`).
 - **Event detectors at their full rate** have not been measured through the packed ring.
+- **A lent ring on a real camera** has only run on Pylon's emulator: not Pylon's GigE and USB
+  drivers grabbing into up to a thousand registered buffers, Basler's blank frames for missed
+  block IDs (the emulator has none), or a packed or YUV format as opaque bytes.
+- **Pressure with a lent ring** holds Pylon's buffers. Once its queue is empty the camera's
+  frames are lost, and Basler publishes them as blank frames, where a copy into the ring would
+  have absorbed the burst.
+- **Colour in video mode** is a plain array for now: Bayer as `(y, x)` and RGB as `(y, x, 3)`,
+  with the pixel format in the application text. The mosaic and colour axes wait for parts.
