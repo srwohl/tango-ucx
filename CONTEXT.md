@@ -93,7 +93,9 @@ _Avoid_: pool, cache, registration cache
 **Start**:
 The point at which a publisher begins to grant slots, set by the device with `ucx_start`.
 No frame is published before it. An every subscription and a puller join before it and are
-refused after it; a latest subscription joins at any time.
+refused after it; a latest subscription joins at any time. A device may fence the start:
+`ucx_start(every, deadline)` waits until that many every sessions and pullers are ready, and
+starts only then.
 _Avoid_: arm, go
 
 **Slot**:

@@ -176,6 +176,9 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     HealthCopy<Topology> topology_copy;
     std::int64_t last_topology_ns = 0;
     std::atomic<bool> started{false}, finishing{false};
+    // Every sessions and pullers that are ready and not retiring. Written on the progress thread
+    // as they join and retire, so a waiting start reads it exactly, unlike Health.
+    std::atomic<std::uint32_t> holding{0};
     bool ended = false, quarantined = false;
     bool source_failed = false;
     std::shared_ptr<Pub> self_keep;
@@ -192,6 +195,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     bool quiet() const;
     bool done() const; // ended, and every session closed
     void retire_all();
+    void count_holding();
     void release_memory() noexcept; // on the progress thread: what is registered with UCX
     void open(ControlEntry &);
     void close(ControlEntry &);

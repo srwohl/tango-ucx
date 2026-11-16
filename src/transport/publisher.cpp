@@ -3,11 +3,13 @@
 #include "publisher.h"
 
 #include <algorithm>
+#include <bit>
 #include <cassert>
 #include <chrono>
 #include <cstring>
 #include <format>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace TangoUcx::transport
@@ -529,6 +531,11 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     row.reason = why;
     row.retired_ns = now_ns();
     row.end_due = why != wire::FinishedReason && why != wire::Closing;
+    count_holding();
+}
+void Pub::count_holding()
+{
+    holding.store(std::uint32_t(std::popcount(every.mask | pull.mask)), std::memory_order_release);
 }
 // Why an Open is refused, or Ok. The checks run in order and the first that fails decides.
 wire::Status Pub::check_open(const wire::OpenMessage &open_message) const
@@ -631,6 +638,7 @@ void Pub::open(ControlEntry &entry)
             latest.add(row_index);
             break;
     }
+    count_holding(); // before the reply, so a subscriber that has its reply is counted
     auto encoded = wire::encode(wire::SessionMessage{row.session});
     send_control(row_index, OpKind::Ready, wire::Ready, encoded);
     wire::Reply reply{wire::Ok};
@@ -1046,6 +1054,29 @@ void Publisher::ucx_start()
         pub->started.store(true, std::memory_order_release);
         p_->poke();
     }
+}
+// The wait polls an exact count the progress thread keeps, and gives up at the deadline. A
+// session may still fail between the count and the start: UcxFailedEvery reports it.
+bool Publisher::ucx_start(std::uint32_t every, Deadline deadline)
+{
+    auto pub = p_ ? p_->instance() : nullptr;
+    if(!pub)
+        return false;
+    while(!pub->started.load(std::memory_order_acquire))
+    {
+        if(pub->finishing.load(std::memory_order_acquire))
+            return false;
+        if(pub->holding.load(std::memory_order_acquire) >= every)
+        {
+            pub->started.store(true, std::memory_order_release);
+            p_->poke();
+            break;
+        }
+        if(std::chrono::steady_clock::now() >= deadline)
+            return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
 }
 void Publisher::finish()
 {

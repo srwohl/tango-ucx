@@ -114,6 +114,51 @@ TEST_CASE("no slot is granted before ucx_start, and no every Open is accepted af
     preview.close(test::deadline());
 }
 
+TEST_CASE("a fenced ucx_start waits for its every sessions, then every frame reaches them")
+{
+    Publisher publisher(test::small_description(), test::small_limits(3));
+    std::atomic<bool> returned{false};
+    bool started = false;
+    std::thread device(
+        [&]
+        {
+            started = publisher.ucx_start(2, test::deadline());
+            returned = true;
+        });
+    auto archiver = test::subscribe(publisher, true);
+    auto preview = test::subscribe(publisher, false); // latest is not counted
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK_FALSE(returned);
+    auto second = test::subscribe(publisher, true);
+    device.join();
+    CHECK(started);
+    CHECK(publisher.health().started);
+    test::publish_one(publisher);
+    for(auto *sub : {&archiver, &second})
+    {
+        auto batch = sub->read(test::deadline());
+        REQUIRE(batch);
+        CHECK(batch->index(0) == 0);
+    }
+    archiver.close(test::deadline());
+    second.close(test::deadline());
+    preview.close(test::deadline());
+}
+
+TEST_CASE("a fenced ucx_start gives up at its deadline without starting")
+{
+    Publisher publisher(test::small_description(), test::small_limits(3));
+    auto archiver = test::subscribe(publisher, true);
+    auto begun = std::chrono::steady_clock::now();
+    CHECK_FALSE(publisher.ucx_start(2, begun + std::chrono::milliseconds(200)));
+    CHECK(std::chrono::steady_clock::now() - begun >= std::chrono::milliseconds(200));
+    CHECK_FALSE(publisher.health().started);
+    CHECK_FALSE(publisher.acquire(test::deadline(std::chrono::seconds(0))));
+    CHECK(publisher.ucx_start(1, test::deadline())); // the device may lower its count
+    CHECK(publisher.ucx_start(2, test::deadline())); // a started instance stays started
+    archiver.close(test::deadline());
+}
+
 TEST_CASE("UcxSessions lists all 64 sessions with their 64-byte labels")
 {
     test::RawPeer peer; // one worker behind every session

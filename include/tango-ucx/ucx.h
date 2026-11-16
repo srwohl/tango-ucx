@@ -160,6 +160,10 @@ class Publisher
     // description throws and leaves the active instance as it was.
     void begin(Description);
     void ucx_start(); // slots are granted from here on; every and pull join before it
+    // The start fence: waits until at least `every` every sessions and pullers are ready, then
+    // starts. False at the deadline, or when the instance finishes first, without starting.
+    // True when the instance is started, also by an earlier call.
+    bool ucx_start(std::uint32_t every, Deadline);
     std::optional<Slot> acquire(Deadline);
     void finish();
     Health health() const;
