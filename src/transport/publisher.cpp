@@ -105,19 +105,19 @@ bool Pub::quiet() const
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
         const auto &row = rows[row_index];
-        if(row.used && (row.in_flight || (row.ready && !row.end_sent)))
+        if(row.in_use() && (row.in_flight || (row.state == SessionState::Ready && !row.end_sent)))
             return false;
     }
     return true;
 }
 bool Pub::done() const
 {
-    return ended && std::ranges::none_of(rows, &PubRow::used);
+    return ended && std::ranges::none_of(rows, &PubRow::in_use);
 }
 void Pub::retire_all()
 {
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-        if(rows[row_index].used && !rows[row_index].closing)
+        if(rows[row_index].live())
         {
             retire(row_index, wire::Closing, false);
             rows[row_index].end_due = true; // the subscriber learns why its session ended
@@ -137,7 +137,7 @@ std::uint64_t Pub::id_for(std::uint32_t row_index) const
 int Pub::find_row(std::uint64_t session) const
 {
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-        if(rows[row_index].used && rows[row_index].session == session)
+        if(rows[row_index].in_use() && rows[row_index].session == session)
             return int(row_index);
     return -1;
 }
@@ -511,7 +511,7 @@ void Pub::on_control(OpMeta *operation, ucs_status_t status)
         case OpKind::End:
             if(row.in_flight)
                 --row.in_flight;
-            if(status != UCS_OK && status != UCS_ERR_CANCELED && !row.closing)
+            if(status != UCS_OK && status != UCS_ERR_CANCELED && row.live())
                 retire(row_index, wire::Closing, true);
             return;
         case OpKind::Flush:
@@ -530,18 +530,16 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     if(row_index >= plan.row_count)
         return;
     auto &row = rows[row_index];
-    if(!row.used || row.closing)
+    if(!row.live())
         return;
     bool held_device = (every.members | pull.members).has(row_index);
-    if(row.ready)
-        ready_rows.remove(row_index);
+    ready_rows.remove(row_index);
     every.remove(row_index);
     latest.remove(row_index);
     pull.remove(row, started.load(std::memory_order_acquire));
     if(failed && held_device)
         ++failed_every;
-    row.ready = false;
-    row.closing = true;
+    row.state = SessionState::Retiring;
     row.reason = why;
     row.retired_ns = now_ns();
     row.end_due = why != wire::FinishedReason && why != wire::Closing;
@@ -595,7 +593,7 @@ void Pub::open(ControlEntry &entry)
     const auto &open_message = *entry.in.open;
     auto status = check_open(open_message);
     std::uint32_t row_index = 0;
-    while(row_index < plan.row_count && rows[row_index].used)
+    while(row_index < plan.row_count && rows[row_index].in_use())
         ++row_index;
     if(status == wire::Ok && row_index == plan.row_count)
         status = wire::NoSession;
@@ -609,7 +607,6 @@ void Pub::open(ControlEntry &entry)
     row.pub = this;
     row.row = std::uint8_t(row_index);
     row.ordinal = ++ordinals;
-    row.used = true;
     row.every = open_message.delivery == wire::Delivery::Every;
     row.pull = open_message.delivery == wire::Delivery::Pull;
     row.ring.depth = open_message.depth;
@@ -626,7 +623,6 @@ void Pub::open(ControlEntry &entry)
     }
     catch(const std::exception &error)
     {
-        row.used = false;
         wire::Reply refused{wire::Endpoint};
         std::string_view why = error.what();
         refused.detail_bytes = std::uint8_t(std::min(why.size(), refused.detail.size()));
@@ -635,7 +631,7 @@ void Pub::open(ControlEntry &entry)
         return;
     }
     // The subscriber set up its ring and handlers before it sent Open, so it is ready now.
-    row.ready = true;
+    row.state = SessionState::Ready;
     row.transport.n = std::uint8_t(worker->transports(row.ep, row.transport.c));
     row.network_devices = endpoint_network_devices(row.ep);
     last_topology_ns = 0;
@@ -706,7 +702,7 @@ bool Pub::route_pass(std::int64_t now)
                 finishing.store(true);
                 slot.cancel = true;
                 for(std::uint32_t i = 0; i < plan.row_count; ++i)
-                    if(rows[i].used && !rows[i].closing)
+                    if(rows[i].live())
                         retire(i, wire::Protocol, true);
             }
             slot.gpu_accessed = false;
@@ -724,7 +720,7 @@ bool Pub::route_pass(std::int64_t now)
             // Every sessions and the puller had room reserved when the slot was granted.
             auto takers = latest.takers(*this, slot, now);
             auto recipients = every.members | takers;
-            if(to_puller && to_puller->ready && !to_puller->closing)
+            if(to_puller && to_puller->live())
                 recipients.add(to_puller->row);
             for(auto skipper : latest.members.without(takers))
             {
@@ -757,7 +753,8 @@ bool Pub::route_pass(std::int64_t now)
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
         auto &row = rows[row_index];
-        if(row.ready && !row.end_sent && row.in_flight == 0 && !end_waits.has(row_index))
+        if(row.state == SessionState::Ready && !row.end_sent && row.in_flight == 0 &&
+           !end_waits.has(row_index))
             send_end(row_index);
     }
     check_reservations();
@@ -806,7 +803,7 @@ bool Pub::retire_pass(std::int64_t now)
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
         auto &row = rows[row_index];
-        if(!row.used || !row.closing)
+        if(row.state != SessionState::Retiring)
             continue;
         if(row.end_due && !row.end_sent && row.in_flight == 0 && row.ep)
         {
@@ -837,8 +834,7 @@ bool Pub::retire_pass(std::int64_t now)
                 engine->control.reply(*row.close_reply, {wire::Ok});
                 row.close_reply = nullptr;
             }
-            row.used = false;
-            row.closing = false;
+            row.state = SessionState::Free;
             row.end_due = false;
             row.end_sent = false;
             work = true;
@@ -890,7 +886,7 @@ void Pub::publish_health()
         sample_topology(topology, limits.gpu >= 0 ? nullptr : source_base, plan.source_bytes);
         topology.network_devices.clear();
         for(const auto &row : rows)
-            if(row.used)
+            if(row.in_use())
                 for(const auto &device : row.network_devices)
                     if(!std::ranges::any_of(topology.network_devices, [&](const auto &known)
                                             { return known.name == device.name; }))
@@ -912,13 +908,13 @@ void Pub::publish_health()
     }
     observation.memory_hooks = engine->memory_hooks;
     for(const auto &row : rows)
-        if(row.used)
+        if(row.in_use())
             observation.rows[observation.count++] = {
                 row.ordinal,
                 row.ring.depth,
                 std::uint32_t(row.ring.room(plan.sizes.frame_bytes)),
                 row.every,
-                row.closing,
+                row.state == SessionState::Retiring,
                 row.ring.sent,
                 row.skipped,
                 row.transfer_max_ns,

@@ -123,6 +123,16 @@ struct SessionRing
         return std::min(frames, fit ? fit - 1 : 0);
     }
 };
+// Where a session is in its life: the session states of docs/diagrams.md, section 6. A row is
+// Free until an Open is accepted, Ready while it receives frames, and Retiring from the moment
+// it leaves (a Close, a failure, eviction or the instance closing) until its endpoint is closed
+// and the row is Free again. Pressure is not stored: pressure_row() works it out.
+enum class SessionState : std::uint8_t
+{
+    Free,
+    Ready,
+    Retiring
+};
 struct PubRow
 {
     Pub *pub = nullptr;
@@ -137,12 +147,21 @@ struct PubRow
     std::int64_t transfer_max_ns = 0, transfer_sum_ns = 0;
     Text<64> label, transport;
     std::vector<NetworkDevice> network_devices;
-    bool used = false, ready = false, every = false, closing = false, end_due = false,
-         end_sent = false, gpu = false, pull = false;
+    SessionState state = SessionState::Free;
+    bool every = false, end_due = false, end_sent = false, gpu = false, pull = false;
     bool flush_started = false, flush_done = false, close_started = false, close_done = false;
     wire::Reason reason = wire::FinishedReason;
     std::int64_t retired_ns = 0;
     ControlEntry *close_reply = nullptr;
+
+    bool in_use() const // a session holds the row: it is not Free
+    {
+        return state != SessionState::Free;
+    }
+    bool live() const // the session has not begun to retire
+    {
+        return state == SessionState::Ready;
+    }
 };
 struct RowObservation
 {

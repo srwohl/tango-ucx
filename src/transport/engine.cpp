@@ -31,7 +31,7 @@ ucs_status_t on_credit(void *arg, const void *header, size_t header_bytes, void 
         return UCS_OK;
 
     auto &row = publisher->rows[row_index];
-    if(!row.ready || row.closing)
+    if(!row.live())
         return UCS_OK;
 
     // A subscriber cannot release more frames or bytes than the publisher has sent.
@@ -144,7 +144,7 @@ bool Engine::busy() const
         return false;
     if(active->started.load(std::memory_order_acquire) && !active->ended)
         return true;
-    return std::ranges::any_of(active->rows, &PubRow::used);
+    return std::ranges::any_of(active->rows, &PubRow::in_use);
 }
 // Validated on the caller's thread, so a refused description leaves the active instance alone.
 void Engine::begin(Description description)
@@ -389,8 +389,9 @@ void Engine::shutdown()
         instance->retire_all();
     auto in_use = [&]
     {
-        return std::ranges::any_of(draining, [](const auto &instance)
-                                   { return std::ranges::any_of(instance->rows, &PubRow::used); });
+        return std::ranges::any_of(
+            draining, [](const auto &instance)
+            { return std::ranges::any_of(instance->rows, &PubRow::in_use); });
     };
     auto deadline = now_ns() + k_close_ns + k_quarantine_ns;
     while(worker && in_use() && now_ns() < deadline)
