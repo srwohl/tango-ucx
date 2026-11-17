@@ -268,6 +268,10 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     {
         return source_base + offset;
     }
+    Record record(std::uint32_t slot_index)
+    {
+        return {records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride};
+    }
     bool next_posted() const;
     // Nothing of this instance is being sent, nor can be: the device returned every slot it
     // acquired, every send completed and every ready session was sent End.

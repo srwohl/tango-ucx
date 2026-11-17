@@ -113,7 +113,7 @@ Sizes sizes_of(const Description &d)
     return {n,
             d.field_bytes,
             padded,
-            std::uint32_t(16 + padded),
+            Record::k_fields + padded,
             std::uint32_t((opaque ? 48 : 40) + padded),
             opaque};
 }

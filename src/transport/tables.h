@@ -347,6 +347,36 @@ inline std::uint64_t random64()
     return gen();
 }
 
+// One frame's record in a records table, the publisher's or the subscriber's: its frame index,
+// its timestamp, then the stream's application fields, padded to 8 bytes. Each frame has
+// `record_stride` bytes of the table (stream_sizes, memory.cpp). A view: it owns nothing.
+struct Record
+{
+    static constexpr std::uint32_t k_index = 0, k_timestamp = 8, k_fields = 16;
+    std::byte *at = nullptr;
+
+    std::uint64_t index() const
+    {
+        return wire::get64(at + k_index);
+    }
+    std::uint64_t timestamp() const
+    {
+        return wire::get64(at + k_timestamp);
+    }
+    std::byte *fields() const
+    {
+        return at + k_fields;
+    }
+    void set_index(std::uint64_t index)
+    {
+        wire::put64(at + k_index, index);
+    }
+    void set_timestamp(std::uint64_t timestamp)
+    {
+        wire::put64(at + k_timestamp, timestamp);
+    }
+};
+
 // A packed ring: an opaque stream's frames, each placed after the one before it. Positions count
 // every byte since the session began, with the bytes skipped at the ring's end. A frame never
 // straddles the end: it starts at the front. The publisher places each frame and states its

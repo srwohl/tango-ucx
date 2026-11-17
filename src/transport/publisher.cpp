@@ -336,8 +336,7 @@ std::span<std::byte> Pub::fields(std::uint32_t slot_index)
 {
     if(slot_index >= plan.slot_count)
         throw std::out_of_range("source slot");
-    return {records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride + 16,
-            plan.sizes.field_bytes};
+    return {record(slot_index).fields(), plan.sizes.field_bytes};
 }
 // Marks a filled slot ready to send. Opaque streams pass the frame's length; array streams do not.
 void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> timestamp,
@@ -448,17 +447,17 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     auto &row = rows[row_index];
     auto &slot = slots[slot_index];
     auto &operation = *operations.frame(slot_index, row_index);
-    auto *record = records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride;
+    auto frame_record = record(slot_index);
     wire::FrameMessage frame_message{};
     frame_message.session = row.session;
     frame_message.sequence = row.ring.sent;
     frame_message.payload_bytes = slot.payload_bytes;
     frame_message.packed = row.ring.packed(); // the publisher places the frame, and says where
     frame_message.position = row.ring.next_position(slot.payload_bytes);
-    frame_message.index = wire::get64(record);
-    frame_message.timestamp_ns = wire::get64(record + 8);
+    frame_message.index = frame_record.index();
+    frame_message.timestamp_ns = frame_record.timestamp();
     frame_message.record_bytes = plan.sizes.padded_field_bytes;
-    std::memcpy(frame_message.record.data(), record + 16, frame_message.record_bytes);
+    std::memcpy(frame_message.record.data(), frame_record.fields(), frame_message.record_bytes);
     auto header = operations.header(&operation);
     auto header_bytes = wire::encode_into(header, frame_message);
     if(!header_bytes)
@@ -718,10 +717,9 @@ bool Pub::route_pass(std::int64_t now)
         ++slots_routed;
         if(!slot.cancel)
         {
-            wire::put64(records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride,
-                        next_frame_index);
-            wire::put64(records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride + 8,
-                        slot.timestamp);
+            auto slot_record = record(slot_index);
+            slot_record.set_index(next_frame_index);
+            slot_record.set_timestamp(slot.timestamp);
             ++next_frame_index;
             // Every sessions and the puller had room reserved when the slot was granted.
             auto takers = latest.takers(*this, slot, now);
