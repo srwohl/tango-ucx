@@ -35,16 +35,8 @@ ucs_status_t on_credit(void *arg, const void *header, size_t header_bytes, void 
         return UCS_OK;
 
     // A subscriber cannot release more frames or bytes than the publisher has sent.
-    if(credit_message.credit > row.sent || credit_message.bytes > row.sent_bytes)
-    {
+    if(!row.ring.credit(credit_message.credit, credit_message.bytes))
         publisher->retire(row_index, wire::Protocol, true);
-        return UCS_OK;
-    }
-
-    // Credits are cumulative. Older messages must not move them backward.
-    row.credited = std::max(row.credited, credit_message.credit);
-    row.credited_bytes = std::max(row.credited_bytes, credit_message.bytes);
-
     return UCS_OK;
 }
 } // namespace

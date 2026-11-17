@@ -9,6 +9,7 @@
 #include "tables.h"
 #include "topology.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -37,6 +38,77 @@ struct SourceSlot
     GpuStream gpu_stream;
     GpuEvent event;
 };
+// A session's receive ring, as the publisher keeps account of it. The subscriber's ring holds
+// `depth` frames and, in an opaque stream's packed ring, `bytes` bytes. The publisher keeps two
+// positions per ring, what it sent and what the subscriber credited back, and both only increase
+// (ADR 0002). What is between them is still in the subscriber's ring, and the rest is room.
+// Room promised to grants not yet routed is not kept here: the caller passes it as `reserved`.
+struct SessionRing
+{
+    std::uint32_t depth = 0; // frames: the rows of the subscriber's receive tables
+    std::uint64_t bytes = 0; // a packed ring's size, or 0 when each frame has a slot of its own
+    // Frames since the session began. `sent` is also the next frame's sequence number.
+    std::uint64_t sent = 0, credited = 0;
+    // A packed ring's byte positions: where the last sent and the last credited frames end.
+    std::uint64_t sent_bytes = 0, credited_bytes = 0;
+
+    bool packed() const
+    {
+        return bytes != 0;
+    }
+    // Frames sent and not yet credited: in flight, or held by the subscriber.
+    std::uint64_t unreleased() const
+    {
+        return sent - credited;
+    }
+    // Room for `frames` more frames after the `reserved` ones and, in a packed ring, bytes for
+    // `grants` more grants of at most `max_frame_bytes` each.
+    bool has_room(std::uint64_t reserved, std::uint64_t frames, std::uint64_t grants,
+                  std::uint64_t max_frame_bytes) const
+    {
+        return sent + reserved - credited + frames <= depth &&
+               (!packed() || ring_room(sent_bytes - credited_bytes, reserved + grants - 1,
+                                       max_frame_bytes, bytes));
+    }
+    // Room for one frame of `payload` bytes now, with none reserved: what a latest session asks
+    // before it takes a frame.
+    bool fits_now(std::uint64_t payload) const
+    {
+        return unreleased() < depth &&
+               (!packed() || next_position(payload) + payload - credited_bytes <= bytes);
+    }
+    // Where the next frame of `payload` bytes starts in a packed ring, or 0.
+    std::uint64_t next_position(std::uint64_t payload) const
+    {
+        return packed() ? place(sent_bytes, payload, bytes) : 0;
+    }
+    void record_send(std::uint64_t position, std::uint64_t payload)
+    {
+        ++sent;
+        if(packed())
+            sent_bytes = position + payload;
+    }
+    // A subscriber's Credit. Credits are cumulative, so an older one never moves a position
+    // back. False when it releases more than was sent: a protocol error.
+    bool credit(std::uint64_t frames, std::uint64_t released_bytes)
+    {
+        if(frames > sent || released_bytes > sent_bytes)
+            return false;
+        credited = std::max(credited, frames);
+        credited_bytes = std::max(credited_bytes, released_bytes);
+        return true;
+    }
+    // The frames that could still be granted, for Health: free rows of the tables and, in a
+    // packed ring, the grants has_room would still admit (ring_room solved for its grants).
+    std::uint64_t grantable(std::uint64_t max_frame_bytes) const
+    {
+        auto frames = depth - std::min<std::uint64_t>(depth, unreleased());
+        if(!packed())
+            return frames;
+        auto fit = (bytes - (sent_bytes - credited_bytes) + 1) / max_frame_bytes;
+        return std::min(frames, fit ? fit - 1 : 0);
+    }
+};
 struct PubRow
 {
     Pub *pub = nullptr;
@@ -44,10 +116,9 @@ struct PubRow
     std::uint32_t ordinal = 0;
     ucp_ep_h ep = nullptr;
     ucs_status_t transport_error = UCS_OK;
-    std::uint64_t session = 0, sent = 0, credited = 0, skipped = 0, passes = 0;
-    // An opaque stream's packed ring, and where its last sent and last credited frames end.
-    std::uint64_t ring_bytes = 0, sent_bytes = 0, credited_bytes = 0;
-    std::uint32_t ring_depth = 0, in_flight = 0;
+    std::uint64_t session = 0, skipped = 0, passes = 0;
+    SessionRing ring;
+    std::uint32_t in_flight = 0;
     std::int64_t min_interval_ns = 0, last_send_ns = 0, blocked_since_ns = 0;
     std::int64_t transfer_max_ns = 0, transfer_sum_ns = 0;
     Text<64> label, transport;

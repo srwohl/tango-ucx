@@ -142,13 +142,12 @@ int Pub::find_row(std::uint64_t session) const
     return -1;
 }
 // Room for more frames, some of them granted now: rows of the receive tables for the frames
-// and, in a packed ring, the bytes for the grants. One of each is room for one more grant.
+// and, in a packed ring, the bytes for the grants. One of each is room for one more grant. An
+// every session has reserved room for every grant not yet routed, a puller for its own.
 bool Pub::has_room(const PubRow &row, std::uint64_t frames, std::uint64_t grants) const
 {
     auto reserved = every.has(row.row) ? outstanding() : pull.reserved[row.row];
-    return row.sent + reserved - row.credited + frames <= row.ring_depth &&
-           (!row.ring_bytes || ring_room(row.sent_bytes - row.credited_bytes, reserved + grants - 1,
-                                         plan.sizes.frame_bytes, row.ring_bytes));
+    return row.ring.has_room(reserved, frames, grants, plan.sizes.frame_bytes);
 }
 RowSet LatestSessions::takers(const Pub &pub, const SourceSlot &slot, std::int64_t now) const
 {
@@ -156,11 +155,8 @@ RowSet LatestSessions::takers(const Pub &pub, const SourceSlot &slot, std::int64
     for(auto row_index : members)
     {
         const auto &row = pub.rows[row_index];
-        if(row.sent - row.credited < row.ring_depth && row.in_flight == 0 &&
-           now - row.last_send_ns >= row.min_interval_ns &&
-           (!row.ring_bytes || place(row.sent_bytes, slot.payload_bytes, row.ring_bytes) +
-                                       slot.payload_bytes - row.credited_bytes <=
-                                   row.ring_bytes))
+        if(row.in_flight == 0 && now - row.last_send_ns >= row.min_interval_ns &&
+           row.ring.fits_now(slot.payload_bytes))
             taken.add(row_index);
     }
     return taken;
@@ -297,7 +293,7 @@ RowSet PullSet::end_waits(const Pub &pub) const
 void PullSet::remove(const PubRow &row, bool started)
 {
     if(members.has(row.row) && !row.end_sent)
-        missing += row.sent - row.credited;
+        missing += row.ring.unreleased();
     members.remove(row.row);
     reserved[row.row] = 0;
     if(members.empty() && !started)
@@ -425,7 +421,7 @@ void Pub::send_control(std::uint32_t row_index, OpKind kind, std::uint8_t messag
 void Pub::send_end(std::uint32_t row_index)
 {
     auto &row = rows[row_index];
-    wire::EndMessage end_message{row.session, row.sent, next_frame_index, row.reason,
+    wire::EndMessage end_message{row.session, row.ring.sent, next_frame_index, row.reason,
                                  row.pull ? pull.missing : 0};
     auto encoded = wire::encode(end_message);
     send_control(row_index, OpKind::End, wire::End, encoded);
@@ -455,11 +451,10 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     auto *record = records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride;
     wire::FrameMessage frame_message{};
     frame_message.session = row.session;
-    frame_message.sequence = row.sent;
+    frame_message.sequence = row.ring.sent;
     frame_message.payload_bytes = slot.payload_bytes;
-    frame_message.packed = row.ring_bytes != 0; // the publisher places the frame, and says where
-    frame_message.position =
-        row.ring_bytes ? place(row.sent_bytes, slot.payload_bytes, row.ring_bytes) : 0;
+    frame_message.packed = row.ring.packed(); // the publisher places the frame, and says where
+    frame_message.position = row.ring.next_position(slot.payload_bytes);
     frame_message.index = wire::get64(record);
     frame_message.timestamp_ns = wire::get64(record + 8);
     frame_message.record_bytes = plan.sizes.padded_field_bytes;
@@ -473,9 +468,7 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     }
     operation.sent_ns = now;
     row.last_send_ns = now;
-    ++row.sent;
-    if(row.ring_bytes)
-        row.sent_bytes = frame_message.position + slot.payload_bytes;
+    row.ring.record_send(frame_message.position, slot.payload_bytes);
     ++row.in_flight;
     ++slot.sends;
     // An eager frame cannot land in GPU memory.
@@ -620,8 +613,8 @@ void Pub::open(ControlEntry &entry)
     row.used = true;
     row.every = open_message.delivery == wire::Delivery::Every;
     row.pull = open_message.delivery == wire::Delivery::Pull;
-    row.ring_depth = open_message.depth;
-    row.ring_bytes = plan.sizes.opaque ? open_message.ring_bytes : 0;
+    row.ring.depth = open_message.depth;
+    row.ring.bytes = plan.sizes.opaque ? open_message.ring_bytes : 0;
     row.gpu = open_message.gpu;
     row.session = open_message.session;
     row.min_interval_ns =
@@ -917,29 +910,18 @@ void Pub::publish_health()
         observation.slots_held += slot.held;
     }
     observation.memory_hooks = engine->memory_hooks;
-    // The frames a row can still be granted: rows of its tables and, in a packed ring, bytes.
-    auto room = [&](const PubRow &row) -> std::uint64_t
-    {
-        auto frames =
-            row.ring_depth - std::min<std::uint64_t>(row.ring_depth, row.sent - row.credited);
-        if(!row.ring_bytes)
-            return frames;
-        auto fit =
-            (row.ring_bytes - (row.sent_bytes - row.credited_bytes) + 1) / plan.sizes.frame_bytes;
-        return std::min(frames, fit ? fit - 1 : 0);
-    };
     for(const auto &row : rows)
         if(row.used)
             observation.rows[observation.count++] = {
                 row.ordinal,
-                row.ring_depth,
-                std::uint32_t(room(row)),
+                row.ring.depth,
+                std::uint32_t(row.ring.grantable(plan.sizes.frame_bytes)),
                 row.every,
                 row.closing,
-                row.sent,
+                row.ring.sent,
                 row.skipped,
                 row.transfer_max_ns,
-                row.sent ? row.transfer_sum_ns / std::int64_t(row.sent) : 0,
+                row.ring.sent ? row.transfer_sum_ns / std::int64_t(row.ring.sent) : 0,
                 row.label,
                 row.transport,
                 row.pull,
