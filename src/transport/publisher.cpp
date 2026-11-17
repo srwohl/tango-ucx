@@ -150,27 +150,26 @@ bool Pub::has_room(const PubRow &row, std::uint64_t frames, std::uint64_t grants
            (!row.ring_bytes || ring_room(row.sent_bytes - row.credited_bytes, reserved + grants - 1,
                                          plan.sizes.frame_bytes, row.ring_bytes));
 }
-std::uint64_t LatestSessions::takers(const Pub &pub, const SourceSlot &slot, std::int64_t now) const
+RowSet LatestSessions::takers(const Pub &pub, const SourceSlot &slot, std::int64_t now) const
 {
-    std::uint64_t taken = 0;
-    for(auto left = mask; left; left &= left - 1)
+    RowSet taken;
+    for(auto row_index : members)
     {
-        auto row_index = std::countr_zero(left);
         const auto &row = pub.rows[row_index];
         if(row.sent - row.credited < row.ring_depth && row.in_flight == 0 &&
            now - row.last_send_ns >= row.min_interval_ns &&
            (!row.ring_bytes || place(row.sent_bytes, slot.payload_bytes, row.ring_bytes) +
                                        slot.payload_bytes - row.credited_bytes <=
                                    row.ring_bytes))
-            taken |= std::uint64_t{1} << row_index;
+            taken.add(row_index);
     }
     return taken;
 }
 int EverySessions::blocking(const Pub &pub) const
 {
-    for(auto left = mask; left; left &= left - 1)
-        if(auto row_index = std::countr_zero(left); !pub.has_room(pub.rows[row_index]))
-            return row_index;
+    for(auto row_index : members)
+        if(!pub.has_room(pub.rows[row_index]))
+            return int(row_index);
     return -1;
 }
 // The puller that holds the range of a frame index, or none, as in a stream with no pull set.
@@ -190,7 +189,8 @@ PubRow *PullSet::puller(Pub &pub, std::uint64_t frame_index)
         return &rows[holder];
     auto first = std::max(pub.next_frame_index, range_start),
          last = std::min(pub.next_frame_index + pub.outstanding(), range_start + range_frames);
-    std::uint64_t outstanding = last > first ? last - first : 0, passed_over = 0;
+    std::uint64_t outstanding = last > first ? last - first : 0;
+    RowSet passed_over;
     for(std::uint32_t step = 1; step <= rows.size(); ++step)
     {
         auto row_index = (last_taker + step) % rows.size();
@@ -200,15 +200,16 @@ PubRow *PullSet::puller(Pub &pub, std::uint64_t frame_index)
                         untaken ? range_frames : std::max<std::uint64_t>(outstanding, 1),
                         std::max<std::uint64_t>(outstanding, 1)))
         {
-            for(; passed_over; passed_over &= passed_over - 1)
-                ++rows[std::countr_zero(passed_over)].passes;
+            for(auto passed : passed_over)
+                ++rows[passed].passes;
             reserved[row_index] += std::uint32_t(outstanding);
             ranges_taken += untaken;
             return &rows[holder = last_taker = std::uint8_t(row_index)];
         }
-        passed_over |= std::uint64_t{1} << row_index;
+        passed_over.add(row_index);
     }
-    if(untaken && !mask) // no puller is left: the range is nobody's, and its frames missing
+    // No puller is left: the range is nobody's, and its frames missing.
+    if(untaken && members.empty())
         holder = last_taker, ++ranges_taken;
     return nullptr;
 }
@@ -236,12 +237,13 @@ void PullSet::take_back(Pub &pub, std::uint32_t grants)
 int PullSet::reserve(Pub &pub)
 {
     auto *holder = puller(pub, pub.next_frame_index + pub.outstanding());
-    if(mask && !(holder && pub.has_room(*holder)))
+    if(!members.empty() && !(holder && pub.has_room(*holder)))
     {
         auto *slow = holder;
-        for(std::uint32_t row_index = 0; !holder && row_index < pub.plan.row_count; ++row_index)
-            if(has(row_index) && !(slow && slow->last_send_ns <= pub.rows[row_index].last_send_ns))
-                slow = &pub.rows[row_index];
+        if(!holder)
+            for(auto row_index : members)
+                if(!slow || pub.rows[row_index].last_send_ns < slow->last_send_ns)
+                    slow = &pub.rows[row_index];
         return slow->row;
     }
     if(holder)
@@ -270,33 +272,35 @@ PubRow *PullSet::route(Pub &pub, bool cancel)
         release(to_puller->row);
     if(cancel)
         return nullptr;
-    for(std::uint32_t row_index = 0; range_frames && !to_puller && row_index < pub.plan.row_count;
-        ++row_index)
-        if(has(row_index) && pub.has_room(pub.rows[row_index]))
-            to_puller = &pub.rows[row_index];
+    if(range_frames && !to_puller)
+        for(auto row_index : members)
+            if(pub.has_room(pub.rows[row_index]))
+            {
+                to_puller = &pub.rows[row_index];
+                break;
+            }
     missing += range_frames && !to_puller;
     return to_puller;
 }
 // A puller's End reports the set's missing count, so while one puller is sending, the End of
 // every puller waits.
-std::uint64_t PullSet::end_waits(const Pub &pub) const
+RowSet PullSet::end_waits(const Pub &pub) const
 {
-    for(auto left = mask; left; left &= left - 1)
-        if(pub.rows[std::countr_zero(left)].in_flight)
-            return mask;
-    return 0;
+    for(auto row_index : members)
+        if(pub.rows[row_index].in_flight)
+            return members;
+    return {};
 }
 // A puller left before it was sent End. Frames it received but did not release are counted as
 // missing, because a frame is never sent twice, and what it reserved goes with it. With no
 // pullers left before the start, the range is cleared: the stream then has no pull set.
 void PullSet::remove(const PubRow &row, bool started)
 {
-    auto bit = std::uint64_t{1} << row.row;
-    if(mask & bit && !row.end_sent)
+    if(members.has(row.row) && !row.end_sent)
         missing += row.sent - row.credited;
-    mask &= ~bit;
+    members.remove(row.row);
     reserved[row.row] = 0;
-    if(!mask && !started)
+    if(members.empty() && !started)
         range_frames = 0;
 }
 // A grant reserves at most one puller, so the pullers together hold no more than the grants not
@@ -305,8 +309,8 @@ void PullSet::check([[maybe_unused]] std::uint64_t outstanding) const
 {
 #ifndef NDEBUG
     std::uint64_t pulled = 0;
-    for(auto left = mask; left; left &= left - 1)
-        pulled += reserved[std::countr_zero(left)];
+    for(auto row_index : members)
+        pulled += reserved[row_index];
     assert(pulled <= outstanding);
 #endif
 }
@@ -536,10 +540,9 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     auto &row = rows[row_index];
     if(!row.used || row.closing)
         return;
-    auto bit = std::uint64_t{1} << row_index;
-    bool held_device = ((every.mask | pull.mask) & bit) != 0;
+    bool held_device = (every.members | pull.members).has(row_index);
     if(row.ready)
-        ready_mask &= ~bit;
+        ready_rows.remove(row_index);
     every.remove(row_index);
     latest.remove(row_index);
     pull.remove(row, started.load(std::memory_order_acquire));
@@ -554,7 +557,7 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
 }
 void Pub::count_holding()
 {
-    holding.store(std::uint32_t(std::popcount(every.mask | pull.mask)), std::memory_order_release);
+    holding.store((every.members | pull.members).size(), std::memory_order_release);
 }
 // Why an Open is refused, or Ok. The checks run in order and the first that fails decides.
 wire::Status Pub::check_open(const wire::OpenMessage &open_message) const
@@ -578,7 +581,7 @@ wire::Status Pub::check_open(const wire::OpenMessage &open_message) const
         return wire::Range; // a range must be whole batches
     if(is_puller && open_message.range > open_message.depth)
         return wire::Range; // a range must fit the ring
-    if(is_puller && pull.mask && open_message.range != pull.range_frames)
+    if(is_puller && !pull.members.empty() && open_message.range != pull.range_frames)
         return wire::Range; // every puller of a set has the same range
     return wire::Ok;
 }
@@ -644,7 +647,7 @@ void Pub::open(ControlEntry &entry)
     row.transport.n = std::uint8_t(worker->transports(row.ep, row.transport.c));
     row.network_devices = endpoint_network_devices(row.ep);
     last_topology_ns = 0;
-    ready_mask |= std::uint64_t{1} << row_index;
+    ready_rows.add(row_index);
     switch(open_message.delivery)
     {
         case wire::Delivery::Every:
@@ -685,7 +688,7 @@ void Pub::unissue_grants()
 void Pub::check_reservations() const
 {
 #ifndef NDEBUG
-    assert(((every.mask | latest.mask) & ~ready_mask) == 0);
+    assert((every.members | latest.members).without(ready_rows).empty());
     pull.check(outstanding());
 #endif
 }
@@ -729,18 +732,18 @@ bool Pub::route_pass(std::int64_t now)
             ++next_frame_index;
             // Every sessions and the puller had room reserved when the slot was granted.
             auto takers = latest.takers(*this, slot, now);
-            auto recipients = every.mask | takers;
+            auto recipients = every.members | takers;
             if(to_puller && to_puller->ready && !to_puller->closing)
-                recipients |= std::uint64_t{1} << to_puller->row;
-            for(auto left = latest.mask & ~takers; left; left &= left - 1)
+                recipients.add(to_puller->row);
+            for(auto skipper : latest.members.without(takers))
             {
                 ++skipped;
-                ++rows[std::countr_zero(left)].skipped;
+                ++rows[skipper].skipped;
             }
             // A send may complete at once: the buffer goes back only after the last is issued.
             slot.routing = true;
-            for(auto left = recipients; left; left &= left - 1)
-                send_frame(slot_index, std::countr_zero(left), now);
+            for(auto recipient : recipients)
+                send_frame(slot_index, recipient, now);
             slot.routing = false;
             hand_back(slot);
         }
@@ -763,7 +766,7 @@ bool Pub::route_pass(std::int64_t now)
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
         auto &row = rows[row_index];
-        if(row.ready && !row.end_sent && row.in_flight == 0 && !(end_waits >> row_index & 1))
+        if(row.ready && !row.end_sent && row.in_flight == 0 && !end_waits.has(row_index))
             send_end(row_index);
     }
     check_reservations();

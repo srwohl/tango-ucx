@@ -5,6 +5,7 @@
 #pragma once
 
 #include "publisher_operations.h"
+#include "row_set.h"
 #include "tables.h"
 #include "topology.h"
 
@@ -83,18 +84,18 @@ struct Pub;
 // they have reserved is one position of the instance: its grants not yet routed.
 struct EverySessions
 {
-    std::uint64_t mask = 0;
+    RowSet members;
     bool has(std::uint32_t row) const
     {
-        return mask >> row & 1;
+        return members.has(row);
     }
     void add(std::uint32_t row)
     {
-        mask |= std::uint64_t{1} << row;
+        members.add(row);
     }
     void remove(std::uint32_t row)
     {
-        mask &= ~(std::uint64_t{1} << row);
+        members.remove(row);
     }
     int blocking(const Pub &) const; // the first row with no room for one more grant, or -1
 };
@@ -103,17 +104,17 @@ struct SourceSlot;
 // and skips it otherwise. They never gate a grant.
 struct LatestSessions
 {
-    std::uint64_t mask = 0;
+    RowSet members;
     void add(std::uint32_t row)
     {
-        mask |= std::uint64_t{1} << row;
+        members.add(row);
     }
     void remove(std::uint32_t row)
     {
-        mask &= ~(std::uint64_t{1} << row);
+        members.remove(row);
     }
     // The rows that take this frame now; the others skip it.
-    std::uint64_t takers(const Pub &, const SourceSlot &, std::int64_t now) const;
+    RowSet takers(const Pub &, const SourceSlot &, std::int64_t now) const;
 };
 // The pullers of an instance (ADR 0002): a set that takes each frame once, a range at a time.
 // Ranges are kept on the frame index, so a cancelled slot, which uses no index, moves every
@@ -122,18 +123,19 @@ struct PullSet
 {
     // Its rows, the frames of a range, the ranges given out so far, the row each of the latest
     // went to, the row that took the last, and the frames no puller received.
-    std::uint64_t mask = 0, ranges_taken = 0, missing = 0;
+    RowSet members;
+    std::uint64_t ranges_taken = 0, missing = 0;
     std::uint32_t range_frames = 0;
     std::vector<std::uint8_t> range_pullers;
     std::uint8_t last_taker = 63;
     std::array<std::uint32_t, 64> reserved{}; // each puller's frames granted and not yet routed
     bool has(std::uint32_t row) const
     {
-        return mask >> row & 1;
+        return members.has(row);
     }
     void add(std::uint32_t row, std::uint32_t range)
     {
-        mask |= std::uint64_t{1} << row;
+        members.add(row);
         range_frames = range;
     }
     void remove(const PubRow &, bool started);
@@ -143,7 +145,7 @@ struct PullSet
     // The puller of the next slot to route, before the slot is counted as routed.
     PubRow *route(Pub &, bool cancel);
     // The pullers whose End must wait.
-    std::uint64_t end_waits(const Pub &) const;
+    RowSet end_waits(const Pub &) const;
     // The newest grants, which the device never took.
     void take_back(Pub &, std::uint32_t grants);
     void release(std::uint32_t row);
@@ -170,7 +172,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::unique_ptr<SourceSlot[]> slots;
     std::vector<std::uint16_t> order;
     std::array<PubRow, 64> rows{};
-    std::uint64_t ready_mask = 0;
+    RowSet ready_rows; // the rows whose session is ready and not retiring
     EverySessions every;
     LatestSessions latest;
     PullSet pull;
