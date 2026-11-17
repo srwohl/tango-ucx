@@ -124,14 +124,37 @@ struct SessionRing
     }
 };
 // Where a session is in its life: the session states of docs/diagrams.md, section 6. A row is
-// Free until an Open is accepted, Ready while it receives frames, and Retiring from the moment
-// it leaves (a Close, a failure, eviction or the instance closing) until its endpoint is closed
-// and the row is Free again. Pressure is not stored: pressure_row() works it out.
+// Free until an Open is accepted, Ready while it receives frames, Ended once the instance has
+// ended and the session was sent End (finished), and Retiring from the moment it leaves until
+// its endpoint is closed and the row is Free again. Pressure is not stored: pressure_row()
+// works it out.
 enum class SessionState : std::uint8_t
 {
     Free,
     Ready,
+    Ended,
     Retiring
+};
+// The End message a session is sent once, at most: not due, due, or sent. An Ended session
+// has been sent End; a retiring one is sent End only if its cause of retirement asks for it.
+enum class EndNotice : std::uint8_t
+{
+    NotDue,
+    Due,
+    Sent
+};
+// Why a session retires. The cause decides the reason its End gives, whether it is sent End at
+// all, and whether it counts as failed (the table in docs/diagrams.md, section 6; retirement()
+// in publisher.cpp).
+enum class RetireCause : std::uint8_t
+{
+    CloseCommand,    // the subscriber sent Close
+    Abandoned,       // the subscriber stopped waiting for the reply to its Open
+    TransportFailed, // UCX reported the endpoint failed, or a send failed
+    Protocol,        // the subscriber broke the protocol: too much Credit, or a rejected send
+    SourceFailed,    // a GPU source event failed, which finishes the instance
+    Evicted,         // the device waited for its room longer than pressure_timeout
+    InstanceClosing  // the publisher closes the instance: it is destroyed, or the next began
 };
 struct PubRow
 {
@@ -148,7 +171,8 @@ struct PubRow
     Text<64> label, transport;
     std::vector<NetworkDevice> network_devices;
     SessionState state = SessionState::Free;
-    bool every = false, end_due = false, end_sent = false, gpu = false, pull = false;
+    EndNotice end = EndNotice::NotDue;
+    bool every = false, gpu = false, pull = false;
     bool flush_started = false, flush_done = false, close_started = false, close_done = false;
     wire::Reason reason = wire::FinishedReason;
     std::int64_t retired_ns = 0;
@@ -158,9 +182,9 @@ struct PubRow
     {
         return state != SessionState::Free;
     }
-    bool live() const // the session has not begun to retire
+    bool live() const // Ready or Ended: the session has not begun to retire
     {
-        return state == SessionState::Ready;
+        return state == SessionState::Ready || state == SessionState::Ended;
     }
 };
 struct RowObservation
@@ -342,7 +366,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     void timer_pass(std::int64_t);
     std::optional<std::uint32_t> pressure_row() const;
     void publish_health();
-    void retire(std::uint32_t, wire::Reason, bool failed = false);
+    void retire(std::uint32_t, RetireCause);
     void send_end(std::uint32_t);
     void start_teardown(std::uint32_t, OpKind, bool force = false);
     void send_frame(std::uint32_t, std::uint32_t, std::int64_t);

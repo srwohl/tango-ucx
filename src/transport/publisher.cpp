@@ -52,7 +52,7 @@ void ep_error(void *arg, ucp_ep_h, ucs_status_t status)
     {
         if(row->transport_error == UCS_OK)
             row->transport_error = status;
-        row->pub->retire(row->row, wire::Closing, true);
+        row->pub->retire(row->row, RetireCause::TransportFailed);
     }
 }
 } // namespace
@@ -105,7 +105,7 @@ bool Pub::quiet() const
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
         const auto &row = rows[row_index];
-        if(row.in_use() && (row.in_flight || (row.state == SessionState::Ready && !row.end_sent)))
+        if(row.in_use() && (row.in_flight || row.state == SessionState::Ready))
             return false;
     }
     return true;
@@ -117,11 +117,7 @@ bool Pub::done() const
 void Pub::retire_all()
 {
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
-        if(rows[row_index].live())
-        {
-            retire(row_index, wire::Closing, false);
-            rows[row_index].end_due = true; // the subscriber learns why its session ended
-        }
+        retire(row_index, RetireCause::InstanceClosing); // a row already retiring stays as it is
 }
 void Pub::release_memory() noexcept
 {
@@ -292,7 +288,7 @@ RowSet PullSet::end_waits(const Pub &pub) const
 // pullers left before the start, the range is cleared: the stream then has no pull set.
 void PullSet::remove(const PubRow &row, bool started)
 {
-    if(members.has(row.row) && !row.end_sent)
+    if(members.has(row.row) && row.end != EndNotice::Sent)
         missing += row.ring.unreleased();
     members.remove(row.row);
     reserved[row.row] = 0;
@@ -424,7 +420,9 @@ void Pub::send_end(std::uint32_t row_index)
                                  row.pull ? pull.missing : 0};
     auto encoded = wire::encode(end_message);
     send_control(row_index, OpKind::End, wire::End, encoded);
-    row.end_sent = true;
+    row.end = EndNotice::Sent;
+    if(row.state == SessionState::Ready)
+        row.state = SessionState::Ended;
 }
 // Starts the flush or the close of a retiring row's endpoint. A forced close does not wait for
 // the subscriber.
@@ -462,7 +460,7 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     auto header_bytes = wire::encode_into(header, frame_message);
     if(!header_bytes)
     {
-        retire(row_index, wire::Protocol, true);
+        retire(row_index, RetireCause::Protocol);
         return;
     }
     operation.sent_ns = now;
@@ -496,7 +494,8 @@ void Pub::on_send(OpMeta *operation, ucs_status_t status)
     row.transfer_max_ns = std::max(row.transfer_max_ns, transfer_ns);
     row.transfer_sum_ns += transfer_ns;
     if(status != UCS_OK && status != UCS_ERR_CANCELED)
-        retire(row_index, status == UCS_ERR_REJECTED ? wire::Protocol : wire::Closing, true);
+        retire(row_index,
+               status == UCS_ERR_REJECTED ? RetireCause::Protocol : RetireCause::TransportFailed);
 }
 void Pub::on_control(OpMeta *operation, ucs_status_t status)
 {
@@ -512,7 +511,7 @@ void Pub::on_control(OpMeta *operation, ucs_status_t status)
             if(row.in_flight)
                 --row.in_flight;
             if(status != UCS_OK && status != UCS_ERR_CANCELED && row.live())
-                retire(row_index, wire::Closing, true);
+                retire(row_index, RetireCause::TransportFailed);
             return;
         case OpKind::Flush:
             row.flush_done = true;
@@ -525,7 +524,40 @@ void Pub::on_control(OpMeta *operation, ucs_status_t status)
             return;
     }
 }
-void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
+namespace
+{
+// What a cause of retirement means for the session (docs/diagrams.md, section 6): the reason its
+// End gives, whether it is sent End at all, and whether it counts as failed, which UcxFailedEvery
+// reports for the sessions that hold the device.
+struct Retirement
+{
+    wire::Reason reason;
+    bool end_due;
+    bool failed;
+};
+constexpr Retirement retirement(RetireCause cause)
+{
+    switch(cause)
+    {
+        case RetireCause::CloseCommand:
+        case RetireCause::Abandoned:
+            return {.reason = wire::Closing, .end_due = false, .failed = false};
+        case RetireCause::TransportFailed: // nothing can reach the subscriber
+            return {.reason = wire::Closing, .end_due = false, .failed = true};
+        case RetireCause::Protocol:
+        case RetireCause::SourceFailed:
+            return {.reason = wire::Protocol, .end_due = true, .failed = true};
+        case RetireCause::Evicted:
+            return {.reason = wire::Evicted, .end_due = true, .failed = true};
+        case RetireCause::InstanceClosing: // the subscriber learns why its session ended
+            return {.reason = wire::Closing, .end_due = true, .failed = false};
+    }
+    return {.reason = wire::Closing, .end_due = false, .failed = false};
+}
+} // namespace
+// A live session leaves: it stops receiving frames, gives up what it reserved, and its row is
+// torn down by retire_pass. A row already retiring, or free, is left as it is.
+void Pub::retire(std::uint32_t row_index, RetireCause cause)
 {
     if(row_index >= plan.row_count)
         return;
@@ -537,12 +569,14 @@ void Pub::retire(std::uint32_t row_index, wire::Reason why, bool failed)
     every.remove(row_index);
     latest.remove(row_index);
     pull.remove(row, started.load(std::memory_order_acquire));
-    if(failed && held_device)
+    auto effect = retirement(cause);
+    if(effect.failed && held_device)
         ++failed_every;
     row.state = SessionState::Retiring;
-    row.reason = why;
+    row.reason = effect.reason;
     row.retired_ns = now_ns();
-    row.end_due = why != wire::FinishedReason && why != wire::Closing;
+    if(row.end != EndNotice::Sent)
+        row.end = effect.end_due ? EndNotice::Due : EndNotice::NotDue;
     count_holding();
 }
 void Pub::count_holding()
@@ -584,7 +618,7 @@ void Pub::close(ControlEntry &entry)
         return;
     }
     rows[row_index].close_reply = &entry;
-    retire(row_index, wire::Closing, false);
+    retire(row_index, RetireCause::CloseCommand);
 }
 void Pub::open(ControlEntry &entry)
 {
@@ -657,7 +691,7 @@ void Pub::open(ControlEntry &entry)
     std::memcpy(reply.address.data(), address.data(), address.size());
     // The subscriber gave up waiting for the reply, so nobody will use the session.
     if(!control.reply(entry, reply))
-        retire(row_index, wire::Closing, false);
+        retire(row_index, RetireCause::Abandoned);
 }
 // Takes back the grants the device never picked up, after finish(). The grant ring is first in,
 // first out, so the grants still in it are the newest. Their slots become free, and the room
@@ -703,7 +737,7 @@ bool Pub::route_pass(std::int64_t now)
                 slot.cancel = true;
                 for(std::uint32_t i = 0; i < plan.row_count; ++i)
                     if(rows[i].live())
-                        retire(i, wire::Protocol, true);
+                        retire(i, RetireCause::SourceFailed);
             }
             slot.gpu_accessed = false;
         }
@@ -753,8 +787,7 @@ bool Pub::route_pass(std::int64_t now)
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
         auto &row = rows[row_index];
-        if(row.state == SessionState::Ready && !row.end_sent && row.in_flight == 0 &&
-           !end_waits.has(row_index))
+        if(row.state == SessionState::Ready && row.in_flight == 0 && !end_waits.has(row_index))
             send_end(row_index);
     }
     check_reservations();
@@ -805,7 +838,7 @@ bool Pub::retire_pass(std::int64_t now)
         auto &row = rows[row_index];
         if(row.state != SessionState::Retiring)
             continue;
-        if(row.end_due && !row.end_sent && row.in_flight == 0 && row.ep)
+        if(row.end == EndNotice::Due && row.in_flight == 0 && row.ep)
         {
             send_end(row_index);
             work = true;
@@ -835,8 +868,7 @@ bool Pub::retire_pass(std::int64_t now)
                 row.close_reply = nullptr;
             }
             row.state = SessionState::Free;
-            row.end_due = false;
-            row.end_sent = false;
+            row.end = EndNotice::NotDue;
             work = true;
         }
         else if(row.close_started && now - row.retired_ns > k_close_ns + k_quarantine_ns)
@@ -873,7 +905,7 @@ void Pub::timer_pass(std::int64_t now)
         else if(!row.blocked_since_ns)
             row.blocked_since_ns = now;
         else if(timeout && now - row.blocked_since_ns > timeout)
-            retire(row_index, wire::Evicted, true);
+            retire(row_index, RetireCause::Evicted);
     }
     publish_health();
 }

@@ -36,7 +36,7 @@ ucs_status_t on_credit(void *arg, const void *header, size_t header_bytes, void 
 
     // A subscriber cannot release more frames or bytes than the publisher has sent.
     if(!row.ring.credit(credit_message.credit, credit_message.bytes))
-        publisher->retire(row_index, wire::Protocol, true);
+        publisher->retire(row_index, RetireCause::Protocol);
     return UCS_OK;
 }
 } // namespace
