@@ -18,6 +18,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -168,7 +169,8 @@ struct EverySessions
     {
         members.remove(row);
     }
-    int blocking(const Pub &) const; // the first row with no room for one more grant, or -1
+    // The first row with no room for one more grant, if any.
+    std::optional<std::uint32_t> blocking(const Pub &) const;
 };
 struct SourceSlot;
 // The latest sessions of an instance (ADR 0002): each takes a frame when it has room and is due,
@@ -212,7 +214,7 @@ struct PullSet
     void remove(const PubRow &, bool started);
     PubRow *puller(Pub &, std::uint64_t frame_index);
     // Room for the next grant, or the row the device waits for.
-    int reserve(Pub &);
+    std::optional<std::uint32_t> reserve(Pub &);
     // The puller of the next slot to route, before the slot is counted as routed.
     PubRow *route(Pub &, bool cancel);
     // The pullers whose End must wait.
@@ -248,7 +250,9 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     LatestSessions latest;
     PullSet pull;
     std::uint64_t slots_granted = 0, slots_routed = 0, next_frame_index = 0, skipped = 0;
-    std::uint32_t scan = 0, failed_every = 0, blocked = 0, ordinals = 0;
+    std::uint32_t scan = 0, failed_every = 0, ordinals = 0;
+    // The row the last grant pass stopped at: a slot was free, and this row had no room for it.
+    std::optional<std::uint32_t> blocked;
     IndexRing grants{IndexRing::Fd::None}; // acquire sleeps on the queue; nobody polls a grant fd
     HealthCopy<Observation> health_copy;
     Topology topology;
@@ -304,6 +308,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     bool grant_pass();
     bool retire_pass(std::int64_t);
     void timer_pass(std::int64_t);
+    std::optional<std::uint32_t> pressure_row() const;
     void publish_health();
     void retire(std::uint32_t, wire::Reason, bool failed = false);
     void send_end(std::uint32_t);

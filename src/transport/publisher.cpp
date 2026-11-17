@@ -161,12 +161,12 @@ RowSet LatestSessions::takers(const Pub &pub, const SourceSlot &slot, std::int64
     }
     return taken;
 }
-int EverySessions::blocking(const Pub &pub) const
+std::optional<std::uint32_t> EverySessions::blocking(const Pub &pub) const
 {
     for(auto row_index : members)
         if(!pub.has_room(pub.rows[row_index]))
-            return int(row_index);
-    return -1;
+            return row_index;
+    return {};
 }
 // The puller that holds the range of a frame index, or none, as in a stream with no pull set.
 // The index says which range, and the table which puller: after a pass no rule gives it. A
@@ -227,10 +227,10 @@ void PullSet::take_back(Pub &pub, std::uint32_t grants)
             release(holder->row);
 }
 // The puller of the next grant's frame index, which is the next one if no slot ahead of it is
-// cancelled, reserves room for the grant, and -1 is returned. Without room the device waits for
-// that puller or, when none has room for the range, for the one longest without a frame, and
-// that row is returned. With no puller left it does not wait: -1.
-int PullSet::reserve(Pub &pub)
+// cancelled, reserves room for the grant, and nothing is returned. Without room the device waits
+// for that puller or, when none has room for the range, for the one longest without a frame, and
+// that row is returned. With no puller left it does not wait: nothing.
+std::optional<std::uint32_t> PullSet::reserve(Pub &pub)
 {
     auto *holder = puller(pub, pub.next_frame_index + pub.outstanding());
     if(!members.empty() && !(holder && pub.has_room(*holder)))
@@ -244,7 +244,7 @@ int PullSet::reserve(Pub &pub)
     }
     if(holder)
         ++reserved[holder->row];
-    return -1;
+    return {};
 }
 // The puller the next routed slot goes to, which releases the room it reserved. A cancelled
 // slot uses no frame index, so every later grant moves down by one, and the puller of the newest
@@ -768,7 +768,7 @@ bool Pub::grant_pass()
     if(finishing.load() || !started.load(std::memory_order_acquire))
         return false;
     bool work = false;
-    blocked = 0;
+    blocked.reset();
     for(;;)
     {
         int slot_index = -1;
@@ -786,14 +786,11 @@ bool Pub::grant_pass()
             break;
         // The every sessions gate first. The pull set is asked only if they have room, because it
         // reserves its puller's room as it answers.
-        int row_index = every.blocking(*this);
-        if(row_index < 0)
-            row_index = pull.reserve(*this);
-        if(row_index >= 0)
-        {
-            blocked = row_index + 1;
+        blocked = every.blocking(*this);
+        if(!blocked)
+            blocked = pull.reserve(*this);
+        if(blocked)
             break;
-        }
         slots[slot_index].held = true;
         order[slots_granted % plan.slot_count] = slot_index;
         grants.push(slot_index);
@@ -854,20 +851,27 @@ bool Pub::retire_pass(std::int64_t now)
     }
     return work;
 }
-// Eviction counts only while the device waits for a grant that a free slot could serve but a row
-// has no room for: the pressure Health reports. An idle device evicts nobody, and after finish()
-// the device waits for no grant. Of a set, only the puller the device waits for is evicted: one
-// that is passed over holds no pressure.
+// The row the device is waiting for, if it is waiting: it has taken every grant, and the last
+// grant pass stopped at this row although a slot was free. That is the pressure Health reports.
+// An idle device has a grant to take, and after finish() the device waits for no grant.
+std::optional<std::uint32_t> Pub::pressure_row() const
+{
+    if(finishing.load(std::memory_order_relaxed) || !grants.empty())
+        return {};
+    return blocked;
+}
+// Eviction counts only while the device waits: every every session without room, and of a set
+// only the puller the device waits for. A puller that is passed over holds no pressure.
 void Pub::timer_pass(std::int64_t now)
 {
-    bool waiting = !finishing.load(std::memory_order_relaxed) && grants.empty() && blocked;
+    auto pressure = pressure_row();
     auto timeout = std::chrono::nanoseconds(limits.pressure_timeout).count();
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
         auto &row = rows[row_index];
         bool blocking =
-            waiting && (every.has(row_index) ? !has_room(row)
-                                             : pull.has(row_index) && blocked == row_index + 1);
+            pressure &&
+            (every.has(row_index) ? !has_room(row) : pull.has(row_index) && *pressure == row_index);
         if(!blocking)
             row.blocked_since_ns = 0;
         else if(!row.blocked_since_ns)
@@ -899,9 +903,8 @@ void Pub::publish_health()
     observation.missing = pull.missing;
     observation.failed_every = failed_every;
     observation.source_failed = source_failed;
-    // After finish() the device waits for no grant, so nobody holds pressure (timer_pass).
-    bool waiting = !finishing.load(std::memory_order_relaxed) && grants.empty() && blocked;
-    observation.pressure_from = waiting ? rows[blocked - 1].ordinal : 0;
+    auto pressure = pressure_row();
+    observation.pressure_from = pressure ? rows[*pressure].ordinal : 0;
     for(const auto &slot : std::span(slots.get(), plan.slot_count))
     {
         observation.slots_free += !slot.held && slot.sends == 0;
