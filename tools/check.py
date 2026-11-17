@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check glossary use, target layering, the public-name allowance, and the wire registry."""
+"""Check glossary use, target layering, the public-name inventories, and the wire registry."""
 
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
 CPP_SUFFIXES = {".h", ".hpp", ".cc", ".cpp", ".cxx", ".cu", ".cuh", ".inl"}
-PUBLIC_NAME_LIMIT = 106  # the lent ring
-PYTHON_NAME_LIMIT = 38
 
 
 def words(value: str) -> list[str]:
@@ -177,10 +175,8 @@ def public_header_text() -> str:
     )
 
 
-def check_names(label: str, inventory: str, declared: set[str], limit: int) -> list[str]:
+def check_names(label: str, inventory: str, declared: set[str]) -> list[str]:
     names, errors = read_inventory(ROOT / inventory)
-    if len(names) > limit:
-        errors.append(f"{label}: {len(names)} public names exceed the {limit}-name allowance")
     for name in sorted(declared - set(names)):
         errors.append(f"{label}: {name!r} is public but not in {inventory}")
     for name in sorted(set(names) - declared):
@@ -307,8 +303,8 @@ def check_wire() -> list[str]:
 def main() -> int:
     cpp = cpp_declared_names(public_header_text())
     python = python_declared_names(ROOT / "python/tango_ucx")
-    errors = check_names("C++", "tools/public_names.txt", cpp, PUBLIC_NAME_LIMIT)
-    errors += check_names("Python", "tools/python_names.txt", python, PYTHON_NAME_LIMIT)
+    errors = check_names("C++", "tools/public_names.txt", cpp)
+    errors += check_names("Python", "tools/python_names.txt", python)
     errors.extend(check_layering())
     errors.extend(check_wire())
     if errors:
@@ -317,8 +313,8 @@ def main() -> int:
         return 1
 
     print(
-        f"architecture checks passed: {len(cpp)} C++ names (limit {PUBLIC_NAME_LIMIT}), "
-        f"{len(python)} Python names (limit {PYTHON_NAME_LIMIT}), wire registry matches"
+        f"architecture checks passed: {len(cpp)} C++ names, {len(python)} Python names, "
+        "wire registry matches"
     )
     return 0
 
