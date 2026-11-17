@@ -434,7 +434,7 @@ void Pub::start_teardown(std::uint32_t row_index, OpKind kind, bool force)
     if(operation.in_flight)
         return;
     auto &row = rows[row_index];
-    (kind == OpKind::Flush ? row.flush_started : row.close_started) = true;
+    row.teardown = kind == OpKind::Flush ? Teardown::Flushing : Teardown::Closing;
     auto params = prepare(operation, force ? UCP_EP_CLOSE_FLAG_FORCE : 0);
     complete_if_done(operation, kind == OpKind::Flush ? ucp_ep_flush_nbx(row.ep, &params)
                                                       : ucp_ep_close_nbx(row.ep, &params));
@@ -514,10 +514,11 @@ void Pub::on_control(OpMeta *operation, ucs_status_t status)
                 retire(row_index, RetireCause::TransportFailed);
             return;
         case OpKind::Flush:
-            row.flush_done = true;
+            if(row.teardown == Teardown::Flushing) // a forced close may have overtaken it
+                row.teardown = Teardown::Flushed;
             return;
         case OpKind::Close:
-            row.close_done = true;
+            row.teardown = Teardown::Closed;
             row.ep = nullptr;
             return;
         case OpKind::Frame:
@@ -845,20 +846,21 @@ bool Pub::retire_pass(std::int64_t now)
             continue;
         }
         bool late = now - row.retired_ns > k_close_ns;
-        bool unclosed = row.ep && !row.close_started, idle = row.in_flight == 0;
+        bool unclosed = row.ep && row.teardown < Teardown::Closing;
+        bool idle = row.in_flight == 0;
         // A flush follows the row's last send and a close follows the flush. A late row is
         // closed by force, whatever it still has in flight.
-        if(unclosed && (late || (row.flush_done && idle)))
+        if(unclosed && (late || (row.teardown == Teardown::Flushed && idle)))
         {
             start_teardown(row_index, OpKind::Close, late);
             work = true;
         }
-        else if(unclosed && !row.flush_started && idle)
+        else if(unclosed && row.teardown == Teardown::None && idle)
         {
             start_teardown(row_index, OpKind::Flush);
             work = true;
         }
-        if(row.close_done && row.in_flight == 0 &&
+        if(row.teardown == Teardown::Closed && row.in_flight == 0 &&
            !operations.control(row_index, OpKind::Flush)->in_flight &&
            !operations.control(row_index, OpKind::Close)->in_flight)
         {
@@ -869,9 +871,11 @@ bool Pub::retire_pass(std::int64_t now)
             }
             row.state = SessionState::Free;
             row.end = EndNotice::NotDue;
+            row.teardown = Teardown::None;
             work = true;
         }
-        else if(row.close_started && now - row.retired_ns > k_close_ns + k_quarantine_ns)
+        else if(row.teardown >= Teardown::Closing &&
+                now - row.retired_ns > k_close_ns + k_quarantine_ns)
         {
             quarantine_owner();
             return work;

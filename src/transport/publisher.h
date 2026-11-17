@@ -143,6 +143,17 @@ enum class EndNotice : std::uint8_t
     Due,
     Sent
 };
+// How far a retiring session's endpoint has been torn down: flushed after its last send, then
+// closed (retire_pass). A late row is closed by force from any step before Closing, even with
+// its flush still in flight.
+enum class Teardown : std::uint8_t
+{
+    None,
+    Flushing,
+    Flushed,
+    Closing,
+    Closed
+};
 // Why a session retires. The cause decides the reason its End gives, whether it is sent End at
 // all, and whether it counts as failed (the table in docs/diagrams.md, section 6; retirement()
 // in publisher.cpp).
@@ -173,7 +184,7 @@ struct PubRow
     SessionState state = SessionState::Free;
     EndNotice end = EndNotice::NotDue;
     bool every = false, gpu = false, pull = false;
-    bool flush_started = false, flush_done = false, close_started = false, close_done = false;
+    Teardown teardown = Teardown::None;
     wire::Reason reason = wire::FinishedReason;
     std::int64_t retired_ns = 0;
     ControlEntry *close_reply = nullptr;
