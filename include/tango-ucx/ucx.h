@@ -94,7 +94,7 @@ struct Health
     std::uint64_t last_index = 0, transfer_max_ns = 0, transfer_mean_ns = 0;
     std::uint64_t quarantined_bytes = 0;
     bool memory_hooks = true;
-    bool started = false; // a publisher's: ucx_start was called
+    bool started = false; // a publisher's: ucx_start started it, before any finish()
     std::string transport, failure;
     Topology topology; // sampled on the progress thread, at setup and once a second
 };

@@ -159,6 +159,23 @@ TEST_CASE("a fenced ucx_start gives up at its deadline without starting")
     archiver.close(test::deadline());
 }
 
+TEST_CASE("an instance finished before ucx_start was never started")
+{
+    Publisher publisher(test::small_description(), test::small_limits());
+    publisher.finish();
+    CHECK_FALSE(publisher.ucx_start(0, test::deadline())); // it finished first
+    CHECK_FALSE(publisher.health().started);
+}
+
+TEST_CASE("ucx_start after finish does not start the instance")
+{
+    Publisher publisher(test::small_description(), test::small_limits());
+    publisher.finish();
+    publisher.ucx_start();
+    CHECK_FALSE(publisher.health().started);
+    CHECK_FALSE(publisher.acquire(test::deadline(std::chrono::seconds(0))));
+}
+
 TEST_CASE("a lent ring sends the device's own buffer and hands it back once sent")
 {
     auto limits = test::small_limits();

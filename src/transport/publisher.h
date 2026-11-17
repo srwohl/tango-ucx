@@ -291,6 +291,72 @@ struct PullSet
     void release(std::uint32_t row);
     void check(std::uint64_t outstanding) const; // asserts; nothing in a release build
 };
+// The phases of a publisher instance: docs/diagrams.md, section 5. Before the start, sessions
+// join and no slot is granted. Started, slots are granted while the sessions have room.
+// Finishing, no more slots are granted and the ones not yet acquired are taken back. Ended,
+// every slot the device held is routed, and the sessions are sent End.
+enum class Phase : std::uint8_t
+{
+    Before,
+    Started,
+    Finishing,
+    Ended
+};
+// An instance's phase, which only moves forward. Device threads start and finish the instance,
+// and so does begin() on its caller's thread; only the progress loop ends it. Each step is one
+// compare-and-swap, so a start and a finish that race cannot both win: an instance that is
+// finishing is never started. It also keeps whether the instance was ever started, which the
+// phase alone cannot say once it is finishing: Health reports it.
+class InstancePhase
+{
+  public:
+    Phase load() const
+    {
+        return phase_of(state_.load(std::memory_order_acquire));
+    }
+    bool was_started() const
+    {
+        return (state_.load(std::memory_order_acquire) & k_started) != 0;
+    }
+    // Before to Started. True when the instance is started, also by an earlier call; false
+    // when it is finishing or has ended.
+    bool start()
+    {
+        auto expected = std::uint8_t(Phase::Before);
+        if(state_.compare_exchange_strong(expected, std::uint8_t(Phase::Started) | k_started,
+                                          std::memory_order_acq_rel))
+            return true;
+        return phase_of(expected) == Phase::Started;
+    }
+    // Before or Started to Finishing. True when this call finished it.
+    bool finish()
+    {
+        auto current = state_.load(std::memory_order_acquire);
+        while(phase_of(current) < Phase::Finishing)
+            if(state_.compare_exchange_weak(current,
+                                            std::uint8_t(Phase::Finishing) | (current & k_started),
+                                            std::memory_order_acq_rel))
+                return true;
+        return false;
+    }
+    // Finishing to Ended: the progress loop, once every granted slot is routed. Nobody else
+    // moves an instance on from Finishing, so a plain store keeps the started bit.
+    void end()
+    {
+        auto current = state_.load(std::memory_order_acquire);
+        state_.store(std::uint8_t(Phase::Ended) | (current & k_started), std::memory_order_release);
+    }
+
+  private:
+    // The phase in the low bits and, in the top bit, whether the instance was ever started. One
+    // atomic, so the two always change, and are read, together.
+    static constexpr std::uint8_t k_started = 0x80;
+    static Phase phase_of(std::uint8_t state)
+    {
+        return Phase(state & ~k_started);
+    }
+    std::atomic<std::uint8_t> state_{std::uint8_t(Phase::Before)};
+};
 // One publisher instance: one description, its sessions, slots, records and grants. The engine
 // drives it on its progress thread; the device holds it through its slots.
 struct Pub final : Owner, std::enable_shared_from_this<Pub>
@@ -325,11 +391,11 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     Topology topology;
     HealthCopy<Topology> topology_copy;
     std::int64_t last_topology_ns = 0;
-    std::atomic<bool> started{false}, finishing{false};
+    InstancePhase phase;
     // Every sessions and pullers that are ready and not retiring. Written on the progress thread
     // as they join and retire, so a waiting start reads it exactly, unlike Health.
     std::atomic<std::uint32_t> holding{0};
-    bool ended = false, quarantined = false;
+    bool quarantined = false;
     bool source_failed = false;
     std::shared_ptr<Pub> self_keep;
     Pub(std::shared_ptr<Engine>, Description, PublisherPlan);
@@ -347,7 +413,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     // Nothing of this instance is being sent, nor can be: the device returned every slot it
     // acquired, every send completed and every ready session was sent End.
     bool quiet() const;
-    bool done() const; // ended, and every session closed
+    bool done() const; // Ended, and every session closed
     void retire_all();
     void count_holding();
     void release_memory() noexcept; // on the progress thread: what is registered with UCX

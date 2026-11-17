@@ -100,7 +100,7 @@ bool Pub::next_posted() const
 }
 bool Pub::quiet() const
 {
-    if(!ended)
+    if(phase.load() != Phase::Ended)
         return false;
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
@@ -112,7 +112,7 @@ bool Pub::quiet() const
 }
 bool Pub::done() const
 {
-    return ended && std::ranges::none_of(rows, &PubRow::in_use);
+    return phase.load() == Phase::Ended && std::ranges::none_of(rows, &PubRow::in_use);
 }
 void Pub::retire_all()
 {
@@ -569,7 +569,7 @@ void Pub::retire(std::uint32_t row_index, RetireCause cause)
     ready_rows.remove(row_index);
     every.remove(row_index);
     latest.remove(row_index);
-    pull.remove(row, started.load(std::memory_order_acquire));
+    pull.remove(row, phase.was_started());
     auto effect = retirement(cause);
     if(effect.failed && held_device)
         ++failed_every;
@@ -592,11 +592,12 @@ wire::Status Pub::check_open(const wire::OpenMessage &open_message) const
     bool is_puller = open_message.delivery == wire::Delivery::Pull;
     if(open_message.instance_id != instance_id)
         return wire::InstanceId;
-    if(finishing.load())
+    auto current = phase.load();
+    if(current >= Phase::Finishing)
         return wire::Finished;
     if(holds_device && !limits.allow_every)
         return wire::EveryRefused;
-    if(holds_device && started.load(std::memory_order_acquire))
+    if(holds_device && current == Phase::Started)
         return wire::Started; // every and pull must join before the start
     if(find_row(open_message.session) >= 0)
         return wire::Malformed; // the session id is already in use
@@ -718,7 +719,7 @@ void Pub::check_reservations() const
 bool Pub::route_pass(std::int64_t now)
 {
     bool work = false;
-    if(finishing.load(std::memory_order_relaxed))
+    if(phase.load() >= Phase::Finishing)
         unissue_grants();
     while(slots_routed < slots_granted)
     {
@@ -734,7 +735,7 @@ bool Pub::route_pass(std::int64_t now)
             if(state == GpuEventState::Failed)
             {
                 source_failed = true;
-                finishing.store(true);
+                phase.finish();
                 slot.cancel = true;
                 for(std::uint32_t i = 0; i < plan.row_count; ++i)
                     if(rows[i].live())
@@ -775,11 +776,9 @@ bool Pub::route_pass(std::int64_t now)
         }
         work = true;
     }
-    if(finishing.load() && slots_routed == slots_granted && !ended)
-    {
-        ended = true;
-    }
-    if(!ended)
+    if(phase.load() == Phase::Finishing && slots_routed == slots_granted)
+        phase.end();
+    if(phase.load() != Phase::Ended)
     {
         check_reservations();
         return work;
@@ -796,7 +795,7 @@ bool Pub::route_pass(std::int64_t now)
 }
 bool Pub::grant_pass()
 {
-    if(finishing.load() || !started.load(std::memory_order_acquire))
+    if(phase.load() != Phase::Started)
         return false;
     bool work = false;
     blocked.reset();
@@ -888,7 +887,7 @@ bool Pub::retire_pass(std::int64_t now)
 // An idle device has a grant to take, and after finish() the device waits for no grant.
 std::optional<std::uint32_t> Pub::pressure_row() const
 {
-    if(finishing.load(std::memory_order_relaxed) || !grants.empty())
+    if(phase.load() != Phase::Started || !grants.empty())
         return {};
     return blocked;
 }
@@ -1089,10 +1088,11 @@ void Publisher::begin(Description description)
 std::optional<Slot> Publisher::acquire(Deadline deadline)
 {
     auto pub = p_ ? p_->instance() : nullptr;
-    if(!pub || pub->finishing.load())
+    if(!pub || pub->phase.load() >= transport::Phase::Finishing)
         return {};
-    int slot_index =
-        pub->grants.pop_until(deadline, [&] { return pub->finishing.load() || pub->closed(); });
+    int slot_index = pub->grants.pop_until(
+        deadline,
+        [&] { return pub->phase.load() >= transport::Phase::Finishing || pub->closed(); });
     if(slot_index < 0)
         return {};
     return Slot(std::move(pub), slot_index);
@@ -1102,7 +1102,7 @@ void Publisher::ucx_start()
 {
     if(auto pub = p_ ? p_->instance() : nullptr)
     {
-        pub->started.store(true, std::memory_order_release);
+        pub->phase.start();
         p_->poke();
     }
 }
@@ -1113,27 +1113,26 @@ bool Publisher::ucx_start(std::uint32_t every, Deadline deadline)
     auto pub = p_ ? p_->instance() : nullptr;
     if(!pub)
         return false;
-    while(!pub->started.load(std::memory_order_acquire))
+    while(pub->phase.load() == transport::Phase::Before)
     {
-        if(pub->finishing.load(std::memory_order_acquire))
-            return false;
         if(pub->holding.load(std::memory_order_acquire) >= every)
         {
-            pub->started.store(true, std::memory_order_release);
+            if(!pub->phase.start()) // a finish won the race
+                return false;
             p_->poke();
-            break;
+            return true;
         }
         if(std::chrono::steady_clock::now() >= deadline)
             return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    return true;
+    return pub->phase.was_started();
 }
 void Publisher::finish()
 {
     if(auto pub = p_ ? p_->instance() : nullptr)
     {
-        pub->finishing.store(true, std::memory_order_release);
+        pub->phase.finish();
         pub->grants.signal();
         p_->poke();
     }
@@ -1163,7 +1162,7 @@ Health Publisher::health() const
                   .slots_held = observation.slots_held,
                   .quarantined_bytes = transport::quarantine().total.load(),
                   .memory_hooks = observation.memory_hooks,
-                  .started = pub->started.load(std::memory_order_acquire),
+                  .started = pub->phase.was_started(),
                   .topology = pub->topology_copy.read()};
     if(observation.source_failed)
         result.failure = "a GPU source event failed; its memory cannot be reused";

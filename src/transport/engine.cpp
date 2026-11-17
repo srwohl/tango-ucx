@@ -142,7 +142,7 @@ bool Engine::busy() const
         return true;
     if(!active)
         return false;
-    if(active->started.load(std::memory_order_acquire) && !active->ended)
+    if(active->phase.was_started() && active->phase.load() != Phase::Ended)
         return true;
     return std::ranges::any_of(active->rows, &PubRow::in_use);
 }
@@ -161,7 +161,7 @@ void Engine::begin(Description description)
     // A device thread waiting in acquire returns at once.
     if(auto previous = instance())
     {
-        previous->finishing.store(true, std::memory_order_release);
+        previous->phase.finish();
         previous->grants.signal();
     }
     {
@@ -183,11 +183,8 @@ bool Engine::begin_pass(std::int64_t now)
         return false;
     if(active && !making)
     {
-        if(!active->finishing.load())
-        {
-            active->finishing.store(true, std::memory_order_release);
+        if(active->phase.finish())
             active->grants.signal();
-        }
         if(!begin_since_ns)
             begin_since_ns = now;
         bool quiet = active->quiet();
