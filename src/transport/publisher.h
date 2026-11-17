@@ -39,11 +39,20 @@ struct SourceSlot
     GpuStream gpu_stream;
     GpuEvent event;
 };
-// A session's receive ring, as the publisher keeps account of it. The subscriber's ring holds
-// `depth` frames and, in an opaque stream's packed ring, `bytes` bytes. The publisher keeps two
+// A session's receive ring, as the publisher keeps account of it. The publisher keeps two
 // positions per ring, what it sent and what the subscriber credited back, and both only increase
-// (ADR 0002). What is between them is still in the subscriber's ring, and the rest is room.
+// (ADR 0002). What is between them is still in the subscriber's ring, and the rest is room:
+//
+//     credited          sent
+//        |-- unreleased --|-- reserved --|---- free ----|
+//        |<------------------- depth ------------------>|
+//
 // Room promised to grants not yet routed is not kept here: the caller passes it as `reserved`.
+//
+// A frame takes a row of the subscriber's receive tables, so `depth` rows limit every ring. In
+// a packed ring (an opaque stream's), frames differ in size and lie end to end, so the frame's
+// payload must also fit in the ring's `bytes`: a packed ring has both limits. Any other ring
+// gives each frame a slot of its own, and `depth` is its only limit.
 struct SessionRing
 {
     std::uint32_t depth = 0; // frames: the rows of the subscriber's receive tables
@@ -63,13 +72,14 @@ struct SessionRing
         return sent - credited;
     }
     // Room for `frames` more frames after the `reserved` ones and, in a packed ring, bytes for
-    // `grants` more grants of at most `max_frame_bytes` each.
+    // `grants` more grants of at most `max_frame_bytes` each. Both are 1 for one more grant.
     bool has_room(std::uint64_t reserved, std::uint64_t frames, std::uint64_t grants,
                   std::uint64_t max_frame_bytes) const
     {
-        return sent + reserved - credited + frames <= depth &&
-               (!packed() || ring_room(sent_bytes - credited_bytes, reserved + grants - 1,
-                                       max_frame_bytes, bytes));
+        bool rows_free = unreleased() + reserved + frames <= depth;
+        bool bytes_free = !packed() || ring_room(sent_bytes - credited_bytes, reserved + grants - 1,
+                                                 max_frame_bytes, bytes);
+        return rows_free && bytes_free;
     }
     // Room for one frame of `payload` bytes now, with none reserved: what a latest session asks
     // before it takes a frame.
@@ -99,9 +109,12 @@ struct SessionRing
         credited_bytes = std::max(credited_bytes, released_bytes);
         return true;
     }
-    // The frames that could still be granted, for Health: free rows of the tables and, in a
-    // packed ring, the grants has_room would still admit (ring_room solved for its grants).
-    std::uint64_t grantable(std::uint64_t max_frame_bytes) const
+    // The room Health reports, in frames: the rows not holding an unreleased frame and, in a
+    // packed ring, no more than the frames of the largest size that fit in the free bytes with
+    // bytes kept for a wrap, which skips less than one frame (ring_room solved for its frames).
+    // Grants not yet routed are not subtracted, unlike in has_room: this is the subscriber's
+    // free space.
+    std::uint64_t room(std::uint64_t max_frame_bytes) const
     {
         auto frames = depth - std::min<std::uint64_t>(depth, unreleased());
         if(!packed())

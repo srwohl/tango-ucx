@@ -916,7 +916,7 @@ void Pub::publish_health()
             observation.rows[observation.count++] = {
                 row.ordinal,
                 row.ring.depth,
-                std::uint32_t(row.ring.grantable(plan.sizes.frame_bytes)),
+                std::uint32_t(row.ring.room(plan.sizes.frame_bytes)),
                 row.every,
                 row.closing,
                 row.ring.sent,
