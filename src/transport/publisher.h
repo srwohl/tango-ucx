@@ -44,8 +44,9 @@ enum class SlotState : std::uint8_t
 //      through the publication's `done`.
 struct SourceSlot
 {
-    // What the device says about its frame: written on the device's thread between acquire and
-    // post, and read by the loop once it sees `posted`.
+    // What the device says about its frame: cleared by the loop as it grants the slot, written
+    // on the device's thread between acquire and post, and read by the loop once it sees
+    // `posted`.
     struct Publication
     {
         std::uint64_t timestamp = 0, payload_bytes = 0;

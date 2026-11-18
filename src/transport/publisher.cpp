@@ -364,7 +364,6 @@ void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> ti
         timestamp.value_or(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                std::chrono::system_clock::now().time_since_epoch())
                                .count());
-    publication.cancel = false;
     publication.source_offset = std::uint64_t(buffer.value_or(slot_index)) * plan.sizes.frame_bytes;
     publication.done = std::move(done);
     if(publication.gpu_accessed)
@@ -745,7 +744,6 @@ bool Pub::route_pass(std::int64_t now)
                     if(rows[i].live())
                         retire(i, RetireCause::SourceFailed);
             }
-            slot.publication.gpu_accessed = false;
         }
         slot.posted.store(false, std::memory_order_relaxed);
         slot.granted = false;
@@ -773,10 +771,6 @@ bool Pub::route_pass(std::int64_t now)
                 send_frame(slot_index, recipient, now);
             slot.routing = false;
             hand_back(slot);
-        }
-        else
-        {
-            slot.publication.cancel = false;
         }
         work = true;
     }
@@ -825,6 +819,9 @@ bool Pub::grant_pass()
             blocked = pull.reserve(*this);
         if(blocked)
             break;
+        // Each grant starts a fresh publication, which the device fills once it acquires the
+        // slot. It is cleared before the push, which hands the slot to the device.
+        slots[slot_index].publication = {};
         slots[slot_index].granted = true;
         order[slots_granted % plan.slot_count] = slot_index;
         grants.push(slot_index);
