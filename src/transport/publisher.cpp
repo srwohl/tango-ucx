@@ -152,7 +152,7 @@ RowSet LatestSessions::takers(const Pub &pub, const SourceSlot &slot, std::int64
     {
         const auto &row = pub.rows[row_index];
         if(row.in_flight == 0 && now - row.last_send_ns >= row.min_interval_ns &&
-           row.ring.fits_now(slot.payload_bytes))
+           row.ring.fits_now(slot.publication.payload_bytes))
             taken.add(row_index);
     }
     return taken;
@@ -321,11 +321,11 @@ void *Pub::gpu_payload(std::uint32_t slot_index, GpuStream stream)
 {
     if(limits.gpu < 0 || closed())
         throw std::logic_error("gpu_payload needs an active GPU source slot");
-    auto &slot = slots[slot_index];
-    if(slot.gpu_accessed && slot.gpu_stream.handle != stream.handle)
+    auto &publication = slots[slot_index].publication;
+    if(publication.gpu_accessed && publication.gpu_stream.handle != stream.handle)
         throw std::logic_error("all writes to a source slot use its GPU stream");
-    slot.gpu_stream = stream;
-    slot.gpu_accessed = true;
+    publication.gpu_stream = stream;
+    publication.gpu_accessed = true;
     return source_at(std::uint64_t(slot_index) * plan.sizes.frame_bytes);
 }
 std::span<std::byte> Pub::fields(std::uint32_t slot_index)
@@ -356,25 +356,27 @@ void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> ti
         throw std::invalid_argument(std::format("a frame of {} bytes; an opaque frame has 1 to {}",
                                                 *bytes, plan.sizes.frame_bytes));
     auto &slot = slots[slot_index];
-    if(limits.gpu >= 0 && !slot.gpu_accessed)
+    auto &publication = slot.publication;
+    if(limits.gpu >= 0 && !publication.gpu_accessed)
         throw std::logic_error("a GPU source slot needs gpu_payload before publishing");
-    slot.payload_bytes = bytes.value_or(plan.sizes.frame_bytes);
-    slot.timestamp = timestamp.value_or(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                            std::chrono::system_clock::now().time_since_epoch())
-                                            .count());
-    slot.cancel = false;
-    slot.source_offset = std::uint64_t(buffer.value_or(slot_index)) * plan.sizes.frame_bytes;
-    slot.done = std::move(done);
-    if(slot.gpu_accessed)
-        gpu_runtime()->record(slot.event, slot.gpu_stream);
+    publication.payload_bytes = bytes.value_or(plan.sizes.frame_bytes);
+    publication.timestamp =
+        timestamp.value_or(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count());
+    publication.cancel = false;
+    publication.source_offset = std::uint64_t(buffer.value_or(slot_index)) * plan.sizes.frame_bytes;
+    publication.done = std::move(done);
+    if(publication.gpu_accessed)
+        gpu_runtime()->record(slot.event, publication.gpu_stream);
     post(slot);
 }
 void Pub::hand_back(SourceSlot &slot)
 {
-    if(!slot.done || slot.routing || slot.sends)
+    if(!slot.publication.done || slot.routing || slot.sends)
         return;
-    auto done = std::move(slot.done);
-    slot.done = nullptr;
+    auto done = std::move(slot.publication.done);
+    slot.publication.done = nullptr;
     done();
 }
 // Gives a slot back unpublished. It is still posted because the loop takes slots in grant order.
@@ -383,9 +385,10 @@ void Pub::cancel_slot(std::uint32_t slot_index)
     if(slot_index < plan.slot_count)
     {
         auto &slot = slots[slot_index];
-        slot.cancel = true;
-        if(slot.gpu_accessed)
-            gpu_runtime()->record(slot.event, slot.gpu_stream);
+        auto &publication = slot.publication;
+        publication.cancel = true;
+        if(publication.gpu_accessed)
+            gpu_runtime()->record(slot.event, publication.gpu_stream);
         post(slot);
     }
 }
@@ -444,14 +447,15 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
 {
     auto &row = rows[row_index];
     auto &slot = slots[slot_index];
+    const auto &publication = slot.publication;
     auto &operation = *operations.frame(slot_index, row_index);
     auto frame_record = record(slot_index);
     wire::FrameMessage frame_message{};
     frame_message.session = row.session;
     frame_message.sequence = row.ring.sent;
-    frame_message.payload_bytes = slot.payload_bytes;
+    frame_message.payload_bytes = publication.payload_bytes;
     frame_message.packed = row.ring.packed(); // the publisher places the frame, and says where
-    frame_message.position = row.ring.next_position(slot.payload_bytes);
+    frame_message.position = row.ring.next_position(publication.payload_bytes);
     frame_message.index = frame_record.index();
     frame_message.timestamp_ns = frame_record.timestamp();
     frame_message.record_bytes = plan.sizes.padded_field_bytes;
@@ -465,7 +469,7 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     }
     operation.sent_ns = now;
     row.last_send_ns = now;
-    row.ring.record_send(frame_message.position, slot.payload_bytes);
+    row.ring.record_send(frame_message.position, publication.payload_bytes);
     ++row.in_flight;
     ++slot.sends;
     // An eager frame cannot land in GPU memory.
@@ -473,9 +477,9 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     params.op_attr_mask |= UCP_OP_ATTR_FIELD_MEMH | UCP_OP_ATTR_FIELD_MEMORY_TYPE;
     params.memh = source_memh;
     params.memory_type = limits.gpu >= 0 ? UCS_MEMORY_TYPE_CUDA : UCS_MEMORY_TYPE_HOST;
-    complete_if_done(operation,
-                     ucp_am_send_nbx(row.ep, wire::Frame, header.data(), header_bytes,
-                                     source_at(slot.source_offset), slot.payload_bytes, &params));
+    complete_if_done(operation, ucp_am_send_nbx(row.ep, wire::Frame, header.data(), header_bytes,
+                                                source_at(publication.source_offset),
+                                                publication.payload_bytes, &params));
 }
 void Pub::on_send(OpMeta *operation, ucs_status_t status)
 {
@@ -703,7 +707,7 @@ void Pub::unissue_grants()
     // The grants the device has not taken. It may take one meanwhile: that one stays granted.
     std::uint32_t queued = 0;
     for(int slot_index; (slot_index = grants.try_pop()) >= 0; ++queued)
-        slots[slot_index].held = false;
+        slots[slot_index].granted = false;
     pull.take_back(*this, queued);
     slots_granted -= queued;
 }
@@ -727,7 +731,7 @@ bool Pub::route_pass(std::int64_t now)
         auto &slot = slots[slot_index];
         if(!slot.posted.load(std::memory_order_acquire))
             break;
-        if(slot.gpu_accessed)
+        if(slot.publication.gpu_accessed)
         {
             auto state = gpu_runtime()->query(slot.event);
             if(state == GpuEventState::Pending)
@@ -736,22 +740,22 @@ bool Pub::route_pass(std::int64_t now)
             {
                 source_failed = true;
                 phase.finish();
-                slot.cancel = true;
+                slot.publication.cancel = true;
                 for(std::uint32_t i = 0; i < plan.row_count; ++i)
                     if(rows[i].live())
                         retire(i, RetireCause::SourceFailed);
             }
-            slot.gpu_accessed = false;
+            slot.publication.gpu_accessed = false;
         }
         slot.posted.store(false, std::memory_order_relaxed);
-        slot.held = false;
-        auto *to_puller = pull.route(*this, slot.cancel);
+        slot.granted = false;
+        auto *to_puller = pull.route(*this, slot.publication.cancel);
         ++slots_routed;
-        if(!slot.cancel)
+        if(!slot.publication.cancel)
         {
             auto slot_record = record(slot_index);
             slot_record.set_index(next_frame_index);
-            slot_record.set_timestamp(slot.timestamp);
+            slot_record.set_timestamp(slot.publication.timestamp);
             ++next_frame_index;
             // Every sessions and the puller had room reserved when the slot was granted.
             auto takers = latest.takers(*this, slot, now);
@@ -772,7 +776,7 @@ bool Pub::route_pass(std::int64_t now)
         }
         else
         {
-            slot.cancel = false;
+            slot.publication.cancel = false;
         }
         work = true;
     }
@@ -805,7 +809,7 @@ bool Pub::grant_pass()
         for(std::uint32_t i = 0; i < plan.slot_count; ++i)
         {
             auto candidate = (scan + i) % plan.slot_count;
-            if(!slots[candidate].held && slots[candidate].sends == 0)
+            if(slots[candidate].state() == SlotState::Free)
             {
                 slot_index = candidate;
                 scan = (candidate + 1) % plan.slot_count;
@@ -821,7 +825,7 @@ bool Pub::grant_pass()
             blocked = pull.reserve(*this);
         if(blocked)
             break;
-        slots[slot_index].held = true;
+        slots[slot_index].granted = true;
         order[slots_granted % plan.slot_count] = slot_index;
         grants.push(slot_index);
         ++slots_granted;
@@ -938,8 +942,8 @@ void Pub::publish_health()
     observation.pressure_from = pressure ? rows[*pressure].ordinal : 0;
     for(const auto &slot : std::span(slots.get(), plan.slot_count))
     {
-        observation.slots_free += !slot.held && slot.sends == 0;
-        observation.slots_held += slot.held;
+        observation.slots_free += slot.state() == SlotState::Free;
+        observation.slots_held += slot.state() == SlotState::Granted;
     }
     observation.memory_hooks = engine->memory_hooks;
     for(const auto &row : rows)

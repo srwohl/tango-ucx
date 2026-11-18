@@ -24,20 +24,56 @@
 
 namespace TangoUcx::transport
 {
+// A slot's place in its cycle, as the progress loop knows it: the source slot states of
+// docs/diagrams.md, section 8. The loop cannot tell Granted from the diagram's Held, because the
+// device takes a grant from the grant ring without telling it. Posted and Cancelled are the
+// device's word: the slot's `posted` and its publication's `cancel`.
+enum class SlotState : std::uint8_t
+{
+    Free,    // no grant, and no send of its frame in flight
+    Granted, // granted, and perhaps acquired and filled by the device
+    Sending  // routed, with sends of its frame in flight
+};
+// One slot of the source ring. Two threads use it, never at the same time: ownership moves with
+// the slot.
+//
+//   1. The loop grants it (`granted`) and pushes it to the grant ring.
+//   2. The device acquires it, fills the payload and the publication, and posts it.
+//   3. The loop sees `posted`, reads the publication and routes the frame (`sends`).
+//   4. Once the last send completes the slot is Free, and a lent buffer goes back to the device
+//      through the publication's `done`.
 struct SourceSlot
 {
+    // What the device says about its frame: written on the device's thread between acquire and
+    // post, and read by the loop once it sees `posted`.
+    struct Publication
+    {
+        std::uint64_t timestamp = 0, payload_bytes = 0;
+        bool cancel = false; // given back unpublished: routed in grant order, but sent nowhere
+        // Where the payload is sent from: the slot's own memory, or a lent ring's buffer, which
+        // `done` hands back to the device once the frame's last send completes.
+        std::uint64_t source_offset = 0;
+        std::function<void()> done;
+        bool gpu_accessed = false; // the device wrote the payload through gpu_payload
+        GpuStream gpu_stream;      // on this stream
+    };
+    // The handoff from the device to the loop. The device stores it last, after the
+    // publication, and the loop loads it first, before reading the publication. The store is
+    // sequentially consistent, as Wake asks (post()).
     std::atomic<bool> posted{false};
-    bool cancel = false, held = false;
-    std::uint64_t timestamp = 0, payload_bytes = 0;
-    std::uint32_t sends = 0;
-    // Where the payload is sent from: the slot's own memory, or a lent ring's buffer, which
-    // `done` hands back to the device once the frame's last send completes.
-    std::uint64_t source_offset = 0;
-    std::function<void()> done;
-    bool routing = false; // its frame is being sent to its recipients
-    bool gpu_accessed = false;
-    GpuStream gpu_stream;
-    GpuEvent event;
+    Publication publication;
+    // The loop's own.
+    bool granted = false;
+    std::uint32_t sends = 0; // sends of its frame in flight
+    bool routing = false;    // its frame is being sent to its recipients: `done` waits
+    GpuEvent event;          // made at setup: the device records it, and the loop polls it
+
+    SlotState state() const
+    {
+        if(granted)
+            return SlotState::Granted;
+        return sends ? SlotState::Sending : SlotState::Free;
+    }
 };
 // A session's receive ring, as the publisher keeps account of it. The publisher keeps two
 // positions per ring, what it sent and what the subscriber credited back, and both only increase
