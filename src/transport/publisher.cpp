@@ -129,13 +129,12 @@ int Pub::find_row(std::uint64_t session) const
             return int(row_index);
     return -1;
 }
-// Room for more frames, some of them granted now: rows of the receive tables for the frames
-// and, in a packed ring, the bytes for the grants. One of each is room for one more grant. An
-// every session has reserved room for every grant not yet routed, a puller for its own.
-bool Pub::has_room(const PubRow &row, std::uint64_t frames, std::uint64_t grants) const
+// Room for one more grant. An every session has reserved room for every grant not yet routed, a
+// puller for its own.
+bool Pub::has_room(const PubRow &row) const
 {
     auto reserved = every.has(row.row) ? outstanding() : pull.reserved[row.row];
-    return row.ring.has_room(reserved, frames, grants, plan.sizes.frame_bytes);
+    return row.ring.has_room(reserved, plan.sizes.frame_bytes);
 }
 RowSet LatestSessions::takers(const Pub &pub, const SourceSlot &slot, std::int64_t now) const
 {
@@ -156,45 +155,71 @@ std::optional<std::uint32_t> EverySessions::blocking(const Pub &pub) const
             return row_index;
     return {};
 }
-// The puller that holds the range of a frame index, or none, as in a stream with no pull set.
-// The index says which range, and the table which puller: after a pass no rule gives it. A
-// range's first grant gives the range to the next puller in the fixed order that has room for
-// all of it. A range whose puller has gone goes to the next with room for its grants
-// outstanding, which that puller then reserves.
-PubRow *PullSet::puller(Pub &pub, std::uint64_t frame_index)
+// The index says which range, and the table which puller: after a pass no rule gives it. None
+// for a stream with no pull set, a range not yet taken, or one whose puller has left.
+PubRow *PullSet::holder(Pub &pub, std::uint64_t frame_index) const
+{
+    if(!range_frames || untaken(frame_index))
+        return nullptr;
+    auto row_index = range_pullers[entry(frame_index)];
+    return has(row_index) ? &pub.rows[row_index] : nullptr;
+}
+// The frames of the range of a frame index that are granted and not yet routed.
+std::uint64_t PullSet::granted_in_range(const Pub &pub, std::uint64_t frame_index) const
+{
+    auto range_start = frame_index - frame_index % range_frames;
+    auto first = std::max(pub.next_frame_index, range_start);
+    auto last = std::min(pub.next_frame_index + pub.outstanding(), range_start + range_frames);
+    return last > first ? last - first : 0;
+}
+// Whether a puller has room to take a range: rows for all of an untaken range, or for the grants
+// of a range left by its puller, and in a packed ring bytes for those grants. At least one of
+// each, for the grant being made.
+bool PullSet::can_take_range(const Pub &pub, std::uint32_t row, bool untaken,
+                             std::uint64_t granted) const
+{
+    const auto &ring = pub.rows[row].ring;
+    auto grants = std::max<std::uint64_t>(granted, 1);
+    return ring.rows_free(reserved[row], untaken ? range_frames : grants) &&
+           ring.bytes_free(reserved[row], grants, pub.plan.sizes.frame_bytes);
+}
+// A range goes to the next puller after the last taker, in the fixed order of the rows, that can
+// take it. That puller reserves the range's grants, and those passed over count a pass. With no
+// puller able to take it, nothing; with no puller left, an untaken range is nobody's, and its
+// frames are missing.
+PubRow *PullSet::take_range(Pub &pub, std::uint64_t frame_index)
 {
     if(!range_frames)
         return nullptr;
+    assert(!holder(pub, frame_index));
+    bool fresh = untaken(frame_index);
+    auto granted = granted_in_range(pub, frame_index);
+    assert(!fresh || granted == 0); // a grant is made only into a taken range
     auto &rows = pub.rows;
-    auto range_start = frame_index - frame_index % range_frames;
-    auto &holder = range_pullers[frame_index / range_frames % range_pullers.size()];
-    bool untaken = frame_index / range_frames == ranges_taken;
-    if(!untaken && has(holder))
-        return &rows[holder];
-    auto first = std::max(pub.next_frame_index, range_start),
-         last = std::min(pub.next_frame_index + pub.outstanding(), range_start + range_frames);
-    std::uint64_t outstanding = last > first ? last - first : 0;
     RowSet passed_over;
     for(std::uint32_t step = 1; step <= rows.size(); ++step)
     {
         auto row_index = (last_taker + step) % rows.size();
         if(!has(row_index))
             continue;
-        if(pub.has_room(rows[row_index],
-                        untaken ? range_frames : std::max<std::uint64_t>(outstanding, 1),
-                        std::max<std::uint64_t>(outstanding, 1)))
+        if(!can_take_range(pub, row_index, fresh, granted))
         {
-            for(auto passed : passed_over)
-                ++rows[passed].passes;
-            reserved[row_index] += std::uint32_t(outstanding);
-            ranges_taken += untaken;
-            return &rows[holder = last_taker = std::uint8_t(row_index)];
+            passed_over.add(row_index);
+            continue;
         }
-        passed_over.add(row_index);
+        for(auto passed : passed_over)
+            ++rows[passed].passes;
+        reserved[row_index] += std::uint32_t(granted);
+        ranges_taken += fresh;
+        last_taker = std::uint8_t(row_index);
+        range_pullers[entry(frame_index)] = last_taker;
+        return &rows[row_index];
     }
-    // No puller is left: the range is nobody's, and its frames missing.
-    if(untaken && members.empty())
-        holder = last_taker, ++ranges_taken;
+    if(fresh && members.empty())
+    {
+        range_pullers[entry(frame_index)] = last_taker;
+        ++ranges_taken;
+    }
     return nullptr;
 }
 // A puller's grant routed or taken back. Each was reserved when granted, so none is missing; a
@@ -206,13 +231,14 @@ void PullSet::release(std::uint32_t row)
         --reserved[row];
 }
 // The grants taken back are the newest, so they would have had the last frame indices. Their
-// pullers release what they reserved for them.
+// pullers release what they reserved for them. A range whose puller has left is not given to
+// another: its grants are no longer anybody's.
 void PullSet::take_back(Pub &pub, std::uint32_t grants)
 {
     auto newest = pub.next_frame_index + pub.outstanding() - 1;
     for(std::uint32_t back = 0; back < grants; ++back)
-        if(auto *holder = puller(pub, newest - back))
-            release(holder->row);
+        if(auto *taker = holder(pub, newest - back))
+            release(taker->row);
 }
 // The puller of the next grant's frame index, which is the next one if no slot ahead of it is
 // cancelled, reserves room for the grant, and nothing is returned. Without room the device waits
@@ -220,24 +246,28 @@ void PullSet::take_back(Pub &pub, std::uint32_t grants)
 // that row is returned. With no puller left it does not wait: nothing.
 std::optional<std::uint32_t> PullSet::reserve(Pub &pub)
 {
-    auto *holder = puller(pub, pub.next_frame_index + pub.outstanding());
-    if(!members.empty() && !(holder && pub.has_room(*holder)))
+    auto frame_index = pub.next_frame_index + pub.outstanding();
+    auto *taker = holder(pub, frame_index);
+    if(!taker)
+        taker = take_range(pub, frame_index);
+    if(taker && pub.has_room(*taker))
     {
-        auto *slow = holder;
-        if(!holder)
-            for(auto row_index : members)
-                if(!slow || pub.rows[row_index].last_send_ns < slow->last_send_ns)
-                    slow = &pub.rows[row_index];
-        return slow->row;
+        ++reserved[taker->row];
+        return {};
     }
-    if(holder)
-        ++reserved[holder->row];
-    return {};
+    if(members.empty())
+        return {};
+    auto *slow = taker;
+    if(!slow)
+        for(auto row_index : members)
+            if(!slow || pub.rows[row_index].last_send_ns < slow->last_send_ns)
+                slow = &pub.rows[row_index];
+    return slow->row;
 }
 // The puller the next routed slot goes to, which releases the room it reserved. A cancelled
 // slot uses no frame index, so every later grant moves down by one, and the puller of the newest
 // granted index loses one grant; the slot goes to no puller. A frame whose range's puller is
-// gone, when no other puller could take the whole range, goes to any puller with room for one
+// gone, when no other puller can take the range's grants, goes to any puller with room for one
 // more frame. If none has room, it is missing.
 // TODO(pull-loss): a puller should never lose frames while the set is healthy, as every does
 // not. Two edges lose them today, both when a puller leaves:
@@ -250,21 +280,27 @@ std::optional<std::uint32_t> PullSet::reserve(Pub &pub)
 // Not decided; update CONTEXT.md's Missing with the choice.
 PubRow *PullSet::route(Pub &pub, bool cancel)
 {
-    auto *to_puller =
-        puller(pub, cancel ? pub.next_frame_index + pub.outstanding() - 1 : pub.next_frame_index);
-    if(to_puller)
-        release(to_puller->row);
     if(cancel)
+    {
+        if(auto *newest = holder(pub, pub.next_frame_index + pub.outstanding() - 1))
+            release(newest->row);
         return nullptr;
-    if(range_frames && !to_puller)
-        for(auto row_index : members)
-            if(pub.has_room(pub.rows[row_index]))
-            {
-                to_puller = &pub.rows[row_index];
-                break;
-            }
-    missing += range_frames && !to_puller;
-    return to_puller;
+    }
+    auto *to_puller = holder(pub, pub.next_frame_index);
+    if(!to_puller)
+        to_puller = take_range(pub, pub.next_frame_index);
+    if(to_puller)
+    {
+        release(to_puller->row);
+        return to_puller;
+    }
+    if(!range_frames)
+        return nullptr;
+    for(auto row_index : members)
+        if(pub.has_room(pub.rows[row_index]))
+            return &pub.rows[row_index];
+    ++missing;
+    return nullptr;
 }
 // A puller's End reports the set's missing count, so while one puller is sending, the End of
 // every puller waits.

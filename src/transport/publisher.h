@@ -110,15 +110,23 @@ struct SessionRing
         assert(credited <= sent);
         return sent - credited;
     }
-    // Room for `frames` more frames after the `reserved` ones and, in a packed ring, bytes for
-    // `grants` more grants of at most `max_frame_bytes` each. Both are 1 for one more grant.
-    bool has_room(std::uint64_t reserved, std::uint64_t frames, std::uint64_t grants,
-                  std::uint64_t max_frame_bytes) const
+    // Rows for `frames` more frames after the `reserved` ones.
+    bool rows_free(std::uint64_t reserved, std::uint64_t frames) const
     {
-        bool rows_free = unreleased() + reserved + frames <= depth;
-        bool bytes_free = !packed() || ring_room(sent_bytes - credited_bytes, reserved + grants - 1,
-                                                 max_frame_bytes, bytes);
-        return rows_free && bytes_free;
+        return unreleased() + reserved + frames <= depth;
+    }
+    // In a packed ring, bytes for `grants` more grants of at most `max_frame_bytes` each after the
+    // `reserved` ones. Any other ring has a slot for each row, so rows_free says it all.
+    bool bytes_free(std::uint64_t reserved, std::uint64_t grants,
+                    std::uint64_t max_frame_bytes) const
+    {
+        return !packed() ||
+               ring_room(sent_bytes - credited_bytes, reserved + grants - 1, max_frame_bytes, bytes);
+    }
+    // Room for one more grant after the `reserved` ones.
+    bool has_room(std::uint64_t reserved, std::uint64_t max_frame_bytes) const
+    {
+        return rows_free(reserved, 1) && bytes_free(reserved, 1, max_frame_bytes);
     }
     // Room for one frame of `payload` bytes now, with none reserved: what a latest session asks
     // before it takes a frame.
@@ -317,7 +325,12 @@ struct PullSet
         range_frames = range;
     }
     void remove(const PubRow &, bool started);
-    PubRow *puller(Pub &, std::uint64_t frame_index);
+    // The puller that holds the range of a frame index, if it is still in the set. A lookup: it
+    // changes nothing.
+    PubRow *holder(Pub &, std::uint64_t frame_index) const;
+    // Gives the range of a frame index, untaken or left by its puller, to the next puller that
+    // can take it, and returns that puller.
+    PubRow *take_range(Pub &, std::uint64_t frame_index);
     // Room for the next grant, or the row the device waits for.
     std::optional<std::uint32_t> reserve(Pub &);
     // The puller of the next slot to route, before the slot is counted as routed.
@@ -328,6 +341,20 @@ struct PullSet
     void take_back(Pub &, std::uint32_t grants);
     void release(std::uint32_t row);
     void check(std::uint64_t outstanding) const; // asserts; nothing in a release build
+
+  private:
+    bool untaken(std::uint64_t frame_index) const
+    {
+        return frame_index / range_frames == ranges_taken;
+    }
+    // Where range_pullers keeps the puller of a frame index's range.
+    std::size_t entry(std::uint64_t frame_index) const
+    {
+        return frame_index / range_frames % range_pullers.size();
+    }
+    std::uint64_t granted_in_range(const Pub &, std::uint64_t frame_index) const;
+    bool can_take_range(const Pub &, std::uint32_t row, bool untaken,
+                        std::uint64_t granted) const;
 };
 // The phases of a publisher instance: docs/diagrams.md, section 5. Before the start, sessions
 // join and no slot is granted. Started, slots are granted while the sessions have room.
@@ -470,7 +497,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     {
         return slots_granted - slots_routed;
     }
-    bool has_room(const PubRow &, std::uint64_t frames = 1, std::uint64_t grants = 1) const;
+    bool has_room(const PubRow &) const;
     wire::Status check_open(const wire::OpenMessage &) const;
     void unissue_grants();
     void check_reservations() const; // asserts; nothing in a release build
