@@ -475,6 +475,11 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     void unissue_grants();
     void check_reservations() const; // asserts; nothing in a release build
     bool route_pass(std::int64_t);
+    bool route_next(std::int64_t);
+    GpuEventState source_state(const SourceSlot &) const;
+    void fail_source(SourceSlot &);
+    void route_frame(std::uint32_t, PubRow *to_puller, std::int64_t);
+    void send_ends();
     bool grant_pass();
     bool retire_pass(std::int64_t);
     void timer_pass(std::int64_t);

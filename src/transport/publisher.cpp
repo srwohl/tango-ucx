@@ -711,68 +711,92 @@ void Pub::check_reservations() const
     pull.check(outstanding());
 #endif
 }
+// Routes the posted slots in grant order and, once a finishing instance has routed every slot,
+// ends it and sends its sessions End.
 bool Pub::route_pass(std::int64_t now)
 {
-    bool work = false;
     if(phase.load() >= Phase::Finishing)
         unissue_grants();
-    while(slots_routed < slots_granted)
-    {
-        auto slot_index = order[slots_routed % plan.slot_count];
-        auto &slot = slots[slot_index];
-        if(!slot.posted.load(std::memory_order_acquire))
-            break;
-        if(slot.publication.gpu_accessed)
-        {
-            auto state = gpu_runtime()->query(slot.event);
-            if(state == GpuEventState::Pending)
-                break;
-            if(state == GpuEventState::Failed)
-            {
-                source_failed = true;
-                phase.finish();
-                slot.publication.cancel = true;
-                for(std::uint32_t i = 0; i < plan.row_count; ++i)
-                    if(rows[i].live())
-                        retire(i, RetireCause::SourceFailed);
-            }
-        }
-        slot.posted.store(false, std::memory_order_relaxed);
-        slot.granted = false;
-        auto *to_puller = pull.route(*this, slot.publication.cancel);
-        ++slots_routed;
-        if(!slot.publication.cancel)
-        {
-            auto slot_record = record(slot_index);
-            slot_record.set_index(next_frame_index);
-            slot_record.set_timestamp(slot.publication.timestamp);
-            ++next_frame_index;
-            // Every sessions and the puller had room reserved when the slot was granted.
-            auto takers = latest.takers(*this, slot, now);
-            auto recipients = every.members | takers;
-            if(to_puller && to_puller->live())
-                recipients.add(to_puller->row);
-            for(auto skipper : latest.members.without(takers))
-            {
-                ++skipped;
-                ++rows[skipper].skipped;
-            }
-            // A send may complete at once: the buffer goes back only after the last is issued.
-            slot.routing = true;
-            for(auto recipient : recipients)
-                send_frame(slot_index, recipient, now);
-            slot.routing = false;
-            hand_back(slot);
-        }
+    bool work = false;
+    while(slots_routed < slots_granted && route_next(now))
         work = true;
-    }
     if(phase.load() == Phase::Finishing && slots_routed == slots_granted)
         phase.end();
-    if(phase.load() != Phase::Ended)
+    if(phase.load() == Phase::Ended)
+        send_ends();
+    check_reservations();
+    return work;
+}
+// Routes the slot of the oldest grant not yet routed, once the device has posted it and its
+// writes are done. False while it waits for either.
+bool Pub::route_next(std::int64_t now)
+{
+    auto slot_index = order[slots_routed % plan.slot_count];
+    auto &slot = slots[slot_index];
+    if(!slot.posted.load(std::memory_order_acquire))
+        return false;
+    auto source = source_state(slot);
+    if(source == GpuEventState::Pending)
+        return false;
+    if(source == GpuEventState::Failed)
+        fail_source(slot);
+    slot.posted.store(false, std::memory_order_relaxed);
+    slot.granted = false;
+    auto *to_puller = pull.route(*this, slot.publication.cancel);
+    ++slots_routed;
+    if(!slot.publication.cancel)
+        route_frame(slot_index, to_puller, now);
+    return true;
+}
+// Whether the device's writes to a posted slot are done: a host source's are, and a GPU source's
+// once the event recorded on its stream has completed, or failed.
+GpuEventState Pub::source_state(const SourceSlot &slot) const
+{
+    if(!slot.publication.gpu_accessed)
+        return GpuEventState::Done;
+    return gpu_runtime()->query(slot.event);
+}
+// A GPU source event failed, so the slot's payload cannot be trusted: its frame is sent nowhere,
+// the instance finishes, and every live session retires.
+void Pub::fail_source(SourceSlot &slot)
+{
+    source_failed = true;
+    phase.finish();
+    slot.publication.cancel = true;
+    for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
+        if(rows[row_index].live())
+            retire(row_index, RetireCause::SourceFailed);
+}
+// Gives a published frame the next frame index and sends it to the every sessions, the latest
+// sessions that take it, and the puller of its range. The other latest sessions skip it.
+void Pub::route_frame(std::uint32_t slot_index, PubRow *to_puller, std::int64_t now)
+{
+    auto &slot = slots[slot_index];
+    auto slot_record = record(slot_index);
+    slot_record.set_index(next_frame_index);
+    slot_record.set_timestamp(slot.publication.timestamp);
+    ++next_frame_index;
+    // Every sessions and the puller had room reserved when the slot was granted.
+    auto takers = latest.takers(*this, slot, now);
+    auto recipients = every.members | takers;
+    if(to_puller && to_puller->live())
+        recipients.add(to_puller->row);
+    for(auto skipper : latest.members.without(takers))
     {
-        check_reservations();
-        return work;
+        ++skipped;
+        ++rows[skipper].skipped;
     }
+    // A send may complete at once: the buffer goes back only after the last is issued.
+    slot.routing = true;
+    for(auto recipient : recipients)
+        send_frame(slot_index, recipient, now);
+    slot.routing = false;
+    hand_back(slot);
+}
+// Sends End to each ready session of an ended instance once it has nothing in flight. A puller's
+// End waits for the whole set (PullSet::end_waits).
+void Pub::send_ends()
+{
     auto end_waits = pull.end_waits(*this);
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
@@ -780,8 +804,6 @@ bool Pub::route_pass(std::int64_t now)
         if(row.state == SessionState::Ready && row.in_flight == 0 && !end_waits.has(row_index))
             send_end(row_index);
     }
-    check_reservations();
-    return work;
 }
 bool Pub::grant_pass()
 {
