@@ -25,6 +25,23 @@
 
 namespace TangoUcx::transport
 {
+// What the publisher does when something that must hold does not, by whose fault it is:
+//
+//   - the device misuses the API (publishes twice, the wrong kind of slot): it throws, and the
+//     device's call fails;
+//   - a subscriber breaks the protocol (too much Credit, a rejected send): its session retires
+//     with RetireCause::Protocol, and the others go on;
+//   - the publisher's own bug: an assert, and nothing in a release build, except for the counts
+//     the progress loop waits on to reach zero, which count_down keeps from wrapping, since a
+//     wrapped count would stall the loop for good.
+template <class Count>
+Count count_down(Count &count)
+{
+    assert(count > 0);
+    if(count > 0)
+        --count;
+    return count;
+}
 // A slot's place in its cycle, as the progress loop knows it: the source slot states of
 // docs/diagrams.md, section 8. The loop cannot tell Granted from the diagram's Held, because the
 // device takes a grant from the grant ring without telling it. Posted and Cancelled are the
@@ -163,7 +180,8 @@ struct SessionRing
     // free space.
     std::uint64_t room(std::uint64_t max_frame_bytes) const
     {
-        auto frames = depth - std::min<std::uint64_t>(depth, unreleased());
+        assert(unreleased() <= depth);
+        auto frames = depth - unreleased();
         if(!packed())
             return frames;
         auto fit = (bytes - (sent_bytes - credited_bytes) + 1) / max_frame_bytes;

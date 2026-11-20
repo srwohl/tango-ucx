@@ -48,8 +48,8 @@ void complete_if_done(OpMeta &operation, ucs_status_ptr_t request)
 void ep_error(void *arg, ucp_ep_h, ucs_status_t)
 {
     auto *row = static_cast<PubRow *>(arg);
-    if(row && row->pub)
-        row->pub->retire(row->row, RetireCause::TransportFailed);
+    assert(row && row->pub);
+    row->pub->retire(row->row, RetireCause::TransportFailed);
 }
 } // namespace
 
@@ -222,13 +222,10 @@ PubRow *PullSet::take_range(Pub &pub, std::uint64_t frame_index)
     }
     return nullptr;
 }
-// A puller's grant routed or taken back. Each was reserved when granted, so none is missing; a
-// release build still keeps the count from wrapping, which would stall the set.
+// A puller's grant routed or taken back, which it reserved when it was granted.
 void PullSet::release(std::uint32_t row)
 {
-    assert(reserved[row]);
-    if(reserved[row])
-        --reserved[row];
+    count_down(reserved[row]);
 }
 // The grants taken back are the newest, so they would have had the last frame indices. Their
 // pullers release what they reserved for them. A range whose puller has left is not given to
@@ -340,8 +337,7 @@ std::span<std::byte> Pub::payload(std::uint32_t slot_index)
         throw std::logic_error("a GPU source slot uses gpu_payload on its GPU stream");
     if(limits.lend_source)
         throw std::logic_error("a lent ring's slot has no memory: publish_from a lent buffer");
-    if(slot_index >= plan.slot_count)
-        throw std::out_of_range("source slot");
+    assert(slot_index < plan.slot_count);
     return {source_at(std::uint64_t(slot_index) * plan.sizes.frame_bytes),
             std::size_t(plan.sizes.frame_bytes)};
 }
@@ -358,8 +354,7 @@ void *Pub::gpu_payload(std::uint32_t slot_index, GpuStream stream)
 }
 std::span<std::byte> Pub::fields(std::uint32_t slot_index)
 {
-    if(slot_index >= plan.slot_count)
-        throw std::out_of_range("source slot");
+    assert(slot_index < plan.slot_count);
     return {record(slot_index).fields(), plan.sizes.field_bytes};
 }
 // Marks a filled slot ready to send. Opaque streams pass the frame's length; array streams do not.
@@ -367,8 +362,7 @@ void Pub::publish_slot(std::uint32_t slot_index, std::optional<std::uint64_t> ti
                        std::optional<std::size_t> bytes, std::optional<std::uint32_t> buffer,
                        std::function<void()> done)
 {
-    if(slot_index >= plan.slot_count)
-        return;
+    assert(slot_index < plan.slot_count);
     if(closed())
         throw std::logic_error("the publisher has closed");
     if(buffer.has_value() != limits.lend_source)
@@ -409,15 +403,13 @@ void Pub::hand_back(SourceSlot &slot)
 // Gives a slot back unpublished. It is still posted because the loop takes slots in grant order.
 void Pub::cancel_slot(std::uint32_t slot_index)
 {
-    if(slot_index < plan.slot_count)
-    {
-        auto &slot = slots[slot_index];
-        auto &publication = slot.publication;
-        publication.cancel = true;
-        if(publication.gpu_accessed)
-            gpu_runtime()->record(slot.event, publication.gpu_stream);
-        post(slot);
-    }
+    assert(slot_index < plan.slot_count);
+    auto &slot = slots[slot_index];
+    auto &publication = slot.publication;
+    publication.cancel = true;
+    if(publication.gpu_accessed)
+        gpu_runtime()->record(slot.event, publication.gpu_stream);
+    post(slot);
 }
 // Hands a slot to the loop, and ends the loop's wait. The store is sequentially consistent, as
 // Wake asks.
@@ -431,9 +423,8 @@ void Pub::send_control(std::uint32_t row_index, OpKind kind, std::uint8_t messag
                        std::span<const std::byte> encoded)
 {
     assert(kind == OpKind::Ready || kind == OpKind::End);
-    auto &operation = *operations.control(row_index, kind);
-    if(operation.in_flight)
-        return;
+    auto &operation = *operations.control(row_index, kind); // each is sent once per session
+    assert(!operation.in_flight);
     auto header = operations.header(&operation);
     assert(encoded.size() <= header.size());
     std::memcpy(header.data(), encoded.data(), encoded.size());
@@ -460,9 +451,8 @@ void Pub::start_teardown(std::uint32_t row_index, OpKind kind, bool force)
 {
     assert(kind == OpKind::Flush || kind == OpKind::Close);
     assert(!force || kind == OpKind::Close);
-    auto &operation = *operations.control(row_index, kind);
-    if(operation.in_flight)
-        return;
+    auto &operation = *operations.control(row_index, kind); // teardown starts each step once
+    assert(!operation.in_flight);
     auto &row = rows[row_index];
     row.teardown = kind == OpKind::Flush ? Teardown::Flushing : Teardown::Closing;
     auto params = prepare(operation, force ? UCP_EP_CLOSE_FLAG_FORCE : 0);
@@ -489,11 +479,7 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
     std::memcpy(frame_message.record.data(), frame_record.fields(), frame_message.record_bytes);
     auto header = operations.header(&operation);
     auto header_bytes = wire::encode_into(header, frame_message);
-    if(!header_bytes)
-    {
-        retire(row_index, RetireCause::Protocol);
-        return;
-    }
+    assert(header_bytes); // the plan sizes each header for the largest Frame
     operation.sent_ns = now;
     row.last_send_ns = now;
     row.ring.record_send(frame_message.position, publication.payload_bytes);
@@ -508,19 +494,19 @@ void Pub::send_frame(std::uint32_t slot_index, std::uint32_t row_index, std::int
                                                 source_at(publication.source_offset),
                                                 publication.payload_bytes, &params));
 }
+// UCX calls a completion once, and never for an operation that completed at once, which
+// complete_if_done completes instead: each completes once.
 void Pub::on_send(OpMeta *operation, ucs_status_t status)
 {
-    if(!operation->in_flight)
-        return;
+    assert(operation->in_flight);
     operation->in_flight = false;
     std::uint32_t row_index = operation->row;
     std::uint32_t slot_index = operation->slot;
+    assert(slot_index < plan.slot_count);
     auto &row = rows[row_index];
-    if(row.in_flight)
-        --row.in_flight;
-    if(slot_index < plan.slot_count && slots[slot_index].sends)
-        if(--slots[slot_index].sends == 0)
-            hand_back(slots[slot_index]);
+    count_down(row.in_flight);
+    if(count_down(slots[slot_index].sends) == 0)
+        hand_back(slots[slot_index]);
     auto transfer_ns = now_ns() - operation->sent_ns;
     row.transfer_max_ns = std::max(row.transfer_max_ns, transfer_ns);
     row.transfer_sum_ns += transfer_ns;
@@ -530,8 +516,7 @@ void Pub::on_send(OpMeta *operation, ucs_status_t status)
 }
 void Pub::on_control(OpMeta *operation, ucs_status_t status)
 {
-    if(!operation->in_flight)
-        return;
+    assert(operation->in_flight);
     operation->in_flight = false;
     auto row_index = operation->row;
     auto &row = rows[row_index];
@@ -539,8 +524,7 @@ void Pub::on_control(OpMeta *operation, ucs_status_t status)
     {
         case OpKind::Ready:
         case OpKind::End:
-            if(row.in_flight)
-                --row.in_flight;
+            count_down(row.in_flight);
             if(status != UCS_OK && status != UCS_ERR_CANCELED && row.live())
                 retire(row_index, RetireCause::TransportFailed);
             return;
@@ -591,8 +575,7 @@ constexpr Retirement retirement(RetireCause cause)
 // torn down by retire_pass. A row already retiring, or free, is left as it is.
 void Pub::retire(std::uint32_t row_index, RetireCause cause)
 {
-    if(row_index >= plan.row_count)
-        return;
+    assert(row_index < plan.row_count);
     auto &row = rows[row_index];
     if(!row.live())
         return;
