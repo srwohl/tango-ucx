@@ -45,15 +45,11 @@ void complete_if_done(OpMeta &operation, ucs_status_ptr_t request)
     if(!UCS_PTR_IS_PTR(request))
         send_cb(nullptr, UCS_PTR_STATUS(request), &operation);
 }
-void ep_error(void *arg, ucp_ep_h, ucs_status_t status)
+void ep_error(void *arg, ucp_ep_h, ucs_status_t)
 {
     auto *row = static_cast<PubRow *>(arg);
     if(row && row->pub)
-    {
-        if(row->transport_error == UCS_OK)
-            row->transport_error = status;
         row->pub->retire(row->row, RetireCause::TransportFailed);
-    }
 }
 } // namespace
 
@@ -125,10 +121,6 @@ void Pub::release_memory() noexcept
     source_memh = nullptr;
     gpu_source.unmap();
     kept_arena.unmap();
-}
-std::uint64_t Pub::id_for(std::uint32_t row_index) const
-{
-    return rows[row_index].session;
 }
 int Pub::find_row(std::uint64_t session) const
 {
@@ -205,8 +197,6 @@ PubRow *PullSet::puller(Pub &pub, std::uint64_t frame_index)
         holder = last_taker, ++ranges_taken;
     return nullptr;
 }
-// The grants taken back are the newest, so they would have had the last frame indices. Their
-// pullers release what they reserved for them.
 // A puller's grant routed or taken back. Each was reserved when granted, so none is missing; a
 // release build still keeps the count from wrapping, which would stall the set.
 void PullSet::release(std::uint32_t row)
@@ -215,6 +205,8 @@ void PullSet::release(std::uint32_t row)
     if(reserved[row])
         --reserved[row];
 }
+// The grants taken back are the newest, so they would have had the last frame indices. Their
+// pullers release what they reserved for them.
 void PullSet::take_back(Pub &pub, std::uint32_t grants)
 {
     auto newest = pub.next_frame_index + pub.outstanding() - 1;

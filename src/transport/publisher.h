@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -106,6 +107,7 @@ struct SessionRing
     // Frames sent and not yet credited: in flight, or held by the subscriber.
     std::uint64_t unreleased() const
     {
+        assert(credited <= sent);
         return sent - credited;
     }
     // Room for `frames` more frames after the `reserved` ones and, in a packed ring, bytes for
@@ -210,7 +212,6 @@ struct PubRow
     std::uint8_t row = 0;
     std::uint32_t ordinal = 0;
     ucp_ep_h ep = nullptr;
-    ucs_status_t transport_error = UCS_OK;
     std::uint64_t session = 0, skipped = 0, passes = 0;
     SessionRing ring;
     std::uint32_t in_flight = 0;
@@ -464,7 +465,6 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::span<std::byte> payload(std::uint32_t);
     std::span<std::byte> fields(std::uint32_t);
     void *gpu_payload(std::uint32_t, GpuStream);
-    std::uint64_t id_for(std::uint32_t) const;
     int find_row(std::uint64_t) const;
     std::uint64_t outstanding() const // grants not yet routed
     {
