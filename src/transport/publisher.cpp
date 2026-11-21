@@ -135,6 +135,54 @@ RowSet Pub::device_holders() const
 {
     return every.members() | pull.members();
 }
+// A ready session joins the unit of its delivery.
+void Pub::join_delivery(std::uint32_t row_index, const wire::OpenMessage &open_message)
+{
+    switch(open_message.delivery)
+    {
+        case wire::Delivery::Every:
+            every.add(row_index);
+            break;
+        case wire::Delivery::Pull:
+            pull.add(row_index, open_message.range);
+            break;
+        case wire::Delivery::Latest:
+            latest.add(row_index);
+            break;
+    }
+}
+// A session that leaves gives up its place in its delivery. True if it held the device.
+bool Pub::leave_delivery(const PubRow &row)
+{
+    bool held_device = device_holders().has(row.row);
+    every.remove(row.row);
+    latest.remove(row.row);
+    pull.remove(row, phase.was_started());
+    return held_device;
+}
+// Who a published frame goes to: the every sessions, the latest sessions that take it now, and
+// the puller of its range. The other latest sessions skip it. Asked before the slot counts as
+// routed, while the grants not yet routed still hold its frame index. Every sessions and the
+// puller had room reserved when the slot was granted.
+Recipients Pub::recipients(const SourceSlot &slot, std::int64_t now)
+{
+    auto *to_puller = pull.route(*this);
+    auto takers = latest.takers(*this, slot, now);
+    Recipients to{every.members() | takers, latest.members().without(takers)};
+    if(to_puller && to_puller->live())
+        to.send.add(to_puller->row);
+    return to;
+}
+// Whether a row holds the pressure the device waits under: every every session without room, and
+// of a set only the puller the device waits for. A puller that is passed over holds none.
+bool Pub::blocks(std::uint32_t row_index, std::optional<std::uint32_t> pressure) const
+{
+    if(!pressure)
+        return false;
+    if(every.has(row_index))
+        return !has_room(rows[row_index]);
+    return pull.has(row_index) && *pressure == row_index;
+}
 // Room for the next grant, or the row the device waits for. The every sessions gate first, and
 // the pull set is asked only if they have room, because it may give a range to a puller as it
 // answers. Latest sessions never gate.
@@ -588,11 +636,8 @@ void Pub::retire(std::uint32_t row_index, RetireCause cause)
     auto &row = rows[row_index];
     if(!row.live())
         return;
-    bool held_device = device_holders().has(row_index);
+    bool held_device = leave_delivery(row);
     ready_rows.remove(row_index);
-    every.remove(row_index);
-    latest.remove(row_index);
-    pull.remove(row, phase.was_started());
     auto effect = retirement(cause);
     if(effect.failed && held_device)
         ++failed_every;
@@ -689,18 +734,7 @@ void Pub::open(ControlEntry &entry)
     row.network_devices = endpoint_network_devices(row.ep);
     last_topology_ns = 0;
     ready_rows.add(row_index);
-    switch(open_message.delivery)
-    {
-        case wire::Delivery::Every:
-            every.add(row_index);
-            break;
-        case wire::Delivery::Pull:
-            pull.add(row_index, open_message.range);
-            break;
-        case wire::Delivery::Latest:
-            latest.add(row_index);
-            break;
-    }
+    join_delivery(row_index, open_message);
     count_holding(); // before the reply, so a subscriber that has its reply is counted
     auto encoded = wire::encode(wire::SessionMessage{row.session});
     send_control(row_index, OpKind::Ready, wire::Ready, encoded);
@@ -760,11 +794,14 @@ bool Pub::route_next(std::int64_t now)
         fail_source(slot);
     slot.posted.store(false, std::memory_order_relaxed);
     slot.granted = false;
-    // A cancelled slot uses no frame index, and goes to no puller.
-    auto *to_puller = slot.publication.cancel ? nullptr : pull.route(*this);
+    if(slot.publication.cancel)
+    {
+        ++slots_routed; // it uses no frame index, and goes to nobody
+        return true;
+    }
+    auto to = recipients(slot, now);
     ++slots_routed;
-    if(!slot.publication.cancel)
-        route_frame(slot_index, to_puller, now);
+    route_frame(slot_index, to, now);
     return true;
 }
 // Whether the device's writes to a posted slot are done: a host source's are, and a GPU source's
@@ -786,28 +823,22 @@ void Pub::fail_source(SourceSlot &slot)
         if(rows[row_index].live())
             retire(row_index, RetireCause::SourceFailed);
 }
-// Gives a published frame the next frame index and sends it to the every sessions, the latest
-// sessions that take it, and the puller of its range. The other latest sessions skip it.
-void Pub::route_frame(std::uint32_t slot_index, PubRow *to_puller, std::int64_t now)
+// Gives a published frame the next frame index and sends it to its recipients.
+void Pub::route_frame(std::uint32_t slot_index, const Recipients &to, std::int64_t now)
 {
     auto &slot = slots[slot_index];
     auto slot_record = record(slot_index);
     slot_record.set_index(next_frame_index);
     slot_record.set_timestamp(slot.publication.timestamp);
     ++next_frame_index;
-    // Every sessions and the puller had room reserved when the slot was granted.
-    auto takers = latest.takers(*this, slot, now);
-    auto recipients = every.members() | takers;
-    if(to_puller && to_puller->live())
-        recipients.add(to_puller->row);
-    for(auto skipper : latest.members().without(takers))
+    for(auto skipper : to.skip)
     {
         ++skipped;
         ++rows[skipper].skipped;
     }
     // A send may complete at once: the buffer goes back only after the last is issued.
     slot.routing = true;
-    for(auto recipient : recipients)
+    for(auto recipient : to.send)
         send_frame(slot_index, recipient, now);
     slot.routing = false;
     hand_back(slot);
@@ -921,8 +952,7 @@ std::optional<std::uint32_t> Pub::pressure_row() const
         return {};
     return blocked;
 }
-// Eviction counts only while the device waits: every every session without room, and of a set
-// only the puller the device waits for. A puller that is passed over holds no pressure.
+// Eviction counts only while the device waits, for the rows that hold that pressure (blocks).
 void Pub::timer_pass(std::int64_t now)
 {
     auto pressure = pressure_row();
@@ -930,10 +960,7 @@ void Pub::timer_pass(std::int64_t now)
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
         auto &row = rows[row_index];
-        bool blocking =
-            pressure &&
-            (every.has(row_index) ? !has_room(row) : pull.has(row_index) && *pressure == row_index);
-        if(!blocking)
+        if(!blocks(row_index, pressure))
             row.blocked_since_ns = 0;
         else if(!row.blocked_since_ns)
             row.blocked_since_ns = now;

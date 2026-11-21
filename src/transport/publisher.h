@@ -397,6 +397,11 @@ class PullSet
     std::uint64_t granted_in_range(const Pub &, std::uint64_t frame_index) const;
     bool can_take_range(const Pub &, std::uint32_t row, bool untaken, std::uint64_t granted) const;
 };
+// The sessions a published frame is sent to, and the latest sessions that skip it.
+struct Recipients
+{
+    RowSet send, skip;
+};
 // The phases of a publisher instance: docs/diagrams.md, section 5. Before the start, sessions
 // join and no slot is granted. Started, slots are granted while the sessions have room.
 // Finishing, no more slots are granted and the ones not yet acquired are taken back. Ended,
@@ -571,6 +576,10 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
         return slots_granted - slots_routed;
     }
     RowSet device_holders() const;
+    void join_delivery(std::uint32_t, const wire::OpenMessage &);
+    bool leave_delivery(const PubRow &);
+    Recipients recipients(const SourceSlot &, std::int64_t now);
+    bool blocks(std::uint32_t, std::optional<std::uint32_t> pressure) const;
     std::optional<std::uint32_t> reserve_grant();
     bool has_room(const PubRow &) const;
     wire::Status check_open(const wire::OpenMessage &) const;
@@ -580,7 +589,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     bool route_next(std::int64_t);
     GpuEventState source_state(const SourceSlot &) const;
     void fail_source(SourceSlot &);
-    void route_frame(std::uint32_t, PubRow *to_puller, std::int64_t);
+    void route_frame(std::uint32_t, const Recipients &, std::int64_t);
     void send_ends();
     bool grant_pass();
     bool retire_pass(std::int64_t);
