@@ -11,8 +11,8 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -34,8 +34,7 @@ namespace TangoUcx::transport
 //   - the publisher's own bug: an assert, and nothing in a release build, except for the counts
 //     the progress loop waits on to reach zero, which count_down keeps from wrapping, since a
 //     wrapped count would stall the loop for good.
-template <class Count>
-Count count_down(Count &count)
+template <class Count> Count count_down(Count &count)
 {
     assert(count > 0);
     if(count > 0)
@@ -137,8 +136,8 @@ struct SessionRing
     bool bytes_free(std::uint64_t reserved, std::uint64_t grants,
                     std::uint64_t max_frame_bytes) const
     {
-        return !packed() ||
-               ring_room(sent_bytes - credited_bytes, reserved + grants - 1, max_frame_bytes, bytes);
+        return !packed() || ring_room(sent_bytes - credited_bytes, reserved + grants - 1,
+                                      max_frame_bytes, bytes);
     }
     // Room for one more grant after the `reserved` ones.
     bool has_room(std::uint64_t reserved, std::uint64_t max_frame_bytes) const
@@ -372,8 +371,7 @@ struct PullSet
         return frame_index / range_frames % range_pullers.size();
     }
     std::uint64_t granted_in_range(const Pub &, std::uint64_t frame_index) const;
-    bool can_take_range(const Pub &, std::uint32_t row, bool untaken,
-                        std::uint64_t granted) const;
+    bool can_take_range(const Pub &, std::uint32_t row, bool untaken, std::uint64_t granted) const;
 };
 // The phases of a publisher instance: docs/diagrams.md, section 5. Before the start, sessions
 // join and no slot is granted. Started, slots are granted while the sessions have room.
