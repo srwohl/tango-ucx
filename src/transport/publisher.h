@@ -503,7 +503,18 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::shared_ptr<Pub> self_keep;
 
     Pub(std::shared_ptr<Engine>, Description, PublisherPlan);
-    void setup();        // on the progress thread, once the source ring is set
+
+    // On a device thread, for a slot it holds (Slot): they read the fixed fields, and write only
+    // the slot and its record.
+    std::span<std::byte> payload(std::uint32_t);
+    std::span<std::byte> fields(std::uint32_t);
+    void *gpu_payload(std::uint32_t, GpuStream);
+    void publish_slot(std::uint32_t, std::optional<std::uint64_t>, std::optional<std::size_t>,
+                      std::optional<std::uint32_t> buffer = {}, std::function<void()> done = {});
+    void cancel_slot(std::uint32_t); // also on whatever thread drops a Slot it did not publish
+    void post(SourceSlot &);
+
+    // On any thread: they read only fixed fields, and the engine's `stopping`.
     bool closed() const; // the publisher has stopped
     std::byte *source_at(std::uint64_t offset) const
     {
@@ -513,6 +524,10 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     {
         return {records.data() + std::uint64_t(slot_index) * plan.sizes.record_stride};
     }
+
+    // On the progress loop, which includes the UCX callbacks it runs inside worker->progress():
+    // on_send and on_control, and the endpoint error and Credit handlers, which retire a session.
+    void setup(); // once the source ring is set, before the instance is handed out
     bool next_posted() const;
     // Nothing of this instance is being sent, nor can be: the device returned every slot it
     // acquired, every send completed and every ready session was sent End.
@@ -520,17 +535,12 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     bool done() const; // Ended, and every session closed
     void retire_all();
     void count_holding();
-    void release_memory() noexcept; // on the progress thread: what is registered with UCX
+    void release_memory() noexcept; // what is registered with UCX
     void open(ControlEntry &);
     void close(ControlEntry &);
-    void publish_slot(std::uint32_t, std::optional<std::uint64_t>, std::optional<std::size_t>,
-                      std::optional<std::uint32_t> buffer = {}, std::function<void()> done = {});
-    void hand_back(SourceSlot &); // a lent buffer, once its frame's last send completed
-    void cancel_slot(std::uint32_t);
-    void post(SourceSlot &);
-    std::span<std::byte> payload(std::uint32_t);
-    std::span<std::byte> fields(std::uint32_t);
-    void *gpu_payload(std::uint32_t, GpuStream);
+    // A lent buffer, once its frame's last send completed: the device's `done` runs here, on the
+    // loop.
+    void hand_back(SourceSlot &);
     int find_row(std::uint64_t) const;
     std::uint64_t outstanding() const // grants not yet routed
     {
