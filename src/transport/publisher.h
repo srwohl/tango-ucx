@@ -332,7 +332,6 @@ struct PullSet
     std::uint32_t range_frames = 0;
     std::vector<std::uint8_t> range_pullers;
     std::uint8_t last_taker = 63;
-    std::array<std::uint32_t, 64> reserved{}; // each puller's frames granted and not yet routed
     bool has(std::uint32_t row) const
     {
         return members.has(row);
@@ -351,17 +350,12 @@ struct PullSet
     PubRow *take_range(Pub &, std::uint64_t frame_index);
     // Room for the next grant, or the row the device waits for.
     std::optional<std::uint32_t> reserve(Pub &);
-    // The puller of the next slot to route, before the slot is counted as routed.
-    PubRow *route(Pub &, bool cancel);
+    // The puller of the next published slot to route, before the slot is counted as routed.
+    PubRow *route(Pub &);
     // The pullers whose End must wait.
     RowSet end_waits(const Pub &) const;
-    // The newest grants, which the device never took.
-    void take_back(Pub &, std::uint32_t grants);
-    void release(std::uint32_t row);
-    void check(const Pub &) const; // asserts; nothing in a release build
-    // The grants not yet routed whose frame index lies in a range the row holds: what
-    // `reserved` counts, worked out from the grant window and the range table instead.
-    std::uint64_t derived_reserved(const Pub &, std::uint32_t row) const;
+    // The grants not yet routed whose frame index lies in a range the row holds.
+    std::uint64_t reserved(const Pub &, std::uint32_t row) const;
 
   private:
     bool untaken(std::uint64_t frame_index) const
@@ -552,7 +546,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     bool has_room(const PubRow &) const;
     wire::Status check_open(const wire::OpenMessage &) const;
     void unissue_grants();
-    void check_reservations() const; // asserts; nothing in a release build
+    void check_members() const; // asserts; nothing in a release build
     bool route_pass(std::int64_t);
     bool route_next(std::int64_t);
     GpuEventState source_state(const SourceSlot &) const;
