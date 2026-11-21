@@ -232,6 +232,7 @@ enum class RetireCause : std::uint8_t
     Evicted,         // the device waited for its room longer than pressure_timeout
     InstanceClosing  // the publisher closes the instance: it is destroyed, or the next began
 };
+// One session of an instance: the progress loop's own.
 struct PubRow
 {
     Pub *pub = nullptr;
@@ -442,23 +443,51 @@ class InstancePhase
 };
 // One publisher instance: one description, its sessions, slots, records and grants. The engine
 // drives it on its progress thread; the device holds it through its slots.
+//
+// The progress loop makes an instance and hands it to the other threads (Engine::set_current).
+// From then on its fields fall in four groups, by the thread that writes them:
+//
+//   - fixed at setup: never written again, and read on any thread;
+//   - shared: each safe on any thread, on the terms its comment gives;
+//   - a slot and its record: whoever holds the slot (SourceSlot);
+//   - the rest: the progress loop's own.
 struct Pub final : Owner, std::enable_shared_from_this<Pub>
 {
+    // Fixed at setup.
     std::shared_ptr<Engine> engine; // first, so it is released last
     Description description;
     PublisherLimits limits;
     std::uint64_t instance_id = 0;
     PublisherPlan plan;
-    // The source ring: a region of the engine's arena, or this instance's own GPU memory.
+    // The source ring: a region of the engine's arena, or this instance's own GPU memory. The
+    // pointers stay set when the memory is released (release_memory).
     std::byte *source_base = nullptr;
     ucp_mem_h source_memh = nullptr;
     Region gpu_source;
     std::shared_ptr<void> source_storage; // keeps GPU writes safe when a slot outlives Publisher
+    // The arrays are fixed; each slot, and the record of the same index, belongs to whoever holds
+    // the slot. The device writes a record's fields between acquire and post, and the loop its
+    // index and timestamp as it routes the slot.
+    std::unique_ptr<SourceSlot[]> slots;
+    std::vector<std::byte> records;
+
+    // Shared.
+    InstancePhase phase; // any thread starts and finishes it; only the loop ends it
+    // Every sessions and pullers that are ready and not retiring. The loop writes it as they join
+    // and retire, so a waiting start reads it exactly, unlike Health.
+    std::atomic<std::uint32_t> holding{0};
+    // The loop pushes grants and takes back the ones not acquired, the device pops them, and
+    // finish and begin wake a device that waits. acquire sleeps on the queue; nobody polls a
+    // grant fd.
+    IndexRing grants{IndexRing::Fd::None};
+    // The loop writes them, and health() and the Ucx commands read them.
+    HealthCopy<Observation> health_copy;
+    HealthCopy<Topology> topology_copy;
+
+    // The progress loop's own.
     // The arena this instance still read when the next began: released with the instance.
     Region kept_arena;
-    std::vector<std::byte> records;
     PublisherOperations operations;
-    std::unique_ptr<SourceSlot[]> slots;
     std::vector<std::uint16_t> order;
     std::array<PubRow, 64> rows{};
     RowSet ready_rows; // the rows whose session is ready and not retiring
@@ -469,18 +498,12 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     std::uint32_t scan = 0, failed_every = 0, ordinals = 0;
     // The row the last grant pass stopped at: a slot was free, and this row had no room for it.
     std::optional<std::uint32_t> blocked;
-    IndexRing grants{IndexRing::Fd::None}; // acquire sleeps on the queue; nobody polls a grant fd
-    HealthCopy<Observation> health_copy;
     Topology topology;
-    HealthCopy<Topology> topology_copy;
     std::int64_t last_topology_ns = 0;
-    InstancePhase phase;
-    // Every sessions and pullers that are ready and not retiring. Written on the progress thread
-    // as they join and retire, so a waiting start reads it exactly, unlike Health.
-    std::atomic<std::uint32_t> holding{0};
     bool quarantined = false;
     bool source_failed = false;
     std::shared_ptr<Pub> self_keep;
+
     Pub(std::shared_ptr<Engine>, Description, PublisherPlan);
     void setup();        // on the progress thread, once the source ring is set
     bool closed() const; // the publisher has stopped
