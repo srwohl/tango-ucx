@@ -543,6 +543,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     {
         return slots_granted - slots_routed;
     }
+    RowSet device_holders() const;
     bool has_room(const PubRow &) const;
     wire::Status check_open(const wire::OpenMessage &) const;
     void unissue_grants();

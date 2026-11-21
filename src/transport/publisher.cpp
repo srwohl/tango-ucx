@@ -129,6 +129,12 @@ int Pub::find_row(std::uint64_t session) const
             return int(row_index);
     return -1;
 }
+// The sessions that hold the device: every sessions and pullers that have not begun to retire.
+// The device waits for their room, and UcxFailedEvery counts those that fail.
+RowSet Pub::device_holders() const
+{
+    return every.members | pull.members;
+}
 // Room for one more grant. An every session has reserved room for every grant not yet routed, a
 // puller for those in the ranges it holds.
 bool Pub::has_room(const PubRow &row) const
@@ -557,7 +563,7 @@ void Pub::retire(std::uint32_t row_index, RetireCause cause)
     auto &row = rows[row_index];
     if(!row.live())
         return;
-    bool held_device = (every.members | pull.members).has(row_index);
+    bool held_device = device_holders().has(row_index);
     ready_rows.remove(row_index);
     every.remove(row_index);
     latest.remove(row_index);
@@ -574,7 +580,7 @@ void Pub::retire(std::uint32_t row_index, RetireCause cause)
 }
 void Pub::count_holding()
 {
-    holding.store((every.members | pull.members).size(), std::memory_order_release);
+    holding.store(device_holders().size(), std::memory_order_release);
 }
 // Why an Open is refused, or Ok. The checks run in order and the first that fails decides.
 wire::Status Pub::check_open(const wire::OpenMessage &open_message) const
