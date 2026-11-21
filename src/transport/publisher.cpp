@@ -135,6 +135,15 @@ RowSet Pub::device_holders() const
 {
     return every.members | pull.members;
 }
+// Room for the next grant, or the row the device waits for. The every sessions gate first, and
+// the pull set is asked only if they have room, because it may give a range to a puller as it
+// answers. Latest sessions never gate.
+std::optional<std::uint32_t> Pub::reserve_grant()
+{
+    if(auto every_blocked = every.blocking(*this))
+        return every_blocked;
+    return pull.reserve(*this);
+}
 // Room for one more grant. An every session has reserved room for every grant not yet routed, a
 // puller for those in the ranges it holds.
 bool Pub::has_room(const PubRow &row) const
@@ -826,11 +835,7 @@ bool Pub::grant_pass()
         }
         if(slot_index < 0)
             break;
-        // The every sessions gate first. The pull set is asked only if they have room, because it
-        // may give a range to a puller as it answers.
-        blocked = every.blocking(*this);
-        if(!blocked)
-            blocked = pull.reserve(*this);
+        blocked = reserve_grant();
         if(blocked)
             break;
         // Each grant starts a fresh publication, which the device fills once it acquires the
