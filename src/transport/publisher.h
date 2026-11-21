@@ -381,7 +381,8 @@ class PullSet
     // Its rows, the frames of a range, the ranges given out so far, the row each of the latest
     // went to, the row that took the last, and the frames no puller received.
     RowSet members_;
-    std::uint64_t ranges_taken_ = 0, missing_ = 0;
+    std::uint64_t ranges_taken_ = 0;
+    std::uint64_t missing_ = 0;
     std::uint32_t range_frames_ = 0;
     std::vector<std::uint8_t> range_pullers_;
     std::uint8_t last_taker_ = 63;
@@ -401,7 +402,8 @@ class PullSet
 // The sessions a published frame is sent to, and the latest sessions that skip it.
 struct Recipients
 {
-    RowSet send, skip;
+    RowSet send;
+    RowSet skip;
 };
 // The phases of a publisher instance: docs/diagrams.md, section 5. Before the start, sessions
 // join and no slot is granted. Started, slots are granted while the sessions have room.
