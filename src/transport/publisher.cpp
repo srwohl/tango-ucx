@@ -81,7 +81,7 @@ void Pub::setup()
     order.resize(plan.slot_count);
     operations.allocate(this, plan, engine->request_bytes);
     grants.reserve(plan.slot_count);
-    pull.range_pullers.assign(plan.slot_count + 2, 0); // grants outstanding span fewer ranges
+    pull.setup(plan.slot_count);
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
     {
         rows[row_index].pub = this;
@@ -133,7 +133,7 @@ int Pub::find_row(std::uint64_t session) const
 // The device waits for their room, and UcxFailedEvery counts those that fail.
 RowSet Pub::device_holders() const
 {
-    return every.members | pull.members;
+    return every.members() | pull.members();
 }
 // Room for the next grant, or the row the device waits for. The every sessions gate first, and
 // the pull set is asked only if they have room, because it may give a range to a puller as it
@@ -154,7 +154,7 @@ bool Pub::has_room(const PubRow &row) const
 RowSet LatestSessions::takers(const Pub &pub, const SourceSlot &slot, std::int64_t now) const
 {
     RowSet taken;
-    for(auto row_index : members)
+    for(auto row_index : members_)
     {
         const auto &row = pub.rows[row_index];
         if(row.in_flight == 0 && now - row.last_send_ns >= row.min_interval_ns &&
@@ -165,7 +165,7 @@ RowSet LatestSessions::takers(const Pub &pub, const SourceSlot &slot, std::int64
 }
 std::optional<std::uint32_t> EverySessions::blocking(const Pub &pub) const
 {
-    for(auto row_index : members)
+    for(auto row_index : members_)
         if(!pub.has_room(pub.rows[row_index]))
             return row_index;
     return {};
@@ -174,17 +174,17 @@ std::optional<std::uint32_t> EverySessions::blocking(const Pub &pub) const
 // for a stream with no pull set, a range not yet taken, or one whose puller has left.
 PubRow *PullSet::holder(Pub &pub, std::uint64_t frame_index) const
 {
-    if(!range_frames || untaken(frame_index))
+    if(!range_frames_ || untaken(frame_index))
         return nullptr;
-    auto row_index = range_pullers[entry(frame_index)];
+    auto row_index = range_pullers_[entry(frame_index)];
     return has(row_index) ? &pub.rows[row_index] : nullptr;
 }
 // The frames of the range of a frame index that are granted and not yet routed.
 std::uint64_t PullSet::granted_in_range(const Pub &pub, std::uint64_t frame_index) const
 {
-    auto range_start = frame_index - frame_index % range_frames;
+    auto range_start = frame_index - frame_index % range_frames_;
     auto first = std::max(pub.next_frame_index, range_start);
-    auto last = std::min(pub.next_frame_index + pub.outstanding(), range_start + range_frames);
+    auto last = std::min(pub.next_frame_index + pub.outstanding(), range_start + range_frames_);
     return last > first ? last - first : 0;
 }
 // Whether a puller has room to take a range: rows for all of an untaken range, or for the grants
@@ -196,7 +196,7 @@ bool PullSet::can_take_range(const Pub &pub, std::uint32_t row, bool untaken,
     const auto &ring = pub.rows[row].ring;
     auto held = reserved(pub, row);
     auto grants = std::max<std::uint64_t>(granted, 1);
-    return ring.rows_free(held, untaken ? range_frames : grants) &&
+    return ring.rows_free(held, untaken ? range_frames_ : grants) &&
            ring.bytes_free(held, grants, pub.plan.sizes.frame_bytes);
 }
 // A range goes to the next puller after the last taker, in the fixed order of the rows, that can
@@ -205,7 +205,7 @@ bool PullSet::can_take_range(const Pub &pub, std::uint32_t row, bool untaken,
 // nobody's, and its frames are missing.
 PubRow *PullSet::take_range(Pub &pub, std::uint64_t frame_index)
 {
-    if(!range_frames)
+    if(!range_frames_)
         return nullptr;
     assert(!holder(pub, frame_index));
     bool fresh = untaken(frame_index);
@@ -215,7 +215,7 @@ PubRow *PullSet::take_range(Pub &pub, std::uint64_t frame_index)
     RowSet passed_over;
     for(std::uint32_t step = 1; step <= rows.size(); ++step)
     {
-        auto row_index = (last_taker + step) % rows.size();
+        auto row_index = (last_taker_ + step) % rows.size();
         if(!has(row_index))
             continue;
         if(!can_take_range(pub, row_index, fresh, granted))
@@ -225,15 +225,15 @@ PubRow *PullSet::take_range(Pub &pub, std::uint64_t frame_index)
         }
         for(auto passed : passed_over)
             ++rows[passed].passes;
-        ranges_taken += fresh;
-        last_taker = std::uint8_t(row_index);
-        range_pullers[entry(frame_index)] = last_taker;
+        ranges_taken_ += fresh;
+        last_taker_ = std::uint8_t(row_index);
+        range_pullers_[entry(frame_index)] = last_taker_;
         return &rows[row_index];
     }
-    if(fresh && members.empty())
+    if(fresh && members_.empty())
     {
-        range_pullers[entry(frame_index)] = last_taker;
-        ++ranges_taken;
+        range_pullers_[entry(frame_index)] = last_taker_;
+        ++ranges_taken_;
     }
     return nullptr;
 }
@@ -244,13 +244,13 @@ PubRow *PullSet::take_range(Pub &pub, std::uint64_t frame_index)
 // wrong position is a wrong decision, but no count is left behind that disagrees with the grants.
 std::uint64_t PullSet::reserved(const Pub &pub, std::uint32_t row) const
 {
-    if(!range_frames || !has(row))
+    if(!range_frames_ || !has(row))
         return 0;
     auto first = pub.next_frame_index;
     auto end = first + pub.outstanding();
     std::uint64_t held = 0;
-    for(auto start = first - first % range_frames; start < end; start += range_frames)
-        if(start / range_frames < ranges_taken && range_pullers[entry(start)] == row)
+    for(auto start = first - first % range_frames_; start < end; start += range_frames_)
+        if(start / range_frames_ < ranges_taken_ && range_pullers_[entry(start)] == row)
             held += granted_in_range(pub, start);
     return held;
 }
@@ -266,11 +266,11 @@ std::optional<std::uint32_t> PullSet::reserve(Pub &pub)
         taker = take_range(pub, frame_index);
     if(taker && pub.has_room(*taker))
         return {};
-    if(members.empty())
+    if(members_.empty())
         return {};
     auto *slow = taker;
     if(!slow)
-        for(auto row_index : members)
+        for(auto row_index : members_)
             if(!slow || pub.rows[row_index].last_send_ns < slow->last_send_ns)
                 slow = &pub.rows[row_index];
     return slow->row;
@@ -296,33 +296,49 @@ PubRow *PullSet::route(Pub &pub)
         to_puller = take_range(pub, pub.next_frame_index);
     if(to_puller)
         return to_puller;
-    if(!range_frames)
+    if(!range_frames_)
         return nullptr;
-    for(auto row_index : members)
+    for(auto row_index : members_)
         if(pub.has_room(pub.rows[row_index]))
             return &pub.rows[row_index];
-    ++missing;
+    ++missing_;
     return nullptr;
 }
 // A puller's End reports the set's missing count, so while one puller is sending, the End of
 // every puller waits.
 RowSet PullSet::end_waits(const Pub &pub) const
 {
-    for(auto row_index : members)
+    for(auto row_index : members_)
         if(pub.rows[row_index].in_flight)
-            return members;
+            return members_;
     return {};
+}
+// Sized for the grants outstanding, which span fewer ranges than the slots plus two.
+void PullSet::setup(std::uint32_t slot_count)
+{
+    range_pullers_.assign(slot_count + 2, 0);
+}
+// Why a puller's Open is refused, or Ok.
+wire::Status PullSet::check_open(const wire::OpenMessage &open_message) const
+{
+    if(open_message.range % open_message.batch)
+        return wire::Range; // a range must be whole batches
+    if(open_message.range > open_message.depth)
+        return wire::Range; // a range must fit the ring
+    if(!members_.empty() && open_message.range != range_frames_)
+        return wire::Range; // every puller of a set has the same range
+    return wire::Ok;
 }
 // A puller left before it was sent End. Frames it received but did not release are counted as
 // missing, because a frame is never sent twice, and the ranges it held are nobody's. With no
 // pullers left before the start, the range is cleared: the stream then has no pull set.
 void PullSet::remove(const PubRow &row, bool started)
 {
-    if(members.has(row.row) && row.end != EndNotice::Sent)
-        missing += row.ring.unreleased();
-    members.remove(row.row);
-    if(members.empty() && !started)
-        range_frames = 0;
+    if(members_.has(row.row) && row.end != EndNotice::Sent)
+        missing_ += row.ring.unreleased();
+    members_.remove(row.row);
+    if(members_.empty() && !started)
+        range_frames_ = 0;
 }
 std::span<std::byte> Pub::payload(std::uint32_t slot_index)
 {
@@ -431,7 +447,7 @@ void Pub::send_end(std::uint32_t row_index)
 {
     auto &row = rows[row_index];
     wire::EndMessage end_message{row.session, row.ring.sent, next_frame_index, row.reason,
-                                 row.pull ? pull.missing : 0};
+                                 row.pull ? pull.missing() : 0};
     auto encoded = wire::encode(end_message);
     send_control(row_index, OpKind::End, wire::End, encoded);
     row.end = EndNotice::Sent;
@@ -610,13 +626,7 @@ wire::Status Pub::check_open(const wire::OpenMessage &open_message) const
         return wire::Malformed; // the session id is already in use
     if(plan.sizes.opaque && open_message.ring_bytes < 2 * plan.sizes.frame_bytes)
         return wire::Malformed; // a packed ring must hold two of the largest frame
-    if(is_puller && open_message.range % open_message.batch)
-        return wire::Range; // a range must be whole batches
-    if(is_puller && open_message.range > open_message.depth)
-        return wire::Range; // a range must fit the ring
-    if(is_puller && !pull.members.empty() && open_message.range != pull.range_frames)
-        return wire::Range; // every puller of a set has the same range
-    return wire::Ok;
+    return is_puller ? pull.check_open(open_message) : wire::Ok;
 }
 void Pub::close(ControlEntry &entry)
 {
@@ -717,7 +727,7 @@ void Pub::unissue_grants()
 // Every and latest sessions are all ready sessions.
 void Pub::check_members() const
 {
-    assert((every.members | latest.members).without(ready_rows).empty());
+    assert((every.members() | latest.members()).without(ready_rows).empty());
 }
 // Routes the posted slots in grant order and, once a finishing instance has routed every slot,
 // ends it and sends its sessions End.
@@ -787,10 +797,10 @@ void Pub::route_frame(std::uint32_t slot_index, PubRow *to_puller, std::int64_t 
     ++next_frame_index;
     // Every sessions and the puller had room reserved when the slot was granted.
     auto takers = latest.takers(*this, slot, now);
-    auto recipients = every.members | takers;
+    auto recipients = every.members() | takers;
     if(to_puller && to_puller->live())
         recipients.add(to_puller->row);
-    for(auto skipper : latest.members.without(takers))
+    for(auto skipper : latest.members().without(takers))
     {
         ++skipped;
         ++rows[skipper].skipped;
@@ -951,7 +961,7 @@ void Pub::publish_health()
     Observation observation;
     observation.frames = next_frame_index;
     observation.skipped = skipped;
-    observation.missing = pull.missing;
+    observation.missing = pull.missing();
     observation.failed_every = failed_every;
     observation.source_failed = source_failed;
     auto pressure = pressure_row();

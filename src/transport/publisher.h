@@ -285,61 +285,80 @@ struct Pub;
 // The every sessions of an instance (ADR 0002): each takes every frame and gates every grant.
 // They join before the first grant, and each grant is one more frame for all of them, so what
 // they have reserved is one position of the instance: its grants not yet routed.
-struct EverySessions
+class EverySessions
 {
-    RowSet members;
+  public:
+    RowSet members() const
+    {
+        return members_;
+    }
     bool has(std::uint32_t row) const
     {
-        return members.has(row);
+        return members_.has(row);
     }
     void add(std::uint32_t row)
     {
-        members.add(row);
+        members_.add(row);
     }
     void remove(std::uint32_t row)
     {
-        members.remove(row);
+        members_.remove(row);
     }
     // The first row with no room for one more grant, if any.
     std::optional<std::uint32_t> blocking(const Pub &) const;
+
+  private:
+    RowSet members_;
 };
 struct SourceSlot;
 // The latest sessions of an instance (ADR 0002): each takes a frame when it has room and is due,
 // and skips it otherwise. They never gate a grant.
-struct LatestSessions
+class LatestSessions
 {
-    RowSet members;
+  public:
+    RowSet members() const
+    {
+        return members_;
+    }
     void add(std::uint32_t row)
     {
-        members.add(row);
+        members_.add(row);
     }
     void remove(std::uint32_t row)
     {
-        members.remove(row);
+        members_.remove(row);
     }
     // The rows that take this frame now; the others skip it.
     RowSet takers(const Pub &, const SourceSlot &, std::int64_t now) const;
+
+  private:
+    RowSet members_;
 };
 // The pullers of an instance (ADR 0002): a set that takes each frame once, a range at a time.
 // Ranges are kept on the frame index, so a cancelled slot, which uses no index, moves every
 // later grant down by one.
-struct PullSet
+class PullSet
 {
-    // Its rows, the frames of a range, the ranges given out so far, the row each of the latest
-    // went to, the row that took the last, and the frames no puller received.
-    RowSet members;
-    std::uint64_t ranges_taken = 0, missing = 0;
-    std::uint32_t range_frames = 0;
-    std::vector<std::uint8_t> range_pullers;
-    std::uint8_t last_taker = 63;
+  public:
+    void setup(std::uint32_t slot_count);
+    RowSet members() const
+    {
+        return members_;
+    }
+    // The frames no puller received, which every puller's End reports.
+    std::uint64_t missing() const
+    {
+        return missing_;
+    }
     bool has(std::uint32_t row) const
     {
-        return members.has(row);
+        return members_.has(row);
     }
+    wire::Status check_open(const wire::OpenMessage &) const;
     void add(std::uint32_t row, std::uint32_t range)
     {
-        members.add(row);
-        range_frames = range;
+        members_.add(row);
+        range_frames_ = range;
     }
     void remove(const PubRow &, bool started);
     // The puller that holds the range of a frame index, if it is still in the set. A lookup: it
@@ -358,14 +377,22 @@ struct PullSet
     std::uint64_t reserved(const Pub &, std::uint32_t row) const;
 
   private:
+    // Its rows, the frames of a range, the ranges given out so far, the row each of the latest
+    // went to, the row that took the last, and the frames no puller received.
+    RowSet members_;
+    std::uint64_t ranges_taken_ = 0, missing_ = 0;
+    std::uint32_t range_frames_ = 0;
+    std::vector<std::uint8_t> range_pullers_;
+    std::uint8_t last_taker_ = 63;
+
     bool untaken(std::uint64_t frame_index) const
     {
-        return frame_index / range_frames == ranges_taken;
+        return frame_index / range_frames_ == ranges_taken_;
     }
-    // Where range_pullers keeps the puller of a frame index's range.
+    // Where range_pullers_ keeps the puller of a frame index's range.
     std::size_t entry(std::uint64_t frame_index) const
     {
-        return frame_index / range_frames % range_pullers.size();
+        return frame_index / range_frames_ % range_pullers_.size();
     }
     std::uint64_t granted_in_range(const Pub &, std::uint64_t frame_index) const;
     bool can_take_range(const Pub &, std::uint32_t row, bool untaken, std::uint64_t granted) const;
