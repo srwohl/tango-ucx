@@ -29,7 +29,7 @@ flowchart LR
             CMD["<b>UCX commands</b> Open, Close<br/><b>Attributes</b> UcxStream, UcxSessions, UcxTopology,<br/>UcxPublished, UcxSkipped,<br/>UcxPressure, UcxEvery, UcxFailedEvery<br/><code>src/tango/device.cpp</code>"]
         end
         subgraph DTR["Transport"]
-            PUB["<b>Publisher</b><br/>loop thread, control table,<br/>session rows, grants<br/><code>publisher.cpp</code>"]
+            PUB["<b>Publisher</b><br/>loop thread, control table,<br/>session rows, grants<br/><code>instance.cpp</code>, <code>delivery.cpp</code>"]
             SRC[("Source ring<br/>and records")]
             PLOW["<b>UCX worker and endpoints</b><br/><code>ucp.cpp, memory.cpp, wire.cpp</code>"]
             PGPU["<b>GPU runtime</b>, optional<br/><code>src/cuda/runtime.cpp</code>"]

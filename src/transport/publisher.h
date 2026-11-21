@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Copyright contributors to the tango-ucx project
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // The publisher's internals: the engine that lives as long as the Publisher (engine.cpp) and
-// the publisher instances it drives (publisher.cpp).
+// the publisher instances it drives (instance.cpp), with their deliveries (delivery.cpp). The
+// public Publisher and Slot are in publisher.cpp.
 #pragma once
 
 #include "publisher_operations.h"
@@ -220,7 +221,7 @@ enum class Teardown : std::uint8_t
 };
 // Why a session retires. The cause decides the reason its End gives, whether it is sent End at
 // all, and whether it counts as failed (the table in docs/diagrams.md, section 6; retirement()
-// in publisher.cpp).
+// in instance.cpp).
 enum class RetireCause : std::uint8_t
 {
     CloseCommand,    // the subscriber sent Close
