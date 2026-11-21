@@ -115,10 +115,10 @@ void Pub::retire_all()
     for(std::uint32_t row_index = 0; row_index < plan.row_count; ++row_index)
         retire(row_index, RetireCause::InstanceClosing); // a row already retiring stays as it is
 }
+// source_base and source_memh stay as they are: lent_ring() reads them on another thread, and
+// nothing sends from an instance that is done.
 void Pub::release_memory() noexcept
 {
-    source_base = nullptr;
-    source_memh = nullptr;
     gpu_source.unmap();
     kept_arena.unmap();
 }
@@ -1173,8 +1173,10 @@ void Publisher::finish()
 }
 std::span<std::byte> Publisher::lent_ring() const
 {
+    // A finishing instance stays current while the next is made, and the loop may replace the
+    // arena its ring is in meanwhile.
     auto pub = p_ ? p_->instance() : nullptr;
-    if(!pub || !pub->limits.lend_source)
+    if(!pub || !pub->limits.lend_source || pub->phase.load() >= transport::Phase::Finishing)
         return {};
     return {pub->source_base, std::size_t(pub->plan.source_bytes)};
 }

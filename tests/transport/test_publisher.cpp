@@ -228,6 +228,18 @@ TEST_CASE("a lent ring's slot has no memory, and its buffer comes back with no s
     CHECK_THROWS_AS(std::move(*own).publish_from(0, {}), std::logic_error);
 }
 
+TEST_CASE("a lent ring is empty once its instance finishes, and the next begin lends another")
+{
+    auto limits = test::small_limits();
+    limits.lend_source = true;
+    Publisher publisher(test::small_description(), limits);
+    CHECK_FALSE(publisher.lent_ring().empty());
+    publisher.finish();
+    CHECK(publisher.lent_ring().empty());
+    publisher.begin(test::small_description());
+    CHECK_FALSE(publisher.lent_ring().empty());
+}
+
 TEST_CASE("UcxSessions lists all 64 sessions with their 64-byte labels")
 {
     test::RawPeer peer; // one worker behind every session

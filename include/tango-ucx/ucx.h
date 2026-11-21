@@ -181,7 +181,8 @@ class Publisher
     Health health() const;
     Description description() const; // the active instance's; throws when there is none
     // The active instance's lent ring: its buffers, each as large as a source slot, back to back,
-    // registered with UCX. Empty without lend_source or an instance. Valid until the next begin.
+    // registered with UCX. Empty without lend_source or an instance, and once the instance
+    // finishes. Valid until the next begin.
     std::span<std::byte> lent_ring() const;
 
   private:
