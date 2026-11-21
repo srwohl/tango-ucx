@@ -66,11 +66,17 @@ TEST_CASE("two pullers take the ranges in turn, each frame goes to exactly one, 
     const std::uint64_t frames = 6 * k_range + 3; // the last range is short
     // Two frames, and max_wait cuts a short batch: the first puller's batches no longer start
     // at multiples of the batch size, so only the cut at a range's end keeps them in one range.
+    // Both arrive before the next is published: in one batch, or in two when max_wait passes
+    // before the second lands.
     for(std::uint64_t i = 0; i < 2; ++i)
         test::publish_one(publisher, std::byte(i));
-    auto first = pullers[0].read(test::deadline());
-    REQUIRE(first);
-    REQUIRE(first->frames() == 2);
+    for(std::uint64_t next = 0; next < 2;)
+    {
+        auto batch = pullers[0].read(test::deadline());
+        REQUIRE(batch);
+        for(std::size_t i = 0; i < batch->frames(); ++i)
+            REQUIRE(batch->index(i) == next++);
+    }
     for(std::uint64_t i = 2; i < frames; ++i)
     {
         if(i == 13) // a cancelled slot uses no frame index, and moves no range
