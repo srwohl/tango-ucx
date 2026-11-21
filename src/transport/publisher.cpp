@@ -133,6 +133,7 @@ int Pub::find_row(std::uint64_t session) const
 // puller for its own.
 bool Pub::has_room(const PubRow &row) const
 {
+    assert(every.has(row.row) || pull.reserved[row.row] == pull.derived_reserved(*this, row.row));
     auto reserved = every.has(row.row) ? outstanding() : pull.reserved[row.row];
     return row.ring.has_room(reserved, plan.sizes.frame_bytes);
 }
@@ -178,6 +179,7 @@ std::uint64_t PullSet::granted_in_range(const Pub &pub, std::uint64_t frame_inde
 bool PullSet::can_take_range(const Pub &pub, std::uint32_t row, bool untaken,
                              std::uint64_t granted) const
 {
+    assert(reserved[row] == derived_reserved(pub, row));
     const auto &ring = pub.rows[row].ring;
     auto grants = std::max<std::uint64_t>(granted, 1);
     return ring.rows_free(reserved[row], untaken ? range_frames : grants) &&
@@ -321,15 +323,30 @@ void PullSet::remove(const PubRow &row, bool started)
         range_frames = 0;
 }
 // A grant reserves at most one puller, so the pullers together hold no more than the grants not
-// yet routed.
-void PullSet::check([[maybe_unused]] std::uint64_t outstanding) const
+// yet routed. Each puller's count is what the grant window and the range table give.
+void PullSet::check([[maybe_unused]] const Pub &pub) const
 {
 #ifndef NDEBUG
     std::uint64_t pulled = 0;
     for(auto row_index : members)
+    {
         pulled += reserved[row_index];
-    assert(pulled <= outstanding);
+        assert(reserved[row_index] == derived_reserved(pub, row_index));
+    }
+    assert(pulled <= pub.outstanding());
 #endif
+}
+std::uint64_t PullSet::derived_reserved(const Pub &pub, std::uint32_t row) const
+{
+    if(!range_frames || !has(row))
+        return 0;
+    auto first = pub.next_frame_index;
+    auto end = first + pub.outstanding();
+    std::uint64_t held = 0;
+    for(auto start = first - first % range_frames; start < end; start += range_frames)
+        if(start / range_frames < ranges_taken && range_pullers[entry(start)] == row)
+            held += std::min(end, start + range_frames) - std::max(first, start);
+    return held;
 }
 std::span<std::byte> Pub::payload(std::uint32_t slot_index)
 {
@@ -727,7 +744,7 @@ void Pub::check_reservations() const
 {
 #ifndef NDEBUG
     assert((every.members | latest.members).without(ready_rows).empty());
-    pull.check(outstanding());
+    pull.check(*this);
 #endif
 }
 // Routes the posted slots in grant order and, once a finishing instance has routed every slot,

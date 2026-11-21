@@ -358,7 +358,10 @@ struct PullSet
     // The newest grants, which the device never took.
     void take_back(Pub &, std::uint32_t grants);
     void release(std::uint32_t row);
-    void check(std::uint64_t outstanding) const; // asserts; nothing in a release build
+    void check(const Pub &) const; // asserts; nothing in a release build
+    // The grants not yet routed whose frame index lies in a range the row holds: what
+    // `reserved` counts, worked out from the grant window and the range table instead.
+    std::uint64_t derived_reserved(const Pub &, std::uint32_t row) const;
 
   private:
     bool untaken(std::uint64_t frame_index) const
