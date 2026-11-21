@@ -14,6 +14,7 @@ namespace TangoUcx::transport
 {
 namespace
 {
+// On the progress loop, which runs it inside worker->progress().
 ucs_status_t on_credit(void *arg, const void *header, size_t header_bytes, void *, size_t,
                        const ucp_am_recv_param_t *)
 {

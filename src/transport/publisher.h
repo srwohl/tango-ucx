@@ -574,34 +574,36 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
 // What a publisher keeps for its whole life: the UCX context and worker, the progress thread,
 // the control table and the arena. It drives one active instance and the earlier instances that
 // still close their sessions (ADR 0001).
+//
+// Its fields fall in groups by the thread that writes them, as an instance's do (Pub): fixed at
+// setup, shared, and the progress loop's own. The other threads are those that use the
+// Publisher: its constructor, destructor and begin, the Ucx commands and a device that acquires.
 struct Engine final : Owner, std::enable_shared_from_this<Engine>
 {
+    // Fixed at setup: by the constructor, or by the loop before it sets setup_done, which start()
+    // waits for.
     PublisherLimits limits;
     std::unique_ptr<ucp::Context> context;
-    std::unique_ptr<ucp::Worker> worker;
+    std::unique_ptr<ucp::Worker> worker; // the pointer is fixed; the worker is the loop's
     std::uint32_t request_bytes = 0;
     std::uint64_t max_header = 0;
     bool memory_hooks = true;
-    // Registered once and faulted in, it holds the active instance's source ring. It is
-    // replaced only when a ring needs more, or when an instance that may still read it leaves.
-    Region arena;
-    ControlTable control;
-    Wake wake; // a posted slot or a poke ends the loop's wait
-    std::jthread loop;
-    std::atomic<bool> stopping{false};
-    bool setup_ok = false, quarantined = false;
-    bool tainted = false; // an instance was quarantined: the worker may still hold its endpoints
+    bool setup_ok = false;
     std::promise<void> setup_done;
-    std::shared_ptr<Engine> self_keep;
+    // The loop's own, except that a helper thread faults in a new arena's pages (prefaulting).
+    // Registered once and faulted in, it holds the active instance's source ring. It is replaced
+    // only when a ring needs more, or when an instance that may still read it leaves.
+    Region arena;
 
-    // The progress thread's own.
-    std::shared_ptr<Pub> active;
-    std::vector<std::shared_ptr<Pub>> draining;
-    std::int64_t begin_since_ns = 0;
-    // The active instance, for every other thread.
+    // Shared.
+    ControlTable control; // callers queue Opens and Closes (handle); the loop answers them
+    Wake wake;            // a posted slot or a poke ends the loop's wait
+    std::jthread loop;    // started and joined on the caller's thread
+    std::atomic<bool> stopping{false}; // stop() sets it; the loop and closed() read it
+    // The active instance, for every other thread: the loop sets it.
     mutable std::mutex current_lock;
     std::shared_ptr<Pub> current;
-
+    // A begin, handed from its caller to the loop.
     struct BeginRequest
     {
         Description description;
@@ -609,28 +611,40 @@ struct Engine final : Owner, std::enable_shared_from_this<Engine>
         std::promise<void> done;
     };
     std::mutex begin_serial; // one begin at a time
-    std::mutex begin_lock;
+    std::mutex begin_lock;   // guards begin_request and begin_closed
     std::shared_ptr<BeginRequest> begin_request;
-    std::shared_ptr<BeginRequest> making; // the progress thread's: taken, waiting for its arena
-    std::future<void> prefaulting;        // faulting in a new arena's pages
-    bool begin_closed = false;            // under begin_lock: shutdown has refused what is left
+    bool begin_closed = false; // shutdown has refused what is left
     std::atomic<bool> begin_posted{false};
 
+    // The progress loop's own.
+    std::shared_ptr<Pub> active;
+    std::vector<std::shared_ptr<Pub>> draining;
+    std::int64_t begin_since_ns = 0;
+    std::shared_ptr<BeginRequest> making; // taken, waiting for its arena
+    std::future<void> prefaulting;        // faulting in a new arena's pages
+    bool quarantined = false;
+    bool tainted = false; // an instance was quarantined: the worker may still hold its endpoints
+    std::shared_ptr<Engine> self_keep;
+
+    // On the threads that use the Publisher.
     explicit Engine(PublisherLimits);
-    ~Engine();
+    ~Engine(); // wherever the last reference goes, which may be the loop (stop())
     void start();
     void stop();
+    void begin(Description);
+    // On any thread.
+    void poke(); // another thread made work for the loop
+    std::shared_ptr<Pub> instance() const;
+
+    // On the progress loop.
     void run();
     void setup();
     void shutdown();
-    void poke(); // another thread made work for the loop
-    void begin(Description);
     bool begin_pass(std::int64_t);
     void make_instance(BeginRequest &);
     bool control_pass();
     bool busy() const;
     Pub *owner_of(std::uint64_t session) const;
-    std::shared_ptr<Pub> instance() const;
     void set_current(std::shared_ptr<Pub>);
 };
 
