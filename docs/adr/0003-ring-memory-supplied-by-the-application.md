@@ -12,9 +12,10 @@ Status: **proposed**
 
 Every ring's memory is chosen by the library today. A receive ring is `new std::byte[]`, or
 `gpu_storage` for `cuda:N` and `pinned:N`, and then registered with `Region::adopt`
-(`Sub::setup`, `src/transport/subscription.cpp:211-229`). A GPU source ring is `gpu_storage` and
-`Region::adopt` (`Pub::setup`, `src/transport/publisher.cpp:71-79`); a host source ring, lent or
-not, is a region of the arena that `Region::allocate` makes (`src/transport/engine.cpp:216`).
+(`Sub::setup` in `src/transport/subscription.cpp`). A GPU source ring is `gpu_storage` and
+`Region::adopt` (`Pub::setup` in `src/transport/instance.cpp`); a host source ring, lent or not,
+is a region of the arena that `Region::allocate` makes (`Engine::begin_pass` in
+`src/transport/engine.cpp`).
 So the registration path already takes memory the library did not map itself, with an owner
 (`std::shared_ptr<void>`) that keeps it alive; only the choice of allocator is closed.
 
@@ -156,9 +157,9 @@ write, a NIXL transfer or other MPI ranks reading a shared window, holds the bat
 completion arrives, and drops it there; a batch may be released from any thread.
 
 **Several UCX users in one process.** MPI, NIXL and Holoscan load the same `libucx` with contexts
-of their own. tango-ucx reads its configuration under `TANGO_UCX`
-(`ucp_config_read("TANGO_UCX", …)`, `src/transport/ucp.cpp:42`), so their tuning does not reach
-it; whether a plain `UCX_*` setting still applies underneath is the RFC's open question (§8.3).
+of their own. tango-ucx reads its configuration under `TANGO_UCX` (`ucp_config_read` in
+`Context::Context`, `src/transport/ucp.cpp`), so their tuning does not reach it; whether a
+plain `UCX_*` setting still applies underneath is the RFC's open question (§8.3).
 All of them must use one UCX build, and memory both register counts twice under `reserve_pin`.
 
 **To be tested, kind by kind:** memory UCX may not register as `UCS_MEMORY_TYPE_CUDA`, such as
@@ -208,5 +209,3 @@ Ring memory the application gives the library through a provider, for a receive 
 or a lent ring. The library registers it, keeps its owner while the ring may be read or written,
 and never writes or frees memory it does not hold. Quarantine keeps it until the process exits.
 _Avoid_: external memory, user buffer, zero copy
-
-Written against `publisher-instances` at `615f19d`.
