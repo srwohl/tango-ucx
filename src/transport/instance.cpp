@@ -246,17 +246,16 @@ void Pub::send_end(std::uint32_t row_index)
     if(row.state == SessionState::Ready)
         row.state = SessionState::Ended;
 }
-// Starts the flush or the close of a retiring row's endpoint. A forced close does not wait for
-// the subscriber.
-void Pub::start_teardown(std::uint32_t row_index, OpKind kind, bool force)
+// The close is forced because UCX keeps a gracefully closed endpoint that its peer connected back
+// to, with the peer's shared memory mapped, until the worker is destroyed.
+void Pub::start_teardown(std::uint32_t row_index, OpKind kind)
 {
     assert(kind == OpKind::Flush || kind == OpKind::Close);
-    assert(!force || kind == OpKind::Close);
     auto &operation = *operations.control(row_index, kind); // teardown starts each step once
     assert(!operation.in_flight);
     auto &row = rows[row_index];
     row.teardown = kind == OpKind::Flush ? Teardown::Flushing : Teardown::Closing;
-    auto params = prepare(operation, force ? UCP_EP_CLOSE_FLAG_FORCE : 0);
+    auto params = prepare(operation, kind == OpKind::Close ? UCP_EP_CLOSE_FLAG_FORCE : 0);
     complete_if_done(operation, kind == OpKind::Flush ? ucp_ep_flush_nbx(row.ep, &params)
                                                       : ucp_ep_close_nbx(row.ep, &params));
 }
@@ -330,7 +329,7 @@ void Pub::on_control(OpMeta *operation, ucs_status_t status)
                 retire(row_index, RetireCause::TransportFailed);
             return;
         case OpKind::Flush:
-            if(row.teardown == Teardown::Flushing) // a forced close may have overtaken it
+            if(row.teardown == Teardown::Flushing) // a late close may have overtaken it
                 row.teardown = Teardown::Flushed;
             return;
         case OpKind::Close:
@@ -647,10 +646,10 @@ bool Pub::retire_pass(std::int64_t now)
         bool unclosed = row.ep && row.teardown < Teardown::Closing;
         bool idle = row.in_flight == 0;
         // A flush follows the row's last send and a close follows the flush. A late row is
-        // closed by force, whatever it still has in flight.
+        // closed at once, whatever it still has in flight.
         if(unclosed && (late || (row.teardown == Teardown::Flushed && idle)))
         {
-            start_teardown(row_index, OpKind::Close, late);
+            start_teardown(row_index, OpKind::Close);
             work = true;
         }
         else if(unclosed && row.teardown == Teardown::None && idle)

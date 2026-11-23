@@ -209,8 +209,8 @@ enum class EndNotice : std::uint8_t
     Sent
 };
 // How far a retiring session's endpoint has been torn down: flushed after its last send, then
-// closed (retire_pass). A late row is closed by force from any step before Closing, even with
-// its flush still in flight.
+// closed (retire_pass). A late row is closed from any step before Closing, even with its flush
+// still in flight.
 enum class Teardown : std::uint8_t
 {
     None,
@@ -601,7 +601,7 @@ struct Pub final : Owner, std::enable_shared_from_this<Pub>
     void publish_health();
     void retire(std::uint32_t, RetireCause);
     void send_end(std::uint32_t);
-    void start_teardown(std::uint32_t, OpKind, bool force = false);
+    void start_teardown(std::uint32_t, OpKind);
     void send_frame(std::uint32_t, std::uint32_t, std::int64_t);
     void send_control(std::uint32_t, OpKind, std::uint8_t, std::span<const std::byte>);
     void on_send(OpMeta *, ucs_status_t);

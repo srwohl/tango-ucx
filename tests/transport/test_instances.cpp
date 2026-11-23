@@ -6,7 +6,9 @@
 #include <ucp.h>
 
 #include <ctime>
+#include <fstream>
 #include <future>
+#include <string>
 #include <thread>
 
 using namespace TangoUcx;
@@ -32,6 +34,14 @@ wire::Status open_status(Publisher &publisher, const std::string &open)
     wire::Reply reply;
     REQUIRE(wire::parse(transport::handle(publisher, open), reply));
     return reply.status;
+}
+std::size_t shared_memory_mappings()
+{
+    std::ifstream maps("/proc/self/maps");
+    std::size_t count = 0;
+    for(std::string line; std::getline(maps, line);)
+        count += line.find("/SYSV") != line.npos || line.find("/dev/shm/") != line.npos;
+    return count;
 }
 } // namespace
 
@@ -112,6 +122,28 @@ TEST_CASE("the arena is kept across instances whose rings fit in it")
     CHECK(static_cast<const std::byte *>(batch->payload())[1023] == std::byte{0x42});
     batch.reset();
     every.close(test::deadline());
+}
+
+TEST_CASE("closed sessions keep none of their peers' shared memory mapped across instances")
+{
+    Publisher publisher(test::small_limits());
+    auto run = [&]
+    {
+        publisher.begin(test::small_description());
+        auto every = test::subscribe(publisher, true);
+        test::publish_one(publisher);
+        test::publish_one(publisher);
+        publisher.finish();
+        std::optional<Outcome> outcome;
+        CHECK(read_to_outcome(every, outcome).size() == 2);
+        every.close(test::deadline());
+    };
+    run();
+    auto mapped = shared_memory_mappings();
+    for(int i = 0; i < 10; ++i)
+        run();
+    CHECK(test::eventually([&] { return shared_memory_mappings() <= mapped; },
+                           std::chrono::seconds(2)));
 }
 
 TEST_CASE("a refused description leaves the active instance as it was")
