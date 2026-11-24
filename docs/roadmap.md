@@ -68,16 +68,97 @@ A subscriber gets each granted part as its own packed array, `(frames, ...)`; a 
 part keeps `batch.array`. Every, latest and pull each take a selection; the pullers of a set
 share one. Sessions with and without a selection share an instance.
 
-The publisher turns a selection into the runs of contiguous bytes it sends from the slot:
+The publisher prepares the selection when Open is accepted, expressing it as runs of contiguous
+bytes relative to the source slot. For a fixed ROI, reuse those offsets and lengths for every
+frame. Each send supplies the current source address.
 
-- one run for a whole part, or a band of rows in a planar layout: sent as today, zero-copy;
-- one run per row for a rectangle: UCX IOV, or the generic datatype;
-- an element gather, for a band of an interleaved layout, a mosaic colour, or fields of a
-  structure: the generic datatype's pack callback, one copy.
+- A whole contiguous part or a band of full-width rows in a planar layout uses one run and
+  the existing contiguous send path.
+- An interior rectangle in a row-major image uses one run per selected row. Compare UCX
+  scatter/gather IOV, the generic datatype and explicit packing for throughput and source-buffer
+  hold time.
+- A band of an interleaved layout, a mosaic colour, or fields of a structure uses an element
+  gather through the generic datatype's pack callback.
 
 `UcxStream` describes what can be selected: the parts, their axes and labels, the kinds of
 selection and their limits, and which record fields follow which axis. `UcxSessions` shows each
 session's selection and bytes per frame.
+
+### Fixed ROIs and memory traffic
+
+For a fixed-size array, a rectangle at the same position has the same row offsets, row lengths,
+output shape and byte count in every frame. Prepare these from the granted selection and
+source layout once per session. Reuse descriptor storage for each in-flight send, keeping its
+IOV list and source pixels valid until completion. A ring slot with a stable address can reuse
+its row pointers as well. Prepare a new plan when the source layout or selection changes.
+The receiver gets the granted packed array, with its original frame index and timestamp.
+The UCX API defines an IOV as a list of buffers and requires the list to remain valid until
+the transfer completes. [UCX datatype documentation](https://openucx.github.io/ucx/api/latest/html/group___u_c_p___d_a_t_a_t_y_p_e.html)
+
+UCX's `ucp_client_server.c` provides an active-message IOV example. `fill_request_param`
+selects the IOV datatype and passes the number of segments as the count. `send_recv_am`
+sends that list with `ucp_am_send_nbx` and handles rendezvous reception. The `-c am -v N`
+options select this path with N buffers. It allocates buffers per iteration. Our adaptation
+points those segments at image rows and reuses the layout across frames, with descriptor
+storage held per in-flight operation or stable source slot.
+[UCX client/server example](https://openucx.github.io/ucx/api/latest/html/ucp_client_server_8c-example.html)
+
+The upstream active-message tests also exercise combinations of contiguous, IOV and generic
+send and receive datatypes, including rendezvous. An IOV sender and a contiguous receiver
+provide the mechanism for assembling selected source rows into one packed output array.
+The fixed ROI and source-ring reuse policy are application decisions built on that mechanism.
+[UCX active-message datatype tests](https://github.com/openucx/ucx/blob/v1.21.x/test/gtest/ucp/test_ucp_am.cc#L1891-L1894)
+
+This makes IOV attractive for fixed rectangles. Preparing the list once removes repeated
+allocation and geometry calculations. If UCX transfers directly from the rows, it also avoids
+writing a temporary crop and reading that crop again for sending. The selected UCX protocol,
+transport and memory type determine whether this direct path is available. Check it with the
+project's UCX version and active-message send API in the benchmark.
+
+Pixel traffic remains on every frame. A tall, narrow rectangle has many short segments and may
+use only a few bytes from each fetched cache line. A wide rectangle of the same area may be
+much cheaper to read. Each subscriber also adds reads, subject to cache reuse, while sharing
+memory bandwidth with acquisition and the full-frame saver. Increasing worker counts helps
+only while those resources have capacity.
+
+The generic datatype reuses the same prepared geometry for packing. Its callback writes a
+packed representation into UCX-provided storage, so include internal packing traffic in the
+comparison. Explicit packing into reusable registered storage adds source reads, staging
+writes and subsequent send reads. With several identical subscriptions, packing once per frame
+and sharing the result could offset those costs. That is a benchmark candidate. Such a buffer
+would remain held until all sends using it complete.
+
+Direct IOV sends also extend the lifetime of the source frame. Today `slot.sends` counts all
+sends using a source slot, and the slot becomes reusable only when that count reaches zero.
+A slow ROI transfer can therefore retain a full camera buffer after the saver's send has
+finished. Once the source ring has no free slots, acquisition cannot obtain another buffer.
+An every subscription also gates new source grants through its receive credits. Latest
+currently limits each session to one outstanding transfer, bounding how many source slots
+that session can retain. Several sessions and shared progress, memory and transport resources
+can still affect acquisition and the saver.
+
+For optional ROI consumers, compare direct sends with a bounded registered staging ring.
+Packing into that ring releases the ROI's claim on the source once extraction completes;
+the network transfer then holds the staging buffer. If its staging capacity is exhausted,
+skip an optional latest delivery. Keep extraction work bounded so it also leaves progress
+time for required sends. This design trades additional memory traffic for shorter source
+retention. Measure it before choosing the rectangle path. Required every subscriptions retain
+their completeness and backpressure semantics. Separate workers could reduce progress
+contention, while memory bandwidth and the network link would still be shared.
+
+Source lifetime and receive credit have separate completion points. `Pub::on_send` releases a
+send's source hold at UCX completion. An application may keep processing its received copy
+after that. Its receive slots remain occupied until it releases the Batch, after which the
+subscriber advances its cumulative credit. Returning receive credit at transfer completion
+would allow those slots to be overwritten during application access. An every subscriber
+whose receive ring is full can gate future source grants even when source slots are free.
+For latest, exhausted receive capacity causes skipped deliveries. ROI processing time belongs
+to this receive-credit lifetime; source retention covers the outstanding transfer.
+
+Lima2's masked ROI benchmark motivates measuring memory traffic and traversal order. Its
+follow-up combines static masks ahead of processing and traverses wide profiles in row order
+with column accumulators. Those processing results inform our experiment. Our UCX transfer
+paths need their own measurements. [Lima2 ROI benchmark discussion](https://gitlab.esrf.fr/limagroup/lima2/-/issues/452#note_578812)
 
 ## 4. How detectors and cameras map
 
@@ -126,8 +207,16 @@ image stream.
    packed pixel formats and raw events all need them.
 2. Interleaved and mosaic layouts in 0.1 through the pack callback, or planar layouts only at
    first. Recommended: planar is the zero-copy path, packing covers the rest.
-3. The send mechanism for rows: IOV or the generic datatype. A measurement at a few rectangle
-   sizes on this UCX decides it, and whether rendezvous stays zero-copy with IOV.
+3. The send mechanism for rows. Compare reusable IOV layouts, the generic datatype and
+   explicit packing, following [Fixed ROIs and memory traffic](#fixed-rois-and-memory-traffic).
+   Measure wide and narrow rectangles of equal area, segment counts and subscriber counts,
+   including identical and overlapping selections. Keep a full-frame saver active and use
+   source rings large enough to expose memory pressure. Compare full-frame delivery followed
+   by a consumer crop. Record setup cost separately from steady-state throughput, CPU use and
+   memory traffic where measurable. Verify the received bytes, the actual UCX protocol and
+   copying behaviour, GPU support, source-buffer hold times and acquisition and saver
+   throughput before choosing. Include a slow or stalled optional ROI consumer, check the
+   number of source slots it retains, and compare bounded staging with direct sends.
 4. Arrays whose first axis varies, of structured elements, in 0.1. Recommended: in 0.1; it lets
    decoded events be described rather than sent as bytes.
 5. Pullers that never lose frames (`TODO(pull-loss)`) in 0.1. Recommended: in 0.1; event data
@@ -140,7 +229,7 @@ image stream.
 | 1 | Adapt the Basler plugin (markers, `begin`) and rerun its end-to-end test | ½ day |
 | 2 | Start fence: the count of ready every sessions; Basler's `startAcq` waits on it | ½–1 day |
 | 2b | Lent ring: Basler grabs into registered memory through Pylon's buffer factory, with no copy for subscribers; video and live mode publish the camera's own pixel format | done |
-| 3 | Measure IOV against the generic datatype for rows and gathers | 1 day |
+| 3 | Benchmark reusable IOV layouts, generic packing and explicit packing under a full-frame saver load (choice 3) | 1 day |
 | 4 | Parts in the description, the slot and Frame; discovery in `UcxStream` | 2–3 days |
 | 5 | Varying first axis and structured elements (choice 4) | 1 day |
 | 6 | Selections and the grant: whole parts, bands, rectangles, colours, fields, records only | 3–4 days |
